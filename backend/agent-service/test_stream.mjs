@@ -23,8 +23,8 @@ const assert = (c, m) => { if (!c) throw new Error(`ASSERT FAILED: ${m}`); };
 const PORT = 18791;
 const proc = spawn("node", ["server.mjs"], {
   cwd: new URL(".", import.meta.url).pathname,
-  env: { ...process.env, PORT: String(PORT), GIGPILOT_DATA_DIR: mkdtempSync(join(tmpdir(), "gp-stream-")),
-         GIGPILOT_VAULT_KEY: randomBytes(32).toString("hex") },
+  env: { ...process.env, PORT: String(PORT), HYGGE_DATA_DIR: mkdtempSync(join(tmpdir(), "gp-stream-")),
+         HYGGE_VAULT_KEY: randomBytes(32).toString("hex") },
   stdio: "pipe",
 });
 delete process.env.MUSE_LLM_API_KEY;

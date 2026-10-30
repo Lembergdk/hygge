@@ -25,8 +25,8 @@ const assert = (cond, msg) => { if (!cond) throw new Error(`ASSERT FAILED: ${msg
 
 const proc = spawn("node", ["server.mjs"], {
   cwd: new URL(".", import.meta.url).pathname,
-  env: { ...process.env, PORT: String(PORT), GIGPILOT_DATA_DIR: DATA,
-         GIGPILOT_VAULT_KEY: randomBytes(32).toString("hex"), GIGPILOT_BROWSER: "simulated" },
+  env: { ...process.env, PORT: String(PORT), HYGGE_DATA_DIR: DATA,
+         HYGGE_VAULT_KEY: randomBytes(32).toString("hex"), HYGGE_BROWSER: "simulated" },
   stdio: "pipe",
 });
 

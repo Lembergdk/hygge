@@ -1,6 +1,6 @@
 // Opt-in LIVE check against Cloudflare Browser Run (real isolated Chrome).
 // Not part of the offline suite. Run via: ./run-live-test.sh
-// Requires env: CF_ACCOUNT_ID, CF_API_TOKEN, GIGPILOT_BROWSER=cloudflare,
+// Requires env: CF_ACCOUNT_ID, CF_API_TOKEN, HYGGE_BROWSER=cloudflare,
 // and the playwright-core package.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -19,8 +19,8 @@ async function call(method, path, body) {
 
 const proc = spawn("node", ["server.mjs"], {
   cwd: new URL(".", import.meta.url).pathname,
-  env: { ...process.env, PORT: String(PORT), GIGPILOT_BROWSER: "cloudflare",
-         GIGPILOT_VAULT_KEY: randomBytes(32).toString("hex") },
+  env: { ...process.env, PORT: String(PORT), HYGGE_BROWSER: "cloudflare",
+         HYGGE_VAULT_KEY: randomBytes(32).toString("hex") },
   stdio: "pipe",
 });
 proc.stderr.on("data", (d) => process.stderr.write(d));

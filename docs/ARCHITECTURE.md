@@ -44,7 +44,7 @@ Applications + calendar         Session manager (takeover)           or simulate
 - Production worker: **Cloudflare Browser Run** over CDP —
   `wss://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/browser-rendering/devtools/browser?keep_alive=600000`
   with a Bearer API token, driven via Playwright `connectOverCDP`
-  (`GIGPILOT_BROWSER=cloudflare`, needs `CF_ACCOUNT_ID`, `CF_API_TOKEN`,
+  (`HYGGE_BROWSER=cloudflare`, needs `CF_ACCOUNT_ID`, `CF_API_TOKEN`,
   `npm i playwright-core`). Each session is an isolated sandbox browser.
 - **Interactive**: the app renders the session snapshot (screenshot + element
   list) and can send actions (`click`, `type`, `navigate`) or flip
@@ -89,7 +89,7 @@ Per the product decision, logins are stored **server-side** so the agent can
 sign in unattended within approved tasks:
 
 - AES-256-GCM at rest, random nonce per credential, domain+username as
-  authenticated data. Master key from `GIGPILOT_VAULT_KEY` — in production
+  authenticated data. Master key from `HYGGE_VAULT_KEY` — in production
   this must come from a KMS/HSM or secret manager, not an env file on disk.
 - Secrets leave the vault only inside `vault.use()`, called by the browser
   worker to fill a login form. No endpoint returns a secret; the app holds
@@ -98,7 +98,7 @@ sign in unattended within approved tasks:
 - The agent references `credential.secret` placeholders; substitution
   happens in the worker, so secrets never reach prompts, drafts, or logs.
 - Production hardening still required: user authn/z on every endpoint
-  (optional bearer token exists: `GIGPILOT_API_TOKEN`), per-user keys, KMS
+  (optional bearer token exists: `HYGGE_API_TOKEN`), per-user keys, KMS
   key rotation, an audit log of every vault use, and TLS in transit.
 
 ## Multi-tenancy & privacy invariants

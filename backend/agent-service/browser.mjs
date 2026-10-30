@@ -2,7 +2,7 @@
 //   createSession(url), snapshot(id), act(id, action), extract(id), closeSession(id)
 // All choosing-what-to-do-next lives in agent.mjs's mission loop.
 //
-// Modes (GIGPILOT_BROWSER):
+// Modes (HYGGE_BROWSER):
 // - "cloudflare": a real isolated Chrome per session via Cloudflare Browser
 //   Run's CDP endpoint, driven with Playwright/Puppeteer `connectOverCDP` /
 //   `connect`. Needs CF_ACCOUNT_ID + CF_API_TOKEN and the `playwright-core`
@@ -115,7 +115,7 @@ export class CloudflareBrowser {
     try {
       ({ chromium } = await import("playwright-core"));
     } catch {
-      throw new Error("Install playwright-core (npm i playwright-core) or use GIGPILOT_BROWSER=simulated");
+      throw new Error("Install playwright-core (npm i playwright-core) or use HYGGE_BROWSER=simulated");
     }
     const browser = await chromium.connectOverCDP(this.endpoint(), {
       headers: { Authorization: `Bearer ${process.env.CF_API_TOKEN}` },
@@ -188,5 +188,5 @@ export class CloudflareBrowser {
 }
 
 export function makeBrowser() {
-  return process.env.GIGPILOT_BROWSER === "cloudflare" ? new CloudflareBrowser() : new SimulatedBrowser();
+  return process.env.HYGGE_BROWSER === "cloudflare" ? new CloudflareBrowser() : new SimulatedBrowser();
 }

@@ -3,7 +3,7 @@
 // Security model (v1):
 // - Secrets are encrypted at rest with AES-256-GCM, a random 96-bit nonce per
 //   credential, and the domain+username bound as additional authenticated data.
-// - The master key comes from GIGPILOT_VAULT_KEY (64 hex chars). In production
+// - The master key comes from HYGGE_VAULT_KEY (64 hex chars). In production
 //   that key must live in a KMS/HSM or secret manager, never in the repo or DB.
 // - Secrets are decrypted ONLY inside `use()`, called by the browser worker to
 //   fill a login form. No API returns a secret; list/get expose metadata only.
@@ -16,7 +16,7 @@ import { dirname } from "node:path";
 export class Vault {
   constructor(file, masterKeyHex) {
     if (!masterKeyHex || !/^[0-9a-fA-F]{64}$/.test(masterKeyHex)) {
-      throw new Error("GIGPILOT_VAULT_KEY must be 64 hex chars (32 bytes). Generate: openssl rand -hex 32");
+      throw new Error("HYGGE_VAULT_KEY must be 64 hex chars (32 bytes). Generate: openssl rand -hex 32");
     }
     this.key = Buffer.from(masterKeyHex, "hex");
     this.file = file;

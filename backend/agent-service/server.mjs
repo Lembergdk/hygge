@@ -23,16 +23,16 @@ import { LLMClient, llmConfigured, MODELS } from "./llm.mjs";
 import { makeDecider, runMission, distillHints } from "./agent.mjs";
 import { onboardingMessage, onboardingMessageStream } from "./onboarding.mjs";
 
-const DATA_DIR = process.env.GIGPILOT_DATA_DIR ?? "./data";
+const DATA_DIR = process.env.HYGGE_DATA_DIR ?? "./data";
 mkdirSync(DATA_DIR, { recursive: true });
 const MEMORY_FILE = join(DATA_DIR, "memory.json");
 
-if (!process.env.GIGPILOT_VAULT_KEY) {
-  process.env.GIGPILOT_VAULT_KEY = Buffer.from(randomUUID() + randomUUID(), "utf8")
+if (!process.env.HYGGE_VAULT_KEY) {
+  process.env.HYGGE_VAULT_KEY = Buffer.from(randomUUID() + randomUUID(), "utf8")
     .subarray(0, 32).toString("hex");
-  console.warn("WARNING: GIGPILOT_VAULT_KEY unset — using an ephemeral dev key.");
+  console.warn("WARNING: HYGGE_VAULT_KEY unset — using an ephemeral dev key.");
 }
-const vault = new Vault(join(DATA_DIR, "vault.json"), process.env.GIGPILOT_VAULT_KEY);
+const vault = new Vault(join(DATA_DIR, "vault.json"), process.env.HYGGE_VAULT_KEY);
 const browser = makeBrowser();
 const decider = makeDecider(new LLMClient());
 const tasks = new Map();
@@ -147,7 +147,7 @@ async function proposeSites({ category = "petCare", locationLabel = "", interest
 }
 
 function checkToken(req) {
-  const token = process.env.GIGPILOT_API_TOKEN;
+  const token = process.env.HYGGE_API_TOKEN;
   return !token || req.headers.authorization === `Bearer ${token}`;
 }
 
@@ -243,8 +243,8 @@ const server = createServer(async (req, res) => {
 
 const PORT = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? "127.0.0.1";
-if (HOST !== "127.0.0.1" && HOST !== "localhost" && !process.env.GIGPILOT_API_TOKEN) {
-  console.error("Refusing to bind non-loopback without GIGPILOT_API_TOKEN set (the vault API would be LAN-exposed).");
+if (HOST !== "127.0.0.1" && HOST !== "localhost" && !process.env.HYGGE_API_TOKEN) {
+  console.error("Refusing to bind non-loopback without HYGGE_API_TOKEN set (the vault API would be LAN-exposed).");
   process.exit(1);
 }
 server.listen(PORT, HOST, () =>

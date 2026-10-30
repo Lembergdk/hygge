@@ -32,9 +32,9 @@ async function call(method, path, body, timeoutMs = 150000) {
 
 const proc = spawn("node", ["server.mjs"], {
   cwd: new URL(".", import.meta.url).pathname,
-  env: { ...process.env, PORT: String(PORT), GIGPILOT_BROWSER: "cloudflare",
-         GIGPILOT_DATA_DIR: mkdtempSync(join(tmpdir(), "hygge-live-")),
-         GIGPILOT_VAULT_KEY: randomBytes(32).toString("hex") },
+  env: { ...process.env, PORT: String(PORT), HYGGE_BROWSER: "cloudflare",
+         HYGGE_DATA_DIR: mkdtempSync(join(tmpdir(), "hygge-live-")),
+         HYGGE_VAULT_KEY: randomBytes(32).toString("hex") },
   stdio: "pipe",
 });
 proc.stderr.on("data", (d) => process.stderr.write(d));

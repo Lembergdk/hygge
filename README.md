@@ -31,7 +31,7 @@ decider runs the same loop offline.
 ```bash
 cd backend/agent-service
 node test_server.mjs                                    # integration checks
-GIGPILOT_VAULT_KEY=$(openssl rand -hex 32) node server.mjs   # http://127.0.0.1:8787
+HYGGE_VAULT_KEY=$(openssl rand -hex 32) node server.mjs   # http://127.0.0.1:8787
 ```
 
 Real browsing via Cloudflare Browser Run (isolated Chrome per session).
@@ -45,7 +45,7 @@ npm run test:live    # opens a real Browser Run session on example.com
 npm run start:live   # service with the live browser worker
 ```
 
-Anywhere else, set `GIGPILOT_BROWSER=cloudflare CF_ACCOUNT_ID=… CF_API_TOKEN=…`
+Anywhere else, set `HYGGE_BROWSER=cloudflare CF_ACCOUNT_ID=… CF_API_TOKEN=…`
 instead.
 
 Without those, the service uses a deterministic simulated browser so the whole

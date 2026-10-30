@@ -15,7 +15,7 @@ if [ -z "${CF_ACCOUNT_ID:-}" ]; then
   export CF_ACCOUNT_ID
 fi
 if VAULT_KEY=$(security find-generic-password -s "Hygge Vault Key" -w 2>/dev/null); then
-  export GIGPILOT_VAULT_KEY="$VAULT_KEY"
+  export HYGGE_VAULT_KEY="$VAULT_KEY"
 fi
 # Optional: Meta Model API key (dev.meta.ai) for live muse-spark-1.3 / muse-wonder-1.0
 if LLM_KEY=$(security find-generic-password -s "Muse Meta Model API Key" -w 2>/dev/null) || \
@@ -27,13 +27,13 @@ fi
 # Agent service settings. The server refuses non-loopback without a token.
 if [ "${LAN:-}" = "1" ]; then
   export HOST=0.0.0.0
-  if [ -z "${GIGPILOT_API_TOKEN:-}" ]; then
-    GIGPILOT_API_TOKEN=$(openssl rand -hex 16); export GIGPILOT_API_TOKEN
+  if [ -z "${HYGGE_API_TOKEN:-}" ]; then
+    HYGGE_API_TOKEN=$(openssl rand -hex 16); export HYGGE_API_TOKEN
   fi
   IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "<this-mac-ip>")
   echo "LAN mode: in the Hygge app (server icon) set Base URL to http://$IP:8787"
-  echo "LAN mode: API token to paste: $GIGPILOT_API_TOKEN"
+  echo "LAN mode: API token to paste: $HYGGE_API_TOKEN"
 fi
-export GIGPILOT_BROWSER=cloudflare
+export HYGGE_BROWSER=cloudflare
 
 exec node server.mjs
