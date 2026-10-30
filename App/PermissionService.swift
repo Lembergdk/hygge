@@ -1,0 +1,75 @@
+import CoreLocation
+import EventKit
+import Foundation
+import Observation
+import UIKit
+import UserNotifications
+
+/// The three permissions onboarding asks for, each with a concrete reason the
+/// chat explains before the system prompt appears. All are optional; the app
+/// degrades clearly when declined (no booking / no nearby ranking / no pings).
+enum PermissionService {
+    static func requestCalendar() async -> Bool {
+        (try? await EKEventStore().requestFullAccessToEvents()) ?? false
+    }
+
+    static func requestNotifications() async -> Bool {
+        let center = UNUserNotificationCenter.current()
+        let granted = (try? await center.requestAuthorization(options: [.alert, .badge, .sound])) ?? false
+        if granted {
+            await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
+        }
+        return granted
+    }
+}
+
+@Observable
+final class LocationService: NSObject, CLLocationManagerDelegate {
+    var localityLabel: String?
+    var denied = false
+
+    private let manager = CLLocationManager()
+    private var continuation: CheckedContinuation<String?, Never>?
+
+    override init() {
+        super.init()
+        manager.delegate = self
+    }
+
+    /// Asks for when-in-use permission and resolves the town/city name, which
+    /// is all the profile needs. Returns nil when denied or unavailable.
+    func requestLocality() async -> String? {
+        if let localityLabel { return localityLabel }
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            manager.requestWhenInUseAuthorization()
+            manager.requestLocation()
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.first else { return finish(nil) }
+        CLGeocoder().reverseGeocodeLocation(location) { [weak self] placemarks, _ in
+            let label = placemarks?.first.map { [$0.locality, $0.administrativeArea].compactMap { $0 }.joined(separator: ", ") }
+            self?.localityLabel = label
+            self?.finish(label)
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        denied = true
+        finish(nil)
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
+            denied = true
+            finish(nil)
+        }
+    }
+
+    private func finish(_ label: String?) {
+        continuation?.resume(returning: label)
+        continuation = nil
+    }
+}

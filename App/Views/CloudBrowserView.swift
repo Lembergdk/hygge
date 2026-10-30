@@ -1,0 +1,95 @@
+import SwiftUI
+
+/// Interactive view of a server-side cloud browser session (Cloudflare Browser
+/// Run / Playwright worker via the agent service). You can watch the agent,
+/// tap elements yourself, type, and take over or hand back control. When the
+/// service is unreachable this shows a clearly labelled offline preview.
+struct CloudBrowserView: View {
+    @Environment(AppStore.self) private var store
+    let urlString: String
+    @State private var snapshot: BrowserSessionSnapshot?
+    @State private var offline = false
+    @State private var typeText = ""
+    @State private var busy = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            statusBanner
+            if let snapshot {
+                sessionBody(snapshot)
+            } else {
+                ProgressView("Starting cloud browser session…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .task { await start() }
+    }
+
+    private var statusBanner: some View {
+        Text(offline
+             ? "Agent service unreachable — offline preview only. Start it: cd backend/agent-service && node server.mjs"
+             : "Live cloud browser session. Logins use vault credentials inside the worker; CAPTCHA/2FA pauses for you here.")
+            .font(.footnote)
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background((offline ? Color.orange : Color.green).opacity(0.2))
+    }
+
+    private func sessionBody(_ snapshot: BrowserSessionSnapshot) -> some View {
+        VStack(spacing: 8) {
+            Text(snapshot.currentURLString).font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let base64 = snapshot.screenshotBase64, let data = Data(base64Encoded: base64),
+               let image = UIImage(data: data) {
+                Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 320)
+            }
+            Text(snapshot.humanControlled ? "You are driving this session." : "The agent is driving. Take over any time.")
+                .font(.footnote).foregroundStyle(.secondary)
+            List {
+                Section("Page elements — tap to act") {
+                    ForEach(snapshot.elements) { element in
+                        Button {
+                            Task { await act(action: element.kind.rawValue, target: element.label, value: typeText.isEmpty ? nil : typeText) }
+                        } label: {
+                            Label(element.label, systemImage: element.kind == .type ? "keyboard" : "hand.tap")
+                        }
+                    }
+                }
+            }
+            HStack {
+                TextField("Text to type", text: $typeText)
+                    .textFieldStyle(.roundedBorder)
+                Button(snapshot.humanControlled ? "Hand back to agent" : "Take over") {
+                    Task { await act(action: "setHumanControl", target: nil, value: snapshot.humanControlled ? "false" : "true") }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+            }
+            .padding(8)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private func start() async {
+        if let live = try? await store.backend.createSession(url: urlString) {
+            snapshot = live
+        } else {
+            offline = true
+            snapshot = BrowserSessionSnapshot(
+                sessionID: "offline", currentURLString: urlString, title: "Offline preview",
+                elements: [PageElement(label: "Log in / Sign in", kind: .click),
+                           PageElement(label: "Search field", kind: .type),
+                           PageElement(label: "First listing card", kind: .click)],
+                humanControlled: true)
+        }
+    }
+
+    private func act(action: String, target: String?, value: String?) async {
+        guard let snapshot, !offline else { return }
+        busy = true
+        defer { busy = false }
+        if let next = try? await store.backend.act(sessionID: snapshot.sessionID, action: action, target: target, value: value) {
+            self.snapshot = next
+        }
+    }
+}

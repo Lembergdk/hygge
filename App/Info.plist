@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged with generated values. Allows plain-HTTP to the agent service
+	     on the local Wi-Fi during development (LAN dev mode) only. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Hygge connects to your agent service on your local network so the agent can chat with you and browse sites on your behalf.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+</dict>
+</plist>
