@@ -56,7 +56,7 @@ Still to build: deduped click-through extraction into feed items (the feed still
 
 ## Pricing
 
-Free until Hygge makes you $100 in a month — then Plus at $9.99/month or $99/year for unlimited earnings. The goal is never a cut of every paycheck: it's becoming embedded in your personal finances, where partnerships, in-house services, member perks, and sponsored opportunities do the rest.
+Free up to $100 earned per month — then Plus at $9.99/month or $99/year for unlimited earnings. The goal is never a cut of every paycheck: it's becoming a trusted ally in your personal finances, where partnerships, in-house services, member perks, and sponsored opportunities do the rest.
 
 ## Tech
 
