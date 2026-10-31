@@ -146,7 +146,7 @@ struct FloatingFlame: View {
             ZStack(alignment: .topTrailing) {
                 // The flame is a character, not a button in a disc (mocks):
                 // big, sticker-like, soft shadow only.
-                AnimatedFlame(animation: animation, size: 62)
+                AnimatedFlame(animation: animation, size: 81)
                     .shadow(color: Color.black.opacity(0.18), radius: 10, y: 5)
                     .offset(y: bounceOffset(t))
                     .scaleEffect(pulseScale(t))
@@ -159,7 +159,7 @@ struct FloatingFlame: View {
                 }
             }
         }
-        .frame(width: 72, height: 92)
+        .frame(width: 94, height: 120)
         .opacity(dimmed ? 0.35 : 1)
         .animation(.easeInOut(duration: 0.25), value: dimmed)
         .contentShape(Circle())
