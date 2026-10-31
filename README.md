@@ -45,12 +45,12 @@ Hygge watches all of it for you, and only asks for your time when there's someth
 
 - **Built during the event.** This repository was created Oct 30, 2026, and every commit falls inside the Oct 26 – Nov 4 event window.
 - **Meta models doing real work.** The cloud-browser agent runs on Meta's Muse models, routed per phase: Spark 1.3 for routine steps and extraction, Wonder 1.0 for planning, deviations, and drafting.
-- **Verified live, not claimed.** On a cold visit to Remote OK, the agent chose its own actions step by step (Spark 1.3, escalating to Wonder 1.0 after a failed click), extracted real job listings, decided it was done, and only then distilled site-memory hints. The mission loop (observe → decide → act) is tested on both stacks, including a page-variant test no canned script could pass.
+- **Verified live, not claimed.** On a cold visit to Remote OK (run on the original local service, since retired — the cloud port has since reached parity), the agent chose its own actions step by step (Spark 1.3, escalating to Wonder 1.0 after a failed click), extracted real job listings, decided it was done, and only then distilled site-memory hints. The mission loop (observe → decide → act) is tested on both stacks, including a page-variant test no canned script could pass.
 - **Rules the app never breaks.** It never invents data: when required information is unknown, a signup mission asks you instead of guessing. Nothing runs without your approval. Site passwords live encrypted in the server-side vault and are filled into login forms by the browser worker — never shown in the app, logs, or prompts. CAPTCHA, 2FA, and ID checks hand over to a human — never bypassed.
 
 ## What it can do today
 
-Conversational onboarding with email, location, calendar, and notification permissions; site proposals with per-site approval and account tracking; signup missions that ask instead of inventing; matching; any-URL sites; goal-based missions with edit-and-approve; the LLM mission loop; live discoveries entering the feed as real items; site-memory distillation; encrypted credential vault with redacted injection; interactive cloud-browser view with takeover; applications pipeline; calendar booking; calendar availability checks; client communication drafted in the approval flow. Cloudflare Workers backend: per-user Durable Object sandboxes with encrypted vault and site memory — staging E2E green, production environment provisioned.
+Conversational onboarding with email, location, calendar, and notification permissions; site proposals with per-site approval and account tracking; signup missions that ask instead of inventing; matching; any-URL sites; goal-based missions with edit-and-approve; the LLM mission loop; live discoveries entering the feed as real items; site-memory distillation; encrypted credential vault with redacted injection; interactive cloud-browser view with takeover; applications pipeline; calendar booking; calendar availability checks; client communication drafted in the approval flow. Cloudflare Workers backend: per-user Durable Object sandboxes with encrypted vault and site memory — staging and production both live (api-staging.usehygge.app, api.usehygge.app). Release builds require the cloud backend; Debug defaults to staging, Release to production.
 
 Still to build: deduped click-through extraction into feed items (the feed still ships labelled demo items). See `docs/ARCHITECTURE.md`.
 
@@ -61,10 +61,10 @@ Free until Hygge makes you $100 in a month — then Plus at $9.99/month or $99/y
 ## Tech
 
 - **iOS app:** SwiftUI, iOS 17+
-- **Backend:** Node agent service — cloud browser, site memory, credential vault
+- **Backend:** Cloudflare Workers (TypeScript) — cloud browser, site memory, credential vault; per-user Durable Objects, D1, R2 — staging `api-staging.usehygge.app`, production `api.usehygge.app`
 - **Browser:** Cloudflare Browser Run (isolated Chrome per session), with a deterministic simulated browser so the whole product works offline in development
-- **Backend (Cloudflare):** Workers + per-user Durable Objects, D1, R2 — staging `api-staging.usehygge.app`, production `api.usehygge.app`
-- **Tests:** `swift test` (HyggeCoreTests) and backend integration checks
+- **Tests:** `swift test` (HyggeCoreTests); backend `npm test` + `tsc --noEmit`
+- **Delivery:** CI runs core + backend tests on every push and pull request, deploys staging from main after tests pass (with a /health check), and deploys production only on manual workflow dispatch (also health-checked).
 
 ## Run it
 
@@ -74,24 +74,17 @@ Free until Hygge makes you $100 in a month — then Plus at $9.99/month or $99/y
 xcodebuild -project Hygge.xcodeproj -scheme Hygge -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
 ```
 
-**Agent service** (cloud browser, site memory, credential vault)
+The browser is driven by an LLM agent, one per user: **muse-spark-1.3** for routine steps/extraction, **muse-wonder-1.0** for planning, deviations, and drafting. Point it at a live endpoint with the `HYGGE_LLM_*` Worker settings; without a key a labelled simulated decider runs the same loop.
 
-```bash
-cd backend/agent-service
-node test_server.mjs                                    # integration checks
-HYGGE_VAULT_KEY=$(openssl rand -hex 32) node server.mjs   # http://127.0.0.1:8787
-```
+**Agent service** (cloud browser, site memory, credential vault) — lives in `backend/cloudflare` (Worker + per-user sandbox). Staging: https://api-staging.usehygge.app, production: https://api.usehygge.app. See `backend/cloudflare/README.md`. The original local Node service was retired once the cloud port reached parity (in git history).
 
-Real browsing via Cloudflare Browser Run — set `HYGGE_BROWSER=cloudflare`, `CF_ACCOUNT_ID`, and `CF_API_TOKEN`. Or point the agent at a live LLM endpoint with `MUSE_LLM_BASE_URL` + `MUSE_LLM_API_KEY`; until then a labelled simulated decider runs the same loop offline.
-
-Cloudflare Workers backend: see `backend/cloudflare/README.md` (staging `api-staging.usehygge.app`, production `api.usehygge.app`).
+Release builds require the cloud backend (`HYGGE_REQUIRE_CLOUD`); Debug builds default to staging, Release builds to production, and a developer override still wins.
 
 **Core logic tests** — `swift test`
 
 ## Repo map
 
 - `App/` — iOS app (SwiftUI views, flame assets)
-- `backend/agent-service/` — cloud browser agent, site memory, credential vault
 - `backend/cloudflare/` — Cloudflare Workers backend (staging + production)
 - `Tests/` — HyggeCoreTests
 - `docs/` — architecture notes and design atoms
