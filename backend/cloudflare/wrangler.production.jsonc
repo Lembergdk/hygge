@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Production environment. PROVISIONED ONLY AT THE STEP-5 GATE.
+  // Separate config so nothing shares state with staging.
+  "name": "hygge-api-production",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-31",
+  "compatibility_flags": ["nodejs_compat"],
+  "upload_source_maps": true,
+  "observability": { "enabled": true },
+  "routes": [
+    { "pattern": "api.usehygge.app", "custom_domain": true }
+  ],
+  "containers": [
+    { "class_name": "UserSandbox", "scheduling_policy": "durable_object" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "UserSandbox", "name": "USER_SANDBOX" }
+    ]
+  },
+  "exports": {
+    "UserSandbox": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "vars": {
+    "HYGGE_ENV": "production",
+    "HYGGE_LLM_BASE_URL": "https://api.meta.ai/v1",
+    "HYGGE_LLM_MODEL_FAST": "muse-spark-1.3",
+    "HYGGE_LLM_MODEL_STRONG": "muse-wonder-1.0"
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "hygge-production", "database_id": "REPLACE_AFTER_PROVISION" }
+  ],
+  "browser": { "binding": "BROWSER" }
+}
