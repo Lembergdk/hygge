@@ -55,19 +55,22 @@ export interface VaultBlob {
   ciphertext: string;
 }
 
-export async function seal(dek: CryptoKey, plaintext: string): Promise<VaultBlob> {
+/// Seal a secret. The domain+username are bound as additional
+/// authenticated data, so a ciphertext cannot be replayed against
+/// a different site or account.
+export async function seal(dek: CryptoKey, plaintext: string, aad: string): Promise<VaultBlob> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
+    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(aad) },
     dek,
     new TextEncoder().encode(plaintext),
   );
   return { iv: b64(iv), ciphertext: b64(ct) };
 }
 
-export async function open(dek: CryptoKey, blob: VaultBlob): Promise<string> {
+export async function open(dek: CryptoKey, blob: VaultBlob, aad: string): Promise<string> {
   const pt = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: unb64(blob.iv) },
+    { name: "AES-GCM", iv: unb64(blob.iv), additionalData: new TextEncoder().encode(aad) },
     dek,
     unb64(blob.ciphertext),
   );

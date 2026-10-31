@@ -1,7 +1,7 @@
-import type { Env } from "./env";
-import { json, sandboxFor, userIdFromRequest } from "./env";
+import type { Env } from "./env.ts";
+import { json, sandboxFor, userIdFromRequest } from "./env.ts";
 
-export { UserSandbox } from "./user-sandbox";
+export { UserSandbox } from "./user-sandbox.ts";
 
 const USER_ROUTES = [
   "/credentials",
@@ -31,6 +31,8 @@ export default {
 
     // Everything user-scoped happens inside that user's sandbox.
     const stub = sandboxFor(env, userId);
-    return stub.fetch(request);
+    const forwarded = new Request(request);
+    forwarded.headers.set("x-hygge-user-id", userId);
+    return stub.fetch(forwarded);
   },
 };

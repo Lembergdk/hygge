@@ -7,7 +7,7 @@
     "dev": "wrangler dev -c wrangler.staging.jsonc",
     "deploy:staging": "wrangler deploy -c wrangler.staging.jsonc",
     "deploy:production": "wrangler deploy -c wrangler.production.jsonc",
-    "test": "node --test test/"
+    "test": "node --experimental-strip-types --test \"test/*.mts\""
   },
   "dependencies": {
     "@cloudflare/puppeteer": "latest"
