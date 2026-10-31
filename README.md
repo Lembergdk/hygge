@@ -12,7 +12,7 @@
 
 ## The problem
 
-Finding work is itself unpaid work. Gig opportunities are scattered across dozens of sites, boards, subreddits, and Facebook groups, and nobody has time to watch them all — and even when you find work, managing it is a second unpaid job: juggling accounts, checking your calendar, confirming bookings, and keeping up communication before and after every gig. And underneath it sits a bigger worry: being at the mercy of the next layoff round instead of having control over your own income.
+Finding work is itself unpaid work. Gig opportunities are scattered across dozens of sites, boards, subreddits, and Facebook groups, and nobody has time to watch them all — and even when you find work, managing it is a second unpaid job: juggling accounts, checking your calendar, confirming bookings, and keeping up communication before and after every gig.
 
 Hygge watches all of it for you, and only asks for your time when there's something worth deciding.
 
