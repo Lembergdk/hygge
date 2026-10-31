@@ -29,6 +29,7 @@ private struct FeedEntry: Identifiable {
 struct OnboardingView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var conversation = OnboardingConversation()
     @State private var entries: [FeedEntry] = []
     @State private var input = ""
@@ -105,28 +106,59 @@ struct OnboardingView: View {
         }
     }
 
+    @ViewBuilder
     private var header: some View {
-        HStack(alignment: .center) {
-            if conversation.canGoBack {
-                Button { goBackOneQuestion() } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: "chevron.backward").font(.system(size: 14, weight: .semibold))
-                        Text("Back").font(.body)
-                    }
-                    .foregroundStyle(GPTheme.amber)
+        // One row at standard sizes; stacked at accessibility sizes so
+        // Back, the offline note, and the counter never collide.
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .center) {
+                    backButton
+                    Spacer()
+                    questionCounter
                 }
-                .accessibilityLabel("Back one question")
+                offlineNote
             }
-            Spacer()
-            if serviceOnline == false {
-                Text("Offline — simple mode").font(.caption).foregroundStyle(GPTheme.secondary)
+            .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 10)
+        } else {
+            HStack(alignment: .center) {
+                backButton
+                Spacer()
+                offlineNote
+                Spacer()
+                questionCounter
             }
-            Spacer()
-            if let q = questionNumber {
-                Text("\(q) of 3").font(.body).foregroundStyle(GPTheme.secondary)
-            }
+            .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 10)
         }
-        .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 10)
+    }
+
+    @ViewBuilder
+    private var backButton: some View {
+        if conversation.canGoBack {
+            Button { goBackOneQuestion() } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "chevron.backward").font(.system(size: 14, weight: .semibold))
+                    Text("Back").font(.body).lineLimit(1)
+                }
+                .foregroundStyle(GPTheme.amber)
+            }
+            .accessibilityLabel("Back one question")
+        }
+    }
+
+    @ViewBuilder
+    private var offlineNote: some View {
+        if serviceOnline == false {
+            Text("Offline — simple mode").font(.caption).foregroundStyle(GPTheme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var questionCounter: some View {
+        if let q = questionNumber {
+            Text("\(q) of 3").font(.body).foregroundStyle(GPTheme.secondary).lineLimit(1)
+        }
     }
 
     private var feed: some View {
@@ -239,7 +271,11 @@ struct OnboardingView: View {
                     Label("Picked for you from what you've said", systemImage: "wand.and.rays")
                         .font(.caption.weight(.medium)).foregroundStyle(GPTheme.amber)
                 }
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                // Two columns at standard sizes; one full-width column at
+                // accessibility sizes so tile labels never truncate.
+                LazyVGrid(columns: dynamicTypeSize.isAccessibilitySize
+                          ? [GridItem(.flexible())]
+                          : [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                     ForEach(categoryOptions) { category in
                         enjoyTile(category)
                     }
@@ -431,6 +467,9 @@ struct OnboardingView: View {
             HStack(spacing: 5) {
                 if selected { Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)) }
                 Text(label).font(.subheadline.weight(selected ? .semibold : .regular))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(selected ? GPTheme.teal : GPTheme.paper, in: Capsule())
@@ -504,7 +543,8 @@ struct OnboardingView: View {
                 Text(category.tileLabel)
                     .font(.body.weight(selected ? .semibold : .regular))
                     .foregroundStyle(selected ? GPTheme.amber : GPTheme.ink)
-                    .lineLimit(1).minimumScaleFactor(0.9)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             }
