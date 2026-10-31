@@ -11,6 +11,7 @@ struct CloudBrowserView: View {
     @State private var offline = false
     @State private var typeText = ""
     @State private var busy = false
+    @State private var countedLiveSession = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,6 +24,9 @@ struct CloudBrowserView: View {
             }
         }
         .task { await start() }
+        .onDisappear {
+            if countedLiveSession { store.noteBrowserSessionClosed(); countedLiveSession = false }
+        }
     }
 
     private var statusBanner: some View {
@@ -43,8 +47,14 @@ struct CloudBrowserView: View {
                let image = UIImage(data: data) {
                 Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 320)
             }
-            Text(snapshot.humanControlled ? "You are driving this session." : "The agent is driving. Take over any time.")
-                .font(.footnote).foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                if !snapshot.humanControlled {
+                    AnimatedFlame(animation: .laptop, size: 40)
+                }
+                Text(snapshot.humanControlled ? "You are driving this session." : "Hygge is driving. Take over any time.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
             List {
                 Section("Page elements — tap to act") {
                     ForEach(snapshot.elements) { element in
@@ -73,6 +83,8 @@ struct CloudBrowserView: View {
     private func start() async {
         if let live = try? await store.backend.createSession(url: urlString) {
             snapshot = live
+            countedLiveSession = true
+            store.noteBrowserSessionOpened()
         } else {
             offline = true
             snapshot = BrowserSessionSnapshot(

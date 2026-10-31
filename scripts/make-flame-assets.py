@@ -8,6 +8,8 @@
 #   App/Assets.xcassets/FlameCharacter.imageset/flame-character.png
 #   App/Assets.xcassets/AppIcon.appiconset/icon-1024.png
 #   App/FlameWalk.png                         (APNG, 480x600, 40ms/frame)
+#   App/FlameLaptop.png                       (APNG from anim-laptop, working)
+#   App/FlameNotify.png                       (APNG from anim-notification)
 #   docs/design/flame-character-source.png    (the approved left reference)
 #
 # Run: python3 scripts/make-flame-assets.py [source-dir]
@@ -57,16 +59,16 @@ def write_static_and_icon() -> None:
     print(f"icon:   {icon_path} ({os.path.getsize(icon_path) // 1024} KB)")
 
 
-def write_animation() -> None:
-    files = sorted(name for name in os.listdir(ANIM_DIR) if name.endswith(".png"))
-    if len(files) != 48:
-        raise SystemExit(f"expected 48 left-facing frames, found {len(files)}")
+def write_animation(anim_dir: str, expected: int, out_name: str) -> None:
+    files = sorted(name for name in os.listdir(anim_dir) if name.endswith(".png"))
+    if len(files) != expected:
+        raise SystemExit(f"expected {expected} frames in {anim_dir}, found {len(files)}")
     frames = []
     for name in files:
-        frame = Image.open(os.path.join(ANIM_DIR, name)).convert("RGBA")
+        frame = Image.open(os.path.join(anim_dir, name)).convert("RGBA")
         frames.append(frame.resize((480, 600), Image.LANCZOS))
 
-    out = os.path.join(ROOT, "App", "FlameWalk.png")
+    out = os.path.join(ROOT, "App", out_name)
     frames[0].save(
         out,
         save_all=True,
@@ -80,4 +82,6 @@ def write_animation() -> None:
 
 
 write_static_and_icon()
-write_animation()
+write_animation(ANIM_DIR, 48, "FlameWalk.png")
+write_animation(os.path.join(SRC, "anim-laptop"), 72, "FlameLaptop.png")
+write_animation(os.path.join(SRC, "anim-notification"), 60, "FlameNotify.png")

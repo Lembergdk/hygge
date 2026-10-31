@@ -67,31 +67,45 @@ struct FlameMark: View {
     }
 }
 
-/// The approved left-facing flame, walking. Frames decode once from the
-/// bundled APNG (48 frames, 1.92s loop — scripts/make-flame-assets.py).
-/// Reduce Motion and a backgrounded app both rest on the first frame.
+/// The approved left-facing flame's animated moods, all bundled APNGs
+/// (scripts/make-flame-assets.py): walking, working at the laptop
+/// (a browser session is active), and the notification wiggle.
+enum FlameAnimation: String {
+    case walk = "FlameWalk"
+    case laptop = "FlameLaptop"
+    case notify = "FlameNotify"
+
+    private static var cache: [FlameAnimation: [UIImage]] = [:]
+
+    var frames: [UIImage] {
+        if let cached = Self.cache[self] { return cached }
+        guard let url = Bundle.main.url(forResource: rawValue, withExtension: "png"),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return [] }
+        let count = CGImageSourceGetCount(source)
+        let decoded = (0..<count).compactMap { index in
+            CGImageSourceCreateImageAtIndex(source, index, nil).map { UIImage(cgImage: $0) }
+        }
+        Self.cache[self] = decoded
+        return decoded
+    }
+}
+
+/// Reduce Motion and a backgrounded app both rest on the static mark.
 struct AnimatedFlame: View {
+    var animation: FlameAnimation = .walk
     var size: CGFloat = 62
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
 
-    private static let frames: [UIImage] = {
-        guard let url = Bundle.main.url(forResource: "FlameWalk", withExtension: "png"),
-              let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return [] }
-        let count = CGImageSourceGetCount(source)
-        return (0..<count).compactMap { index in
-            CGImageSourceCreateImageAtIndex(source, index, nil).map { UIImage(cgImage: $0) }
-        }
-    }()
-
     var body: some View {
+        let frames = animation.frames
         Group {
-            if reduceMotion || Self.frames.isEmpty {
+            if reduceMotion || frames.isEmpty {
                 FlameMark(size: size)
             } else {
                 TimelineView(.animation(minimumInterval: 0.04, paused: scenePhase != .active)) { context in
-                    let index = Int(context.date.timeIntervalSinceReferenceDate / 0.04) % Self.frames.count
-                    Image(uiImage: Self.frames[index])
+                    let index = Int(context.date.timeIntervalSinceReferenceDate / 0.04) % frames.count
+                    Image(uiImage: frames[index])
                         .resizable()
                         .scaledToFit()
                         .frame(width: size, height: size * 1.25)
@@ -103,7 +117,7 @@ struct AnimatedFlame: View {
     }
 }
 
-enum FlameState { case asleep, needsYou(Int), celebrating, thinking }
+enum FlameState { case asleep, working, needsYou(Int), celebrating, thinking }
 
 struct FloatingFlame: View {
     var state: FlameState
@@ -114,7 +128,15 @@ struct FloatingFlame: View {
 
     private var isAnimating: Bool {
         if reduceMotion { return false }
-        switch state { case .needsYou, .thinking: return true; default: return false }
+        switch state { case .needsYou, .thinking, .working: return true; default: return false }
+    }
+
+    private var animation: FlameAnimation {
+        switch state {
+        case .working: return .laptop
+        case .needsYou: return .notify
+        default: return .walk
+        }
     }
 
     var body: some View {
@@ -124,7 +146,7 @@ struct FloatingFlame: View {
             ZStack(alignment: .topTrailing) {
                 // The flame is a character, not a button in a disc (mocks):
                 // big, sticker-like, soft shadow only.
-                AnimatedFlame(size: 62)
+                AnimatedFlame(animation: animation, size: 62)
                     .shadow(color: Color.black.opacity(0.18), radius: 10, y: 5)
                     .offset(y: bounceOffset(t))
                     .scaleEffect(pulseScale(t))
@@ -153,6 +175,7 @@ struct FloatingFlame: View {
         case .needsYou(let n): return "Talk to Hygge, \(n) thing\(n == 1 ? "" : "s") need you"
         case .celebrating: return "Talk to Hygge, something good just landed"
         case .thinking: return "Talk to Hygge, Hygge is working"
+        case .working: return "Talk to Hygge, Hygge is browsing for you right now"
         }
     }
 

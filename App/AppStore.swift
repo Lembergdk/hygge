@@ -91,6 +91,17 @@ final class AppStore {
 
     var pendingApprovalCount: Int { tasks.filter { $0.status == .awaitingApproval }.count }
 
+    /// Live agent work: missions running plus interactive browser
+    /// sessions. Drives the laptop flame — Hygge is at the keyboard.
+    private(set) var activeRunCount = 0
+    private(set) var liveBrowserSessionCount = 0
+    var isAgentWorking: Bool { activeRunCount + liveBrowserSessionCount > 0 }
+
+    func noteRunStarted() { activeRunCount += 1 }
+    func noteRunFinished() { activeRunCount = max(0, activeRunCount - 1) }
+    func noteBrowserSessionOpened() { liveBrowserSessionCount += 1 }
+    func noteBrowserSessionClosed() { liveBrowserSessionCount = max(0, liveBrowserSessionCount - 1) }
+
     var rankedOpportunities: [(Opportunity, MatchResult)] {
         MatchEngine.ranked(profile: profile,
                            opportunities: opportunities.filter { $0.status != .dismissed })
@@ -367,6 +378,8 @@ final class AppStore {
     func approveAndRun(taskID: UUID) async -> AgentTaskStatus? {
         guard !isPaused else { lastMessage = "Hygge is paused. Resume from your profile when you're ready."; return nil }
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return nil }
+        noteRunStarted()
+        defer { noteRunFinished() }
         var finalStatus: AgentTaskStatus?
         do {
             try tasks[index].approve()

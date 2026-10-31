@@ -115,7 +115,8 @@ struct HomeFeedView: View {
     }
 
     private var flameState: FlameState {
-        store.needsYouCount > 0 ? .needsYou(store.needsYouCount) : .asleep
+        if store.isAgentWorking { return .working }
+        return store.needsYouCount > 0 ? .needsYou(store.needsYouCount) : .asleep
     }
 
     // MARK: Header
