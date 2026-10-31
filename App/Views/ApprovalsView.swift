@@ -1,49 +1,5 @@
 import SwiftUI
 
-struct ApprovalsView: View {
-    @Environment(AppStore.self) private var store
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    Text("The browser agent drafts every mission first — goal, target site, and the exact text it may use. It then finds its own way around the live site. Nothing runs until you approve it here.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-                Section("Waiting for you (\(pending.count))") {
-                    if pending.isEmpty { Text("Nothing waiting. Draft a task from an opportunity or a site.").foregroundStyle(.secondary) }
-                    ForEach(pending) { task in
-                        NavigationLink { TaskDetailView(taskID: task.id) } label: { taskRow(task) }
-                    }
-                }
-                Section("Needs you (\(needsHuman.count))") {
-                    ForEach(needsHuman) { task in
-                        NavigationLink { TaskDetailView(taskID: task.id) } label: { taskRow(task) }
-                    }
-                }
-                Section("Finished (\(finished.count))") {
-                    ForEach(finished) { task in
-                        NavigationLink { TaskDetailView(taskID: task.id) } label: { taskRow(task) }
-                    }
-                }
-            }
-            .navigationTitle("Approvals")
-        }
-    }
-
-    private var pending: [AgentTask] { store.tasks.filter { $0.status == .awaitingApproval || $0.status == .approved } }
-    private var needsHuman: [AgentTask] { store.tasks.filter { $0.status == .needsHuman } }
-    private var finished: [AgentTask] { store.tasks.filter { [.succeeded, .failed, .rejected].contains($0.status) } }
-
-    private func taskRow(_ task: AgentTask) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(task.title).font(.headline)
-            Text("\(task.kind.label) • \(store.siteName(id: task.siteID)) (\(task.domain)) • \(task.status.rawValue)")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-}
-
 struct TaskDetailView: View {
     @Environment(AppStore.self) private var store
     let taskID: UUID
@@ -55,7 +11,7 @@ struct TaskDetailView: View {
     var body: some View {
         if let task {
             Form {
-                Section("Browser goal") {
+                Section("What Hygge will do") {
                     Text(task.goal)
                     Text(task.targetURLString).font(.caption).foregroundStyle(.secondary)
                     let hints = store.siteMemory.hints(domain: task.domain, kind: task.kind.memoryKind)
@@ -65,14 +21,14 @@ struct TaskDetailView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                     if let credentialID = task.credentialRefID,
                        let credential = store.credentialRefs.first(where: { $0.id == credentialID }) {
-                        Text("Login: vault credential \(credential.username) for \(credential.domain) — secret stays server-side.")
+                        Text("Your login for \(credential.domain) is saved safely — the password itself is never shown.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 Section("Draft — edit before approving") {
                     if task.draftedPayload.isEmpty { Text("No typed content in this task.").foregroundStyle(.secondary) }
                     ForEach(task.draftedPayload.keys.sorted(), id: \.self) { key in
-                        Text(key).font(.caption).foregroundStyle(.secondary)
+                        Text(humanLabel(key)).font(.caption).foregroundStyle(.secondary)
                         TextEditor(text: payloadBinding(taskID: task.id, key: key))
                             .frame(minHeight: 90)
                     }
@@ -85,7 +41,7 @@ struct TaskDetailView: View {
                                 get: { answers[question] ?? "" },
                                 set: { answers[question] = $0 }))
                         }
-                        Button("Send answers (mission goes back for approval)") {
+                        Button("Send answers") {
                             store.answerInformation(taskID: task.id, answers: answers)
                         }
                         .disabled(task.informationRequests.contains { (answers[$0] ?? "").isEmpty })
@@ -93,7 +49,7 @@ struct TaskDetailView: View {
                 }
                 if task.status == .awaitingApproval || task.status == .needsHuman {
                     Section {
-                        Button("Approve & run in cloud browser") {
+                        Button("Approve — go ahead") {
                             Task { await store.approveAndRun(taskID: task.id) }
                         }
                         .buttonStyle(.borderedProminent)
@@ -101,30 +57,57 @@ struct TaskDetailView: View {
                     }
                 }
                 Section {
-                    Button("Open this site in the cloud browser") { showBrowser = true }
+                    Button("Watch or take over in the browser") { showBrowser = true }
                 }
                 if !task.browserTrace.isEmpty {
-                    Section("Browser trace (distilled into site memory afterwards)") {
+                    Section("What happened") {
                         ForEach(Array(task.browserTrace.enumerated()), id: \.offset) { _, event in
-                            Text("\(event.succeeded ? "✓" : "✗") \(event.action.rawValue): \(event.target) — \(event.summary)")
+                            Text("\(event.succeeded ? "✓" : "✗") \(humanize(event.summary))")
                                 .font(.footnote)
                         }
                     }
                 }
-                Section("Log") {
-                    ForEach(task.log, id: \.self) { line in Text(line).font(.footnote) }
+                Section("Why Hygge did this") {
+                    ForEach(task.log, id: \.self) { line in Text(humanize(line)).font(.footnote) }
                 }
             }
             .navigationTitle(task.title)
             .sheet(isPresented: $showBrowser) {
                 NavigationStack {
                     CloudBrowserView(urlString: task.targetURLString)
-                        .navigationTitle("Cloud browser")
+                        .navigationTitle("Browser")
                 }
             }
         } else {
             ContentUnavailableView("Task no longer exists", systemImage: "tray")
         }
+    }
+
+    private func humanLabel(_ key: String) -> String {
+        switch key {
+        case "coverLetter": return "Your message"
+        case "profileBio": return "Profile text"
+        case "profileHeadline": return "Headline"
+        case "hourlyRate": return "Hourly rate"
+        case "skills": return "Skills"
+        case "searchTerms": return "What to look for"
+        case "displayName": return "Name"
+        case "email": return "Email"
+        case "eventTitle": return "Calendar title"
+        case "eventStartISO8601": return "When"
+        case "location": return "Where"
+        default: return key
+        }
+    }
+
+    /// Render internal log lines in human words; raw traces stay the audit source.
+    private func humanize(_ line: String) -> String {
+        line
+            .replacingOccurrences(of: "simulated local runner", with: "offline mode")
+            .replacingOccurrences(of: "Simulated mission complete. Connect the agent service for live LLM browsing.", with: "Finished in offline mode.")
+            .replacingOccurrences(of: "Mission on", with: "Working on")
+            .replacingOccurrences(of: "Credential injected from the server vault inside the browser worker (secret never shown to the app or model)", with: "Signed in with your saved login (password never shown)")
+            .replacingOccurrences(of: "mission actions completed", with: "all done")
     }
 
     private func payloadBinding(taskID: UUID, key: String) -> Binding<String> {

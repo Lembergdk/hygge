@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 180">
+  <title>Insight stat card</title>
+  <rect x="4" y="4" width="392" height="172" rx="28" fill="#FFFFFF" stroke="#2B2320" stroke-opacity="0.06"/>
+  <line x1="200" y1="40" x2="200" y2="140" stroke="#2B2320" stroke-opacity="0.08" stroke-width="2"/>
+  <text x="28" y="60" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="18" fill="#7A6A61">Earnings</text>
+  <text x="28" y="104" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="34" font-weight="700" fill="#2B2320">$1,240</text>
+  <text x="28" y="132" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="16" fill="#7A6A61">This year</text>
+  <text x="224" y="60" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="18" fill="#7A6A61">Time saved</text>
+  <text x="224" y="104" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="34" font-weight="700" fill="#2B2320">18h</text>
+  <text x="224" y="132" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="16" fill="#7A6A61">Past 30 days</text>
+</svg>

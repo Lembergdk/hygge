@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 96">
+  <title>Chat bubble, user</title>
+  <path d="M292 76 L300 92 L276 76 Z" fill="#E4EBDD"/>
+  <rect x="4" y="4" width="300" height="72" rx="24" fill="#E4EBDD"/>
+  <text x="28" y="50" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="19" fill="#2B2320">Yes, book it.</text>
+</svg>

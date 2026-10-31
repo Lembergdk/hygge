@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240">
+  <title>Hygge flame asleep</title>
+  <path d="M120 12 C128 48 168 66 182 104 C196 142 186 190 142 210 C128 216 112 216 98 210 C54 190 44 142 58 104 C66 80 80 72 90 84 C92 62 102 36 120 12 Z" fill="#FF6B57"/>
+  <path d="M120 92 C128 118 150 128 158 150 C166 172 156 196 128 204 C100 196 90 172 98 150 C104 132 112 126 118 136 C117 122 118 106 120 92 Z" fill="#FFC53D"/>
+  <path d="M103 158 Q111 148 119 158" stroke="#2B2320" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M131 158 Q139 148 147 158" stroke="#2B2320" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M114 174 Q125 180 136 174" stroke="#2B2320" stroke-width="4" fill="none" stroke-linecap="round"/>
+</svg>

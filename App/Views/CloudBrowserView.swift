@@ -18,7 +18,7 @@ struct CloudBrowserView: View {
             if let snapshot {
                 sessionBody(snapshot)
             } else {
-                ProgressView("Starting cloud browser session…")
+                ProgressView("Opening the page for you…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -27,8 +27,8 @@ struct CloudBrowserView: View {
 
     private var statusBanner: some View {
         Text(offline
-             ? "Agent service unreachable — offline preview only. Start it: cd backend/agent-service && node server.mjs"
-             : "Live cloud browser session. Logins use vault credentials inside the worker; CAPTCHA/2FA pauses for you here.")
+             ? "Live view is not available right now — this is a simple preview."
+             : "You are watching Hygge browse. If a login check appears, it pauses here for you.")
             .font(.footnote)
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -2,10 +2,13 @@
 
 ## End-user journey (the contract everything serves)
 
-1. **Conversational onboarding.** A chat with the agent (script in
-   `OnboardingConversation`, core) learns name, work interests, skills,
-   location, rate floor, availability, email — then asks, with reasons, for
-   calendar / location / notification permissions. Output: an earnings profile.
+1. **Conversational onboarding — three questions.** Inside the lifelong chat
+   thread (script in `OnboardingConversation`, core): what work do you enjoy,
+   your lowest rate, roughly where + when (with the calendar permission asked
+   in context). Everything else is learned progressively. The app around it
+   is one Home feed (pinned needs-you + plain-sentence journal), a floating
+   flame into this conversation, and one profile hub — no tab bar (see the
+   redesign specification, `hygge-ui-redesign-from-scratch.pdf`).
 2. **Site proposals.** The agent proposes candidate sites for the user's
    interests (`POST /site-proposals`; live muse-spark-1.3 suggestions or
    curated seeds offline), each with a rationale. The user approves per site:

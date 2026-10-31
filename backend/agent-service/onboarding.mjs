@@ -8,30 +8,22 @@ export const CATEGORY_IDS = ["petCare", "freelance", "localGig", "delivery",
   "creative", "tutoring", "homeServices", "remoteJob", "community"];
 
 const OBJECTIVES = {
-  welcome: "Warmly greet them, explain in one or two sentences that you find gigs across many sites, propose sites to join for their approval, and handle signups/applications as missions they approve. Invite them to start.",
-  name: "Ask what to call them.",
-  categories: "Ask what kinds of work they'd like. Suggest categories tailored to anything they have mentioned so far.",
-  skills: "Ask what they can do / have experience with. Suggest skills inferred from the conversation (their words, hobbies, past work), not generic lists.",
-  location: "Ask where they are based (for local gigs). Mention they can share location instead of typing.",
-  payFloor: "Ask the lowest hourly rate they'd accept, briefly explaining you'll filter anything below it out.",
-  availability: "Ask when they are usually available for work.",
-  email: "Ask for the email to use for site signups. Reassure: passwords live in an encrypted server vault, never in chat.",
-  permissions: "Explain the three optional permissions and why each helps: calendar (book approved gigs), location (nearby work), notifications (new matches and when you need them for a login check). No pressure.",
-  summary: "Summarize their earnings profile back in a friendly, personalized way, propose a one-line headline for their profiles, and say you'll now suggest sites for them to approve.",
+  welcome: "Give the hygge welcome, once: Hygge pronounced hoo-gah, Danish for cozy time with people you love - that is what the money is for. Say in two sentences that you find work, draft everything, and only tap them when a decision is really theirs. Invite them to start.",
+  enjoyWork: "Ask what kinds of work they actually enjoy. Suggest categories and skills tailored to anything they've mentioned. Taste first, taxonomy second.",
+  lowestRate: "Ask their lowest rate ($/hr or per job). Explain anything below it gets quietly dropped and never shown. The floor is a hard bound.",
+  whereWhen: "Ask roughly where they are and when they're free. Explain both briefly: local work near them, and no double-bookings. One question covering both.",
+  summary: "Summarize their profile in a warm sentence or two, propose a one-line headline, and end with: I'll look overnight and tell you in the morning - sooner if something needs you.",
+  general: "This is the ongoing Hygge conversation (onboarding is long done). Help with whatever they ask using the profile and context summary. If they state a preference or instruction (only overnights in November, mornings preferred, stop watching a site, pause), extract it into the profile patch fields where possible and confirm in your reply exactly what you changed. Answer status questions from the context summary; never invent activity that is not in it.",
   done: "Wrap up warmly in one line.",
 };
 
 const FALLBACK_REPLIES = {
-  welcome: "Hi! I'm your Hygge agent. I'll find work across pet-sitting sites, freelance marketplaces, local gig boards and more — and only ever act with your approval. Ready?",
-  name: "Great. First, what should I call you?",
-  categories: "What kinds of work are you interested in?",
-  skills: "And what can you do? Pick or type your skills.",
-  location: "Where are you based?",
-  payFloor: "What's the lowest hourly rate you'd accept?",
-  availability: "When are you usually available?",
-  email: "What's your email for signups? Passwords go in the encrypted vault, never in chat.",
-  permissions: "Three optional permissions: calendar, location, notifications — each explained below.",
-  summary: "Here's your profile — next I'll suggest sites for you to approve.",
+  welcome: "Hygge — \"hoo-gah\". Danish for cozy time with the people you love. That is what the money is for. I'll find work, draft everything, and only tap you when a decision is really yours. Ready?",
+  enjoyWork: "What kinds of work do you actually enjoy? Tap any that fit, or just tell me.",
+  lowestRate: "What's your lowest rate? Anything below it, I'll quietly drop — you'll never see it.",
+  whereWhen: "Roughly where are you, and when are you free? It keeps local work close and stops double-bookings.",
+  summary: "That's all I need to start. I'll look overnight and tell you in the morning — sooner if something needs you.",
+  general: "I'm here. Ask me anything, or tell me what to change.",
   done: "You're set up!",
 };
 
@@ -70,7 +62,7 @@ const SYSTEM = [
   "facts they did not state; hourlyRateFloor is a number or null.",
 ].join(" ");
 
-export async function onboardingMessage({ client, step = "welcome", transcript = [], profile = {} }) {
+export async function onboardingMessage({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "" }) {
   const objective = OBJECTIVES[step] ?? OBJECTIVES.welcome;
   const transcriptText = transcript.map((m) => `${m.fromAgent ? "Agent" : "User"}: ${m.text}`).join("\n");
   if (!llmConfigured()) {
@@ -80,7 +72,7 @@ export async function onboardingMessage({ client, step = "welcome", transcript =
   try {
     const text = await client.complete({
       model: MODELS.spark(), system: SYSTEM,
-      user: JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, conversation: transcriptText }),
+      user: JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary, conversation: transcriptText }),
     });
     const parsed = parseDecision(text);
     if (!parsed?.reply) throw new Error("unparseable onboarding reply");
@@ -163,7 +155,7 @@ function normalizeParsed(parsed, simulated) {
  * then emit({type:"final",data}) with the full normalized turn. Simulated
  * mode streams the fallback reply word-by-word so the UI behaves identically.
  */
-export async function onboardingMessageStream({ client, step = "welcome", transcript = [], profile = {} }, emit) {
+export async function onboardingMessageStream({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "" }, emit) {
   const objective = OBJECTIVES[step] ?? OBJECTIVES.welcome;
   const transcriptText = transcript.map((m) => `${m.fromAgent ? "Agent" : "User"}: ${m.text}`).join("\n");
   const fallback = () => ({ reply: FALLBACK_REPLIES[step] ?? FALLBACK_REPLIES.welcome,
@@ -178,7 +170,7 @@ export async function onboardingMessageStream({ client, step = "welcome", transc
     const extractor = new ReplyStreamExtractor();
     const full = await client.completeStream({
       model: MODELS.spark(), system: SYSTEM,
-      user: JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, conversation: transcriptText }),
+      user: JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary, conversation: transcriptText }),
     }, (delta) => {
       const out = extractor.push(delta);
       if (out) emit({ type: "reply-delta", text: out });

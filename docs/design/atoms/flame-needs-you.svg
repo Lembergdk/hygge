@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240">
+  <title>Hygge flame needs you</title>
+  <path d="M84 34 Q120 10 156 34" stroke="#FF6B57" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M96 20 Q120 4 144 20" stroke="#FF6B57" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M120 12 C128 48 168 66 182 104 C196 142 186 190 142 210 C128 216 112 216 98 210 C54 190 44 142 58 104 C66 80 80 72 90 84 C92 62 102 36 120 12 Z" fill="#FF6B57"/>
+  <path d="M120 92 C128 118 150 128 158 150 C166 172 156 196 128 204 C100 196 90 172 98 150 C104 132 112 126 118 136 C117 122 118 106 120 92 Z" fill="#FFC53D"/>
+  <circle cx="112" cy="158" r="5.5" fill="#2B2320"/>
+  <circle cx="138" cy="158" r="5.5" fill="#2B2320"/>
+  <path d="M111 172 Q125 182 139 172" stroke="#2B2320" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <circle cx="190" cy="52" r="22" fill="#C93A26"/>
+  <text x="190" y="61" text-anchor="middle" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="26" font-weight="600" fill="#FFFFFF">1</text>
+</svg>

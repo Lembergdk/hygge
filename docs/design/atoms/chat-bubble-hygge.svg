@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 96">
+  <title>Chat bubble, Hygge</title>
+  <path d="M28 76 L20 92 L44 76 Z" fill="#FFFFFF" stroke="#2B2320" stroke-opacity="0.06"/>
+  <rect x="4" y="4" width="380" height="72" rx="24" fill="#FFFFFF" stroke="#2B2320" stroke-opacity="0.06"/>
+  <text x="28" y="50" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="19" fill="#2B2320">Found a walk for your mornings.</text>
+</svg>

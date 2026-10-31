@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 140">
+  <title>Journal entry card</title>
+  <rect x="4" y="4" width="392" height="132" rx="28" fill="#FFFFFF" stroke="#2B2320" stroke-opacity="0.06"/>
+  <rect x="28" y="28" width="88" height="32" rx="16" fill="#FFF3D6"/>
+  <text x="72" y="49" text-anchor="middle" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="17" font-weight="600" fill="#8A5A00">Oct 11</text>
+  <text x="28" y="100" font-family="SF Rounded, ui-rounded, Helvetica Neue, Arial, sans-serif" font-size="20" fill="#2B2320">Hygge booked a dog walk with Luna.</text>
+</svg>

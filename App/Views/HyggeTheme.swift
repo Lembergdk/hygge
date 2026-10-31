@@ -1,0 +1,166 @@
+import SwiftUI
+
+/// Warm Nordic (locked from the redesign spec): Paper, Ember, Gold, Butter,
+/// sage — warm, calm, matte. One saturated element per screen; the rest is
+/// paper and white. Every token is appearance-aware: dark mode is a real
+/// warm-charcoal mapping, not light colors forced onto a dark screen.
+enum HyggeTheme {
+    private static func dynamic(light: (CGFloat, CGFloat, CGFloat),
+                                dark: (CGFloat, CGFloat, CGFloat)) -> Color {
+        Color(UIColor { traits in
+            let c = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(red: c.0, green: c.1, blue: c.2, alpha: 1)
+        })
+    }
+
+    // Light values are the exact V1 spec hexes (docs/design/atoms/README.md).
+    static let paper = dynamic(light: (0.980, 0.965, 0.937), dark: (0.145, 0.110, 0.086))      // #FAF6EF
+    static let paperDeep = dynamic(light: (0.945, 0.902, 0.835), dark: (0.196, 0.153, 0.118))
+    static let ink = dynamic(light: (0.169, 0.137, 0.125), dark: (0.949, 0.902, 0.827))        // #2B2320
+    static let card = dynamic(light: (1.0, 1.0, 1.0), dark: (0.227, 0.180, 0.145))             // #FFFFFF
+    static let sage = dynamic(light: (0.440, 0.610, 0.470), dark: (0.561, 0.722, 0.612))
+    static let sageDeep = dynamic(light: (0.243, 0.361, 0.220), dark: (0.631, 0.800, 0.690))   // #3E5C38
+    /// Coral: flame outer + pinned chip. NEVER carries button text (2.8:1).
+    static let ember = dynamic(light: (1.0, 0.420, 0.341), dark: (1.0, 0.500, 0.410))          // #FF6B57
+    /// Primary buttons: white text passes at 5.1:1.
+    static let emberDeep = dynamic(light: (0.788, 0.227, 0.149), dark: (0.860, 0.340, 0.240))  // #C93A26
+    static let butter = dynamic(light: (1.0, 0.773, 0.239), dark: (0.949, 0.820, 0.506))       // gold #FFC53D
+    static let butterTint = dynamic(light: (1.0, 0.953, 0.839), dark: (0.330, 0.275, 0.165))   // #FFF3D6
+    static let butterText = dynamic(light: (0.541, 0.353, 0.0), dark: (0.950, 0.800, 0.470))   // #8A5A00
+    static let hairline = Color(UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor.white.withAlphaComponent(0.10)
+            : UIColor.black.withAlphaComponent(0.07)
+    })
+    static let secondary = dynamic(light: (0.478, 0.416, 0.380), dark: (0.741, 0.671, 0.588)) // muted #7A6A61
+    /// Selected-tile peach from the mocks.
+    static let peach = dynamic(light: (0.984, 0.886, 0.820), dark: (0.353, 0.235, 0.180))
+    /// Soft sage wash for stat cards.
+    static let sageTint = dynamic(light: (0.894, 0.922, 0.867), dark: (0.290, 0.365, 0.310))   // #E4EBDD
+    /// The flame's face is ink (#2B2320) in both appearances.
+    static let faceBrown = Color(red: 0.169, green: 0.137, blue: 0.125)
+}
+
+extension View {
+    func hyggeCard(radius: CGFloat = 22) -> some View {
+        background(HyggeTheme.card, in: RoundedRectangle(cornerRadius: radius))
+            .overlay(RoundedRectangle(cornerRadius: radius).stroke(HyggeTheme.hairline, lineWidth: 1))
+            .shadow(color: Color.black.opacity(0.10), radius: 16, y: 6)
+    }
+}
+
+/// Hygge's flame character (from the design mocks): a multi-tip outer flame
+/// in ember, a butter inner flame, and a small smiling face low in the belly.
+/// Swap for the locked designer artwork asset when it lands — shape only.
+struct FlameShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let w = rect.width, h = rect.height
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: rect.minX + x * w, y: rect.minY + y * h) }
+        var p = Path()
+        p.move(to: pt(0.50, 0.99))
+        // left belly up to the small left tip
+        p.addCurve(to: pt(0.10, 0.66), control1: pt(0.24, 0.99), control2: pt(0.09, 0.84))
+        p.addCurve(to: pt(0.20, 0.30), control1: pt(0.10, 0.52), control2: pt(0.13, 0.40))
+        // dip, then the tall main tip
+        p.addCurve(to: pt(0.34, 0.44), control1: pt(0.25, 0.38), control2: pt(0.29, 0.43))
+        p.addCurve(to: pt(0.54, 0.01), control1: pt(0.42, 0.30), control2: pt(0.47, 0.14))
+        // down into the right dip, up the right tip
+        p.addCurve(to: pt(0.67, 0.36), control1: pt(0.61, 0.16), control2: pt(0.63, 0.26))
+        p.addCurve(to: pt(0.85, 0.24), control1: pt(0.73, 0.30), control2: pt(0.78, 0.25))
+        // right belly back down to the base
+        p.addCurve(to: pt(0.90, 0.66), control1: pt(0.93, 0.38), control2: pt(0.92, 0.50))
+        p.addCurve(to: pt(0.50, 0.99), control1: pt(0.86, 0.88), control2: pt(0.72, 0.99))
+        p.closeSubpath()
+        return p
+    }
+}
+
+private struct SmileShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.addArc(center: CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.25),
+                 radius: rect.width * 0.42,
+                 startAngle: .degrees(25), endAngle: .degrees(155), clockwise: false)
+        return p
+    }
+}
+
+/// The approved flame character artwork (walking flame, soft 3D depth).
+/// Vector FlameShape remains below only as an emergency fallback.
+struct FlameMark: View {
+    var size: CGFloat = 34
+    var body: some View {
+        Image("FlameCharacter")
+            .resizable()
+            .scaledToFit()
+            .frame(width: size, height: size * 1.35)
+            .accessibilityHidden(true)
+    }
+}
+
+enum FlameState { case asleep, needsYou(Int), celebrating, thinking }
+
+struct FloatingFlame: View {
+    var state: FlameState
+    var dimmed: Bool = false
+    var onTap: () -> Void
+    var onLongPress: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var isAnimating: Bool {
+        if reduceMotion { return false }
+        switch state { case .needsYou, .thinking: return true; default: return false }
+    }
+
+    var body: some View {
+        // Paused whenever calm: no continuous full-rate rendering while idle.
+        TimelineView(.animation(minimumInterval: 0.05, paused: !isAnimating)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            ZStack(alignment: .topTrailing) {
+                // The flame is a character, not a button in a disc (mocks):
+                // big, sticker-like, soft shadow only.
+                FlameMark(size: 62)
+                    .shadow(color: Color.black.opacity(0.18), radius: 10, y: 5)
+                    .offset(y: bounceOffset(t))
+                    .scaleEffect(pulseScale(t))
+                if case .needsYou(let count) = state, count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(HyggeTheme.ember, in: Capsule())
+                        .offset(x: 2, y: -2)
+                }
+            }
+        }
+        .frame(width: 72, height: 92)
+        .opacity(dimmed ? 0.35 : 1)
+        .animation(.easeInOut(duration: 0.25), value: dimmed)
+        .contentShape(Circle())
+        .onTapGesture(perform: onTap)
+        .onLongPressGesture(minimumDuration: 0.6, perform: onLongPress)
+        .accessibilityLabel(accessibilityText)
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private var accessibilityText: String {
+        switch state {
+        case .asleep: return "Talk to Hygge"
+        case .needsYou(let n): return "Talk to Hygge, \(n) thing\(n == 1 ? "" : "s") need you"
+        case .celebrating: return "Talk to Hygge, something good just landed"
+        case .thinking: return "Talk to Hygge, Hygge is working"
+        }
+    }
+
+    private func bounceOffset(_ t: TimeInterval) -> CGFloat {
+        guard !reduceMotion, case .needsYou = state else { return 0 }
+        // two small hops, then still for ~30s
+        let cycle = t.truncatingRemainder(dividingBy: 30)
+        guard cycle < 1.2 else { return 0 }
+        return -abs(sin(cycle * .pi * 2)) * 7
+    }
+
+    private func pulseScale(_ t: TimeInterval) -> CGFloat {
+        guard !reduceMotion, case .thinking = state else { return 1 }
+        return 1 + 0.05 * sin(t * 2.4)
+    }
+}

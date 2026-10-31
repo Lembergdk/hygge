@@ -71,12 +71,30 @@ struct BackendClient {
         var step: String
         var transcript: [TranscriptLine]
         var profile: EarningsProfile
+        var contextSummary: String
+    }
+
+    /// The lifelong conversation thread (post-onboarding). Same SSE endpoint,
+    /// "general" objective, with a plain-language context summary attached.
+    func chatStream(transcript: [TranscriptLine], profile: EarningsProfile, contextSummary: String,
+                    onDelta: @escaping @MainActor (String) -> Void) async throws -> OnboardingAssistantReply {
+        try await stream(path: "onboarding/stream",
+                         body: OnboardingBody(step: "general", transcript: transcript,
+                                              profile: profile, contextSummary: contextSummary),
+                         onDelta: onDelta)
+    }
+
+    func deleteCredential(id: UUID) async {
+        var request = URLRequest(url: baseURL.appendingPathComponent("credentials/\(id.uuidString.lowercased())"))
+        request.httpMethod = "DELETE"
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        _ = try? await URLSession.shared.data(for: request)
     }
 
     func onboardingMessage(step: OnboardingStep, transcript: [TranscriptLine],
                            profile: EarningsProfile) async throws -> OnboardingAssistantReply {
         try await post("onboarding/message",
-                       body: OnboardingBody(step: step.rawValue, transcript: transcript, profile: profile))
+                       body: OnboardingBody(step: step.rawValue, transcript: transcript, profile: profile, contextSummary: ""))
     }
 
     private struct StreamEvent: Decodable {
@@ -91,14 +109,20 @@ struct BackendClient {
     func onboardingStream(step: OnboardingStep, transcript: [TranscriptLine],
                           profile: EarningsProfile,
                           onDelta: @escaping @MainActor (String) -> Void) async throws -> OnboardingAssistantReply {
-        var request = URLRequest(url: baseURL.appendingPathComponent("onboarding/stream"))
+        try await stream(path: "onboarding/stream",
+                         body: OnboardingBody(step: step.rawValue, transcript: transcript, profile: profile, contextSummary: ""),
+                         onDelta: onDelta)
+    }
+
+    private func stream(path: String, body: OnboardingBody,
+                        onDelta: @escaping @MainActor (String) -> Void) async throws -> OnboardingAssistantReply {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
         request.timeoutInterval = 90
-        request.httpBody = try JSONEncoder().encode(
-            OnboardingBody(step: step.rawValue, transcript: transcript, profile: profile))
+        request.httpBody = try JSONEncoder().encode(body)
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
