@@ -41,7 +41,7 @@ Hygge watches all of it for you, and only asks for your time when there's someth
 3. **Hygge draft, you approve.** Every task is drafted first (goal, site, exact text), and nothing runs until you tap approve. Afterwards each run is distilled into advisory site memory — hints that make future visits faster, never replayed as a script.
 4. **Hygge runs the job end-to-end.** Once you approve, Hygge checks your calendar for availability, adds the confirmed booking to your calendar, and handles the communication around the gig — before and after — so the work itself is the only part left for you.
 
-## For judges
+## For Meta AI Hackathon judges
 
 - **Built during the event.** This repository was created Oct 30, 2026, and every commit falls inside the Oct 26 – Nov 4 event window.
 - **Meta models doing real work.** The cloud-browser agent runs on Meta's Muse models, routed per phase: Spark 1.3 for routine steps and extraction, Wonder 1.0 for planning, deviations, and drafting.
