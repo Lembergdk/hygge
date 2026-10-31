@@ -235,6 +235,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				HYGGE_REQUIRE_CLOUD = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				INFOPLIST_KEY_CFBundleDisplayName = Hygge;
 				INFOPLIST_FILE = App/Info.plist;
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Hygge books gigs you approved into your calendar.";

@@ -18,7 +18,17 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
-      return json({ ok: true, service: "hygge-api", env: env.HYGGE_ENV });
+      // Shape matches the app's Health contract (inherited from the
+      // retired local service): the app reads `llm == "live"` to
+      // decide it is online rather than in simple/offline mode.
+      return json({
+        ok: true,
+        service: "hygge-api",
+        env: env.HYGGE_ENV,
+        browser: "browser-run",
+        llm: env.HYGGE_LLM_API_KEY ? "live" : "simulated",
+        models: { routine: env.HYGGE_LLM_MODEL_FAST, escalated: env.HYGGE_LLM_MODEL_STRONG },
+      });
     }
 
     const isUserRoute = USER_ROUTES.some(

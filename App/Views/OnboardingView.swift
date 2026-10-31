@@ -782,7 +782,7 @@ private struct FlowLayout: Layout {
 /// Where the agent service lives. On a phone, point this at the Mac running
 /// staging: paste a staging dev token; blank means the build default.
 struct BackendSettingsView: View {
-    @AppStorage("backendBaseURL") private var backendBaseURL = "http://127.0.0.1:8787"
+    @AppStorage("backendBaseURL") private var backendBaseURL = "https://api-staging.usehygge.app"
     @AppStorage("backendToken") private var backendToken = ""
     @Environment(\.dismiss) private var dismiss
     @State private var testResult = ""

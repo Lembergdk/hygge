@@ -29,10 +29,26 @@ struct BackendClient {
     }
 
     var baseURL: URL {
-        let raw = UserDefaults.standard.string(forKey: "backendBaseURL") ?? Self.defaultBaseURLString
+        let raw = BackendAddress.effective(
+            stored: UserDefaults.standard.string(forKey: "backendBaseURL"),
+            fallback: Self.defaultBaseURLString)
         return URL(string: raw) ?? URL(string: Self.defaultBaseURLString)!
     }
-    var apiToken: String { UserDefaults.standard.string(forKey: "backendToken") ?? "" }
+
+    var apiToken: String {
+        let stored = UserDefaults.standard.string(forKey: "backendToken") ?? ""
+        let storedURL = UserDefaults.standard.string(forKey: "backendBaseURL")
+        // A token saved next to a retired local-backend URL belongs to
+        // that dead service; drop the pair together.
+        if !stored.isEmpty && !BackendAddress.isStaleLocal(stored: storedURL) { return stored }
+        #if DEBUG
+        // Personal dev builds can bake a staging token in at build time
+        // (xcodebuild HYGGE_STAGING_TOKEN=…); never set in CI or Release.
+        return Bundle.main.object(forInfoDictionaryKey: "HYGGE_STAGING_TOKEN") as? String ?? ""
+        #else
+        return BackendAddress.isStaleLocal(stored: storedURL) ? "" : stored
+        #endif
+    }
 
     struct BackendTaskResult: Decodable {
         var status: String
