@@ -32,7 +32,8 @@
   "d1_databases": [
     { "binding": "DB", "database_name": "hygge-staging", "database_id": "927c5fb0-c7ee-4430-a7b4-04eb06656777" }
   ],
-  // R2 not yet enabled on this account (dashboard action). Re-add
-  // when enabled: bucket hygge-browser-profiles-staging.
+  "r2_buckets": [
+    { "binding": "BROWSER_PROFILES", "bucket_name": "hygge-browser-profiles-staging" }
+  ],
   "browser": { "binding": "BROWSER" }
 }

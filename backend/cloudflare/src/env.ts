@@ -4,7 +4,7 @@
 export interface Env {
   USER_SANDBOX: DurableObjectNamespace;
   DB: D1Database;
-  BROWSER_PROFILES?: R2Bucket; // absent until R2 is enabled
+  BROWSER_PROFILES?: R2Bucket; // browser-profile fallback; optional until production bucket exists
   BROWSER: Fetcher;
   HYGGE_ENV: string;
   HYGGE_LLM_BASE_URL: string;

@@ -21,7 +21,7 @@ Durable Object namespace. Always pass `-c <config>`.
 ```bash
 npm install
 npx wrangler d1 create hygge-staging          # paste id into wrangler.staging.jsonc
-npx wrangler r2 bucket create hygge-browser-profiles-staging   # needs R2 enabled
+npx wrangler r2 bucket create hygge-browser-profiles-staging   # browser-profile fallback storage
 npx wrangler d1 migrations apply hygge-staging --remote -c wrangler.staging.jsonc
 npx wrangler secret put HYGGE_LLM_API_KEY -c wrangler.staging.jsonc
 npx wrangler secret put HYGGE_MASTER_KEY -c wrangler.staging.jsonc   # base64, 32 bytes
