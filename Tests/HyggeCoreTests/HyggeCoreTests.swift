@@ -2,6 +2,26 @@ import XCTest
 @testable import HyggeCore
 
 final class HyggeCoreTests: XCTestCase {
+    func testBackendAddressDropsStaleLocalURLs() {
+        let fallback = "https://api-staging.usehygge.app"
+        // Leftovers from the retired LAN dev backend are ignored.
+        XCTAssertEqual(BackendAddress.effective(stored: "http://127.0.0.1:8787", fallback: fallback), fallback)
+        XCTAssertEqual(BackendAddress.effective(stored: "http://192.168.1.20:8787", fallback: fallback), fallback)
+        XCTAssertEqual(BackendAddress.effective(stored: "http://localhost:8787", fallback: fallback), fallback)
+        XCTAssertEqual(BackendAddress.effective(stored: nil, fallback: fallback), fallback)
+        XCTAssertEqual(BackendAddress.effective(stored: "", fallback: fallback), fallback)
+        // A real https override is respected.
+        XCTAssertEqual(BackendAddress.effective(stored: "https://api.usehygge.app", fallback: fallback),
+                       "https://api.usehygge.app")
+    }
+
+    func testBackendAddressDetectsStaleLocalPair() {
+        XCTAssertTrue(BackendAddress.isStaleLocal(stored: "http://192.168.1.20:8787"))
+        XCTAssertTrue(BackendAddress.isStaleLocal(stored: "http://127.0.0.1:8787"))
+        XCTAssertFalse(BackendAddress.isStaleLocal(stored: "https://api-staging.usehygge.app"))
+        XCTAssertFalse(BackendAddress.isStaleLocal(stored: nil))
+    }
+
     func testCloudRequirementResolution() {
         // Explicit Info.plist value wins, whatever the build.
         XCTAssertTrue(CloudRequirement.resolve(infoPlistValue: "YES", isDebugBuild: true))

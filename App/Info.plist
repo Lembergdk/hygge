@@ -8,6 +8,8 @@
 	<string>Hygge connects to your agent service on your local network so the agent can chat with you and browse sites on your behalf.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>HYGGE_STAGING_TOKEN</key>
+	<string>$(HYGGE_STAGING_TOKEN)</string>
 	<key>HYGGE_REQUIRE_CLOUD</key>
 	<string>$(HYGGE_REQUIRE_CLOUD)</string>
 	<key>NSAppTransportSecurity</key>
