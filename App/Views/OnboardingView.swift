@@ -535,16 +535,23 @@ struct OnboardingView: View {
     private func enjoyTile(_ category: OpportunityCategory) -> some View {
         let selected = conversation.profile.interests.contains(category)
         return Button { conversation.toggleCategory(category) } label: {
-            HStack(spacing: 10) {
-                Image(systemName: categoryIcon(category))
-                    .font(.system(size: 20))
-                    .foregroundStyle(selected ? GPTheme.amber : GPTheme.teal)
-                Text(category.tileLabel)
-                    .font(.body.weight(selected ? .semibold : .regular))
-                    .foregroundStyle(selected ? GPTheme.amber : GPTheme.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.leading)
-                Spacer(minLength: 0)
+            // Two-column tiles put the label under the icon so it gets the
+            // full tile width (side-by-side hyphenates single words even
+            // at small sizes). One-column rows keep icon-left.
+            Group {
+                if dynamicTypeSize >= .xxLarge {
+                    HStack(spacing: 10) {
+                        tileIcon(category, selected: selected)
+                        tileText(category, selected: selected)
+                        Spacer(minLength: 0)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        tileIcon(category, selected: selected)
+                        tileText(category, selected: selected)
+                        Spacer(minLength: 0)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
             .padding(.horizontal, 16).padding(.vertical, 14)
@@ -554,6 +561,20 @@ struct OnboardingView: View {
                 .stroke(selected ? GPTheme.amber : GPTheme.hairline, lineWidth: selected ? 1.6 : 1))
         }
         .buttonStyle(.plain)
+    }
+
+    private func tileIcon(_ category: OpportunityCategory, selected: Bool) -> some View {
+        Image(systemName: categoryIcon(category))
+            .font(.system(size: 20))
+            .foregroundStyle(selected ? GPTheme.amber : GPTheme.teal)
+    }
+
+    private func tileText(_ category: OpportunityCategory, selected: Bool) -> some View {
+        Text(category.tileLabel)
+            .font(.body.weight(selected ? .semibold : .regular))
+            .foregroundStyle(selected ? GPTheme.amber : GPTheme.ink)
+            .fixedSize(horizontal: false, vertical: true)
+            .multilineTextAlignment(.leading)
     }
 
     private func categoryIcon(_ category: OpportunityCategory) -> String {
