@@ -22,8 +22,8 @@ struct ConversationView: View {
                                     bubble(entry).id(entry.id)
                                 }
                                 if isThinking && streamingText == nil {
-                                    HStack(spacing: 9) {
-                                        FlameMark(size: 22)
+                                    HStack(alignment: .bottom, spacing: 7) {
+                                        FlameMark(size: 26)
                                         ThinkingDotsShared()
                                         Text("Thinking…").font(.caption).foregroundStyle(HyggeTheme.secondary)
                                         Spacer()
@@ -37,7 +37,7 @@ struct ConversationView: View {
                                 }
                                 Color.clear.frame(height: 10).id("bottom")
                             }
-                            .padding(.horizontal, 18).padding(.top, 14)
+                            .padding(.horizontal, 18).padding(.top, 22)
                         }
                         .scrollDismissesKeyboard(.interactively)
                         .onChange(of: store.chatTranscript.count) { _, _ in
@@ -48,32 +48,6 @@ struct ConversationView: View {
                         }
                     }
                     composer
-                }
-            }
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    HStack(spacing: 9) {
-                        FlameMark(size: 30)
-                        Text("Talk to Hygge")
-                            .font(.system(.title3, design: .rounded, weight: .bold))
-                            .foregroundStyle(HyggeTheme.ink)
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        store.setPaused(!store.isPaused)
-                        store.appendChat(fromAgent: true, text: store.isPaused
-                            ? "Paused. I won't search, send, or book until you resume."
-                            : "Back on. I'll tell you in the morning — sooner if something needs you.")
-                    } label: {
-                        Image(systemName: store.isPaused ? "play.fill" : "pause.fill")
-                            .foregroundStyle(HyggeTheme.ink)
-                    }
-                    .accessibilityLabel(store.isPaused ? "Resume Hygge" : "Pause Hygge")
-                }
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }.foregroundStyle(HyggeTheme.ink)
                 }
             }
         }
@@ -98,26 +72,42 @@ struct ConversationView: View {
         .padding(.horizontal, 14).padding(.vertical, 10)
     }
 
+    private var userInitial: String {
+        let name = store.profile.displayName.trimmingCharacters(in: .whitespaces)
+        return String((name.isEmpty ? "You" : name).prefix(1)).uppercased()
+    }
+
+    private var userAvatar: some View {
+        ZStack {
+            Circle().fill(HyggeTheme.sageTint).frame(width: 30, height: 30)
+            Text(userInitial)
+                .font(.system(.caption, design: .rounded, weight: .bold))
+                .foregroundStyle(HyggeTheme.ink)
+        }
+        .accessibilityHidden(true)
+    }
+
     @ViewBuilder
     private func bubble(_ entry: ChatEntry) -> some View {
         if entry.fromAgent {
             agentBubble(entry.text)
         } else {
-            HStack {
-                Spacer(minLength: 60)
+            HStack(alignment: .bottom, spacing: 7) {
+                Spacer(minLength: 44)
                 Text(entry.text)
-                    .font(.body).foregroundStyle(.white).lineSpacing(3)
+                    .font(.body).foregroundStyle(HyggeTheme.ink).lineSpacing(3)
                     .padding(.horizontal, 15).padding(.vertical, 12)
-                    .background(HyggeTheme.sage, in: UnevenRoundedRectangle(
+                    .background(HyggeTheme.sageTint, in: UnevenRoundedRectangle(
                         topLeadingRadius: 20, bottomLeadingRadius: 20,
                         bottomTrailingRadius: 6, topTrailingRadius: 20))
+                userAvatar
             }
         }
     }
 
     private func agentBubble(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 9) {
-            FlameMark(size: 22).padding(.top, 2)
+        HStack(alignment: .bottom, spacing: 7) {
+            FlameMark(size: 26)
             Text(text.isEmpty ? " " : text)
                 .font(.body).foregroundStyle(HyggeTheme.ink).lineSpacing(3)
                 .padding(.horizontal, 15).padding(.vertical, 12)

@@ -31,6 +31,20 @@ public enum OpportunityCategory: String, Codable, CaseIterable, Identifiable, Se
         case .community: return "Helping people in local groups"
         }
     }
+    /// Short tile form — must fit a two-column tile without truncation.
+    public var tileLabel: String {
+        switch self {
+        case .petCare: return "Pet care"
+        case .freelance: return "Freelance"
+        case .localGig: return "Odd jobs"
+        case .delivery: return "Deliveries"
+        case .creative: return "Creative"
+        case .tutoring: return "Teaching"
+        case .homeServices: return "Home help"
+        case .remoteJob: return "Remote work"
+        case .community: return "Local groups"
+        }
+    }
 }
 
 /// The user's unified earnings profile. Platform profiles are drafts derived from this.

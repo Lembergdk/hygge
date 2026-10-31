@@ -38,8 +38,14 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
 
     /// Asks for when-in-use permission and resolves the town/city name, which
     /// is all the profile needs. Returns nil when denied or unavailable.
+    /// Never hangs: gives up after 12 seconds so the UI can say so.
     func requestLocality() async -> String? {
         if let localityLabel { return localityLabel }
+        let timeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(12))
+            await MainActor.run { self?.finish(nil) }
+        }
+        defer { timeout.cancel() }
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
             manager.requestWhenInUseAuthorization()

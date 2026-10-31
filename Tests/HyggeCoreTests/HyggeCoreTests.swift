@@ -310,6 +310,15 @@ final class HyggeCoreTests: XCTestCase {
         }
     }
 
+    /// Tile labels must fit a two-column tile whole — no hyphenated truncation.
+    func testTileLabelsFit() {
+        for category in OpportunityCategory.allCases {
+            XCTAssertFalse(category.tileLabel.isEmpty)
+            XCTAssertLessThanOrEqual(category.tileLabel.count, 12, "\(category) tile label too long")
+            XCTAssertFalse(category.activityLabel.isEmpty)
+        }
+    }
+
     /// Onboarding can go back a question, and progress counts only real questions.
     func testOnboardingBackNavigationAndProgress() {
         var chat = OnboardingConversation()

@@ -31,11 +31,6 @@ struct ProfileHubView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }.foregroundStyle(HyggeTheme.ink)
-                }
-            }
             .alert("Edit belief", isPresented: Binding(get: { editingBelief != nil },
                                                        set: { if !$0 { editingBelief = nil } })) {
                 TextField("Belief", text: $beliefDraft)

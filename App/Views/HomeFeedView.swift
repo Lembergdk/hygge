@@ -72,9 +72,9 @@ struct HomeFeedView: View {
         } message: {
             Text(store.isPaused ? "Hygge will start looking again right away." : "Hygge stops searching, sending and booking until you resume. Nothing is lost.")
         }
-        .sheet(isPresented: $showConversation) { ConversationView() }
-        .sheet(isPresented: $showProfile) { ProfileHubView() }
-        .sheet(isPresented: $showYourWork) { YourWorkView() }
+        .sheet(isPresented: $showConversation) { ConversationView().presentationDragIndicator(.visible) }
+        .sheet(isPresented: $showProfile) { ProfileHubView().presentationDragIndicator(.visible) }
+        .sheet(isPresented: $showYourWork) { YourWorkView().presentationDragIndicator(.visible) }
         .sheet(item: $moneyApplication) { application in
             MoneyConfirmationView(application: application)
         }
@@ -109,7 +109,7 @@ struct HomeFeedView: View {
             Button("Resume Hygge") { store.setPaused(false) }
                 .font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 18).padding(.vertical, 11)
-                .background(HyggeTheme.ember, in: Capsule()).foregroundStyle(.white)
+                .background(HyggeTheme.emberDeep, in: Capsule()).foregroundStyle(.white)
         }
         .padding(17).hyggeCard(radius: 24)
     }
@@ -214,7 +214,7 @@ struct HomeFeedView: View {
                     Text("\(store.needsYouCount)")
                         .font(.caption.weight(.bold)).foregroundStyle(.white)
                         .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(HyggeTheme.ember, in: Capsule())
+                        .background(HyggeTheme.emberDeep, in: Capsule())
                     Spacer()
                 }
                 let cards = needsYouCards
@@ -291,7 +291,8 @@ extension HomeFeedView {
     private func taskCard(_ task: AgentTask) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             tagLabel(task.status == .needsHuman ? "Pinned · Needs you" : "Draft · nothing sent yet",
-                     color: task.status == .needsHuman ? HyggeTheme.ember : HyggeTheme.sageDeep)
+                     color: task.status == .needsHuman ? HyggeTheme.emberDeep : HyggeTheme.sageDeep,
+                     foreground: task.status == .needsHuman ? .white : HyggeTheme.onSage)
             HStack(alignment: .top, spacing: 13) {
                 iconTile(categoryIcon(opportunity(for: task)?.category))
                 VStack(alignment: .leading, spacing: 3) {
@@ -356,7 +357,7 @@ extension HomeFeedView {
 
     private func batchCard(_ batch: [AgentTask]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            tagLabel("Drafts — nothing sent yet", color: HyggeTheme.sage)
+            tagLabel("Drafts — nothing sent yet", color: HyggeTheme.sageDeep)
             Text("\(batch.count) similar applications")
                 .font(.system(.headline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
             Text("Identical draft, checked word for word, for \(batch.count) listings on \(store.siteName(id: batch.first?.siteID ?? "")). If one stalls, the rest stop too.")
@@ -424,10 +425,12 @@ extension HomeFeedView {
         }
     }
 
-    private func tagLabel(_ text: String, color: Color) -> some View {
+    /// Tags come in contrast-safe pairs: sage fills take onSage text,
+    /// ember fills are always the deep ember (white passes 5.1:1).
+    private func tagLabel(_ text: String, color: Color, foreground: Color = HyggeTheme.onSage) -> some View {
         Text(text)
-            .font(.caption2.weight(.bold)).foregroundStyle(.white)
-            .padding(.horizontal, 9).padding(.vertical, 4)
+            .font(.caption.weight(.bold)).foregroundStyle(foreground)
+            .padding(.horizontal, 10).padding(.vertical, 5)
             .background(color, in: Capsule())
     }
 

@@ -40,6 +40,8 @@ struct OnboardingView: View {
     @State private var serviceOnline: Bool?
     @State private var streamingEntryID: UUID?
     @State private var started = false
+    @State private var isLocating = false
+    @State private var locationFailed = false
 
     var body: some View {
         NavigationStack {
@@ -79,7 +81,7 @@ struct OnboardingView: View {
     private var welcomeHero: some View {
         VStack(spacing: 0) {
             Spacer()
-            FlameMark(size: 150)
+            AnimatedFlame(size: 150)
             Text("Hi, I'm Hygge,")
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .foregroundStyle(GPTheme.ink)
@@ -213,10 +215,10 @@ struct OnboardingView: View {
                 Spacer(minLength: 52)
                 Text(entry.text)
                     .font(.body)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(GPTheme.ink)
                     .lineSpacing(3)
                     .padding(.horizontal, 15).padding(.vertical, 12)
-                    .background(GPTheme.teal, in: UnevenRoundedRectangle(
+                    .background(HyggeTheme.sageTint, in: UnevenRoundedRectangle(
                         topLeadingRadius: 20, bottomLeadingRadius: 20,
                         bottomTrailingRadius: 6, topTrailingRadius: 20))
             }
@@ -258,7 +260,7 @@ struct OnboardingView: View {
                         .font(.caption.weight(.medium)).foregroundStyle(GPTheme.amber)
                 }
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    ForEach(categoryOptions, id: \.activityLabel) { category in
+                    ForEach(categoryOptions) { category in
                         enjoyTile(category)
                     }
                 }
@@ -272,8 +274,14 @@ struct OnboardingView: View {
                 }
                 textRow(placeholder: "Type another preference...")
                 primaryButton("Continue") {
+                    let extra = input.trimmingCharacters(in: .whitespaces)
+                    if !extra.isEmpty, !conversation.profile.skills.contains(extra) {
+                        conversation.profile.skills.append(extra)
+                    }
                     guard conversation.confirmEnjoyWork() else { return }
-                    finishInput(userText: conversation.profile.interests.map(\.label).joined(separator: ", "))
+                    let picked = conversation.profile.interests.map(\.label).joined(separator: ", ")
+                    input = ""
+                    finishInput(userText: extra.isEmpty ? picked : picked + " · " + extra)
                 }
                 .disabled(conversation.profile.interests.isEmpty)
                 .opacity(conversation.profile.interests.isEmpty ? 0.45 : 1)
@@ -291,23 +299,45 @@ struct OnboardingView: View {
                     finishInput(userText: "At least $\(Int(conversation.profile.hourlyRateFloor))/hr", mutate: { $0.advance() })
                 }
             case .whereWhen:
+                Text("Where").font(.caption.weight(.semibold)).foregroundStyle(GPTheme.secondary)
                 textRow(placeholder: "Town or city")
                 Button {
+                    isLocating = true
+                    locationFailed = false
                     Task {
-                        if let label = await locationService.requestLocality() {
-                            conversation.profile.availabilityNotes = availabilityInput
-                            submitUser(label, value: label)
+                        let label = await locationService.requestLocality()
+                        isLocating = false
+                        if let label {
+                            input = label
+                            conversation.profile.locationLabel = label
+                        } else {
+                            locationFailed = true
                         }
                     }
                 } label: {
-                    Label("Use my current location", systemImage: "location.fill")
-                        .font(.subheadline.weight(.medium)).foregroundStyle(GPTheme.teal)
+                    HStack(spacing: 7) {
+                        if isLocating {
+                            ProgressView().controlSize(.small).tint(GPTheme.teal)
+                            Text("Finding you…")
+                        } else {
+                            Label("Use my current location", systemImage: "location.fill")
+                        }
+                    }
+                    .font(.subheadline.weight(.medium)).foregroundStyle(GPTheme.teal)
                 }
+                .disabled(isLocating)
+                if locationFailed {
+                    Text("Couldn't find you — typing your town works just as well.")
+                        .font(.caption).foregroundStyle(GPTheme.secondary)
+                }
+                Text("When").font(.caption.weight(.semibold)).foregroundStyle(GPTheme.secondary)
+                    .padding(.top, 4)
                 TextField("When are you free? e.g. Weekends, 10am-2pm", text: $availabilityInput)
                     .textFieldStyle(.plain).font(.body)
                     .padding(.horizontal, 17).padding(.vertical, 13)
                     .background(GPTheme.card, in: Capsule())
                     .overlay(Capsule().stroke(GPTheme.hairline, lineWidth: 1))
+                Divider().overlay(GPTheme.hairline).padding(.vertical, 2)
                 permissionRow(icon: "calendar", title: "Calendar",
                               why: "So I never double-book you, and approved gigs land in your calendar.",
                               granted: calendarGranted) {
@@ -319,6 +349,8 @@ struct OnboardingView: View {
                     submitUser(place + (availabilityInput.isEmpty ? "" : " · " + availabilityInput), value: place)
                     input = ""
                 }
+                .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty)
+                .opacity(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty ? 0.45 : 1)
             case .summary:
                 summaryCard
             case .done:
@@ -357,13 +389,17 @@ struct OnboardingView: View {
             Text(conversation.profile.headline.isEmpty ? conversation.profile.displayName : conversation.profile.headline)
                 .font(.system(.title3, design: .serif, weight: .semibold)).foregroundStyle(GPTheme.ink)
             summaryRow("briefcase", conversation.profile.interests.map(\.label).joined(separator: " · "))
-            summaryRow("wrench.and.screwdriver", conversation.profile.skills.joined(separator: ", "))
+            if !conversation.profile.skills.isEmpty {
+                summaryRow("wrench.and.screwdriver", conversation.profile.skills.joined(separator: ", "))
+            }
             summaryRow("mappin.and.ellipse", "\(conversation.profile.locationLabel) — from $\(Int(conversation.profile.hourlyRateFloor))/hr")
             if !conversation.profile.availabilityNotes.isEmpty {
                 summaryRow("clock", conversation.profile.availabilityNotes)
             }
-            summaryRow("envelope", conversation.profile.email)
-            primaryButton("Looks good — suggest sites for me", icon: "arrow.right") {
+            if !conversation.profile.email.isEmpty {
+                summaryRow("envelope", conversation.profile.email)
+            }
+            primaryButton("Looks good", icon: "arrow.right") {
                 let profile = conversation.profile
                 removeInputs()
                 store.completeOnboarding(profile: profile)
@@ -425,28 +461,15 @@ struct OnboardingView: View {
     }
 
     private func textRow(placeholder: String) -> some View {
-        HStack(spacing: 9) {
-            TextField(placeholder, text: $input)
-                .textFieldStyle(.plain)
-                .font(.body)
-                .padding(.horizontal, 17).padding(.vertical, 13)
-                .background(GPTheme.card, in: Capsule())
-                .overlay(Capsule().stroke(GPTheme.hairline, lineWidth: 1))
-                .autocorrectionDisabled(false)
-                .textInputAutocapitalization(.sentences)
-                .onSubmit { submitUser(input, value: input); input = "" }
-            Button {
-                let value = input
-                submitUser(value, value: value)
-                input = ""
-            } label: {
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
-                    .frame(width: 42, height: 42)
-                    .background(GPTheme.amber, in: Circle())
-            }
-            .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.skills.isEmpty)
-        }
+        TextField(placeholder, text: $input)
+            .textFieldStyle(.plain)
+            .font(.body)
+            .padding(.horizontal, 17).padding(.vertical, 13)
+            .background(GPTheme.card, in: Capsule())
+            .overlay(Capsule().stroke(GPTheme.hairline, lineWidth: 1))
+            .autocorrectionDisabled(false)
+            .textInputAutocapitalization(.sentences)
+            .onSubmit { submitUser(input, value: input); input = "" }
     }
 
     private func primaryButton(_ title: String, icon: String? = nil,
@@ -498,10 +521,10 @@ struct OnboardingView: View {
                 Image(systemName: categoryIcon(category))
                     .font(.system(size: 20))
                     .foregroundStyle(selected ? GPTheme.amber : GPTheme.teal)
-                Text(category.activityLabel)
+                Text(category.tileLabel)
                     .font(.body.weight(selected ? .semibold : .regular))
                     .foregroundStyle(selected ? GPTheme.amber : GPTheme.ink)
-                    .lineLimit(2).minimumScaleFactor(0.85)
+                    .lineLimit(1).minimumScaleFactor(0.9)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             }
