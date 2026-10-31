@@ -129,12 +129,6 @@ struct OnboardingView: View {
         .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 10)
     }
 
-    private var progress: Double {
-        let all = OnboardingStep.allCases
-        guard let i = all.firstIndex(of: conversation.step) else { return 0 }
-        return Double(i) / Double(all.count - 1)
-    }
-
     private var feed: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -169,20 +163,6 @@ struct OnboardingView: View {
     }
 
     private var questionNumber: Int? { conversation.questionNumber }
-
-    private var intro: some View {
-        VStack(alignment: .center, spacing: 8) {
-            FlameMark(size: 96).padding(.top, 18)
-            Text("Hi, I'm Hygge,")
-                .font(.system(.largeTitle, design: .rounded, weight: .bold))
-                .foregroundStyle(GPTheme.ink)
-            Text("hoo-gah").font(.headline).foregroundStyle(GPTheme.amber)
-            Text("I find work you like and handle\nthe boring parts.")
-                .font(.body).foregroundStyle(GPTheme.ink).multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.bottom, 6)
-    }
 
     // MARK: - Feed entries
 
