@@ -271,9 +271,9 @@ struct OnboardingView: View {
                     Label("Picked for you from what you've said", systemImage: "wand.and.rays")
                         .font(.caption.weight(.medium)).foregroundStyle(GPTheme.amber)
                 }
-                // Two columns at standard sizes; one full-width column at
-                // accessibility sizes so tile labels never truncate.
-                LazyVGrid(columns: dynamicTypeSize.isAccessibilitySize
+                // Two columns at small sizes; one full-width column from
+                // XXLarge up, so tile labels never truncate or break.
+                LazyVGrid(columns: dynamicTypeSize >= .xxLarge
                           ? [GridItem(.flexible())]
                           : [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                     ForEach(categoryOptions) { category in
@@ -288,7 +288,7 @@ struct OnboardingView: View {
                         }
                     }
                 }
-                textRow(placeholder: "Type another preference...")
+                textRow(placeholder: "Type another…")
                 primaryButton("Continue") {
                     let extra = input.trimmingCharacters(in: .whitespaces)
                     if !extra.isEmpty, !conversation.profile.skills.contains(extra) {
@@ -467,7 +467,6 @@ struct OnboardingView: View {
             HStack(spacing: 5) {
                 if selected { Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)) }
                 Text(label).font(.subheadline.weight(selected ? .semibold : .regular))
-                    .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
             }
@@ -543,7 +542,6 @@ struct OnboardingView: View {
                 Text(category.tileLabel)
                     .font(.body.weight(selected ? .semibold : .regular))
                     .foregroundStyle(selected ? GPTheme.amber : GPTheme.ink)
-                    .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
