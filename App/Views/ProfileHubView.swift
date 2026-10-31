@@ -57,20 +57,49 @@ struct ProfileHubView: View {
         .padding(.vertical, 16).hyggeCard(radius: 26)
     }
 
-    private func sectionCard<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 11) {
-            Text(title).font(.system(.headline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
+    private func sectionCard<Content: View>(_ title: String, badge: String? = nil,
+                                            badgeTint: Color = HyggeTheme.sageTint,
+                                            @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(alignment: .center) {
+                Text(title).font(.system(.headline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
+                Spacer()
+                if let badge {
+                    ZStack {
+                        Circle().fill(badgeTint).frame(width: 36, height: 36)
+                        Image(systemName: badge).font(.system(size: 15)).foregroundStyle(HyggeTheme.sageDeep)
+                    }
+                }
+            }
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(20).hyggeCard(radius: 26)
     }
 
+    /// Mock labeled row: sage icon disc, bold label, plain value under it.
+    private func labeledRow(_ icon: String, _ label: String, _ value: String) -> some View {
+        HStack(alignment: .center, spacing: 13) {
+            ZStack {
+                Circle().fill(HyggeTheme.sage).frame(width: 42, height: 42)
+                Image(systemName: icon).font(.system(size: 17)).foregroundStyle(.white)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label).font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
+                Text(value).font(.subheadline).foregroundStyle(HyggeTheme.ink)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
     private var aboutYou: some View {
-        sectionCard("About you") {
-            beliefRow("You enjoy \(listOr(store.profile.interests.map(\.label).joined(separator: ", "), "—"))")
-            beliefRow("Your lowest rate is $\(Int(store.profile.hourlyRateFloor))/hr. Below that, I quietly drop it.")
-            beliefRow("You're based in \(listOr(store.profile.locationLabel, "—"))\(store.profile.availabilityNotes.isEmpty ? "" : ", free \(store.profile.availabilityNotes.lowercased())").")
+        sectionCard("About you", badge: "pencil") {
+            labeledRow("briefcase.fill", "Work you enjoy",
+                       listOr(store.profile.interests.map(\.activityLabel).joined(separator: ", "), "Not set yet"))
+            labeledRow("banknote.fill", "Lowest rate",
+                       "$\(Int(store.profile.hourlyRateFloor))/hr — below that, I quietly drop it")
+            labeledRow("mappin.and.ellipse", "Location",
+                       listOr(store.profile.locationLabel, "Not set yet") + (store.profile.availabilityNotes.isEmpty ? "" : " · free \(store.profile.availabilityNotes.lowercased())"))
             Divider()
             HStack {
                 Label(store.isPaused ? "Hygge is paused" : "Hygge is working for you",
@@ -92,7 +121,7 @@ struct ProfileHubView: View {
     /// Beliefs about YOU: quoted, sourced, dated — and only ever added with
     /// your confirmation. Website know-how lives in its own section below.
     private var beliefsSection: some View {
-        sectionCard("What Hygge believes about you") {
+        sectionCard("What Hygge has saved about you", badge: "heart.fill", badgeTint: HyggeTheme.butterTint) {
             if !store.profile.skills.isEmpty {
                 beliefRow("Skills: \(store.profile.skills.joined(separator: ", "))", deletable: {
                     store.profile.skills = []
@@ -143,7 +172,7 @@ struct ProfileHubView: View {
     /// Website-navigation know-how is NOT a belief about you; it lives here,
     /// separate, so the two never get confused.
     private var siteKnowledge: some View {
-        sectionCard("How Hygge navigates your sites") {
+        sectionCard("How Hygge navigates your sites", badge: "map") {
             if store.siteMemory.memories.isEmpty {
                 Text("No site know-how yet. I'll build it up as I work — it's about the websites, never about you.")
                     .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
@@ -159,7 +188,7 @@ struct ProfileHubView: View {
     }
 
     private var approvedSites: some View {
-        sectionCard("Sites you approved") {
+        sectionCard("Sites you approved", badge: "link") {
             let approved = store.sites.filter {
                 [.hasAccount, .profileLive, .watching, .joining, .needsVerification, .paused]
                     .contains(store.accountStates[$0.id] ?? .unknown)
@@ -200,39 +229,43 @@ struct ProfileHubView: View {
     }
 
     private var insights: some View {
-        sectionCard("Your insights") {
-            HStack(alignment: .top, spacing: 26) {
-                statBlock(icon: "dollarsign", disc: HyggeTheme.butter, label: "Earnings",
-                          value: JournalBuilder.money(store.earningsGross),
+        sectionCard("Your insights", badge: "chart.bar.fill", badgeTint: HyggeTheme.butterTint) {
+            HStack(alignment: .top, spacing: 0) {
+                statBlock(label: "Earnings", value: JournalBuilder.money(store.earningsGross),
                           caption: "amounts you confirmed")
-                statBlock(icon: "clock.fill", disc: HyggeTheme.sage, label: "Time saved",
-                          value: TimeSaved.aboutLabel(minutes: store.timeSavedMinutes),
-                          caption: "the math is below")
+                Rectangle().fill(HyggeTheme.hairline).frame(width: 1)
+                    .padding(.horizontal, 18).padding(.vertical, 4)
+                statBlock(label: "Time saved", value: TimeSaved.aboutLabel(minutes: store.timeSavedMinutes),
+                          caption: "always rounded down")
                 Spacer(minLength: 0)
             }
-            Text("Basis: ~\(TimeSaved.minutesPerListing) min per listing read, ~\(TimeSaved.minutesPerDraft) min per draft, ~\(TimeSaved.minutesPerSearchRun) min per search — always rounded down.")
+            Text("Basis: ~\(TimeSaved.minutesPerListing) min per listing read, ~\(TimeSaved.minutesPerDraft) min per draft, ~\(TimeSaved.minutesPerSearchRun) min per search.")
                 .font(.caption2).foregroundStyle(HyggeTheme.secondary)
         }
     }
 
-    private func statBlock(icon: String, disc: Color, label: String, value: String, caption: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            ZStack {
-                Circle().fill(disc.opacity(0.55)).frame(width: 42, height: 42)
-                Image(systemName: icon).font(.system(size: 17, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
-            }
-            Text(label).font(.subheadline).foregroundStyle(HyggeTheme.ink)
-            Text(value).font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-            Text(caption).font(.caption).foregroundStyle(HyggeTheme.secondary)
+    private func statBlock(label: String, value: String, caption: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.body).foregroundStyle(HyggeTheme.secondary)
+            Text(value).font(.system(size: 26, weight: .bold, design: .rounded)).foregroundStyle(HyggeTheme.ink)
+            Text(caption).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
         }
     }
 
     private var invite: some View {
-        sectionCard("Invite friends") {
-            HStack(spacing: 12) {
-                FlameMark(size: 30)
-                Text("I saved \(TimeSaved.aboutLabel(minutes: store.timeSavedMinutes)) with Hygge")
-                    .font(.system(.subheadline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
+        sectionCard("Invite friends", badge: "gift.fill", badgeTint: HyggeTheme.peach) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16).fill(HyggeTheme.butterTint).frame(width: 62, height: 62)
+                    Image(systemName: "paperplane").font(.system(size: 24)).foregroundStyle(HyggeTheme.sageDeep)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Share Hygge with a friend")
+                        .font(.system(.subheadline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
+                    Text("I saved \(TimeSaved.aboutLabel(minutes: store.timeSavedMinutes)) with Hygge")
+                        .font(.caption).foregroundStyle(HyggeTheme.secondary)
+                }
+                Spacer(minLength: 0)
             }
             ShareLink(item: "I saved \(TimeSaved.aboutLabel(minutes: store.timeSavedMinutes)) with Hygge — it finds gigs and handles the boring parts: https://usehygge.app") {
                 Text("Share")
@@ -244,7 +277,7 @@ struct ProfileHubView: View {
     }
 
     private var loginsAndService: some View {
-        sectionCard("Site logins (kept safe)") {
+        sectionCard("Site logins (kept safe)", badge: "key.fill") {
             Text("Passwords are kept safely and encrypted, typed only into the site itself — never shown in chat, drafts, or anywhere they could leak by accident. This phone keeps no copy.")
                 .font(.caption).foregroundStyle(HyggeTheme.secondary)
             ForEach(store.credentialRefs) { credential in

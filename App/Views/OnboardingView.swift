@@ -238,11 +238,11 @@ struct OnboardingView: View {
             .accessibilityLabel("Hygge is thinking")
         case .input:
             inputCard(step: entry.step ?? conversation.step)
-                .padding(.leading, 39)
+                .padding(.leading, 52)
         }
     }
 
-    private var avatar: some View { FlameMark(size: 24).padding(.top, 2) }
+    private var avatar: some View { FlameMark(size: 40).padding(.top, 2) }
 
     // MARK: - Input cards (in-feed, appear only after their agent message)
 
@@ -257,7 +257,7 @@ struct OnboardingView: View {
                     Label("Picked for you from what you've said", systemImage: "wand.and.rays")
                         .font(.caption.weight(.medium)).foregroundStyle(GPTheme.amber)
                 }
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                     ForEach(categoryOptions, id: \.activityLabel) { category in
                         enjoyTile(category)
                     }
@@ -280,7 +280,7 @@ struct OnboardingView: View {
             case .lowestRate:
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text("$\(Int(conversation.profile.hourlyRateFloor))")
-                        .font(.system(.title, design: .rounded, weight: .bold)).foregroundStyle(GPTheme.ink)
+                        .font(.system(size: 36, weight: .bold, design: .rounded)).foregroundStyle(GPTheme.ink)
                     Text("/ hour minimum").font(.subheadline).foregroundStyle(GPTheme.secondary)
                 }
                 Slider(value: Binding(get: { conversation.profile.hourlyRateFloor },
@@ -305,9 +305,9 @@ struct OnboardingView: View {
                 }
                 TextField("When are you free? e.g. Weekends, 10am-2pm", text: $availabilityInput)
                     .textFieldStyle(.plain).font(.body)
-                    .padding(.horizontal, 13).padding(.vertical, 11)
-                    .background(GPTheme.paper, in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(GPTheme.hairline, lineWidth: 1))
+                    .padding(.horizontal, 17).padding(.vertical, 13)
+                    .background(GPTheme.card, in: Capsule())
+                    .overlay(Capsule().stroke(GPTheme.hairline, lineWidth: 1))
                 permissionRow(icon: "calendar", title: "Calendar",
                               why: "So I never double-book you, and approved gigs land in your calendar.",
                               granted: calendarGranted) {
@@ -325,9 +325,9 @@ struct OnboardingView: View {
                 EmptyView()
             }
         }
-        .padding(16)
-        .background(GPTheme.card, in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(GPTheme.hairline, lineWidth: 1))
+        .padding(20)
+        .background(GPTheme.card, in: RoundedRectangle(cornerRadius: 26))
+        .overlay(RoundedRectangle(cornerRadius: 26).stroke(GPTheme.hairline, lineWidth: 1))
         .shadow(color: GPTheme.ink.opacity(0.06), radius: 14, y: 5)
     }
 
@@ -375,9 +375,13 @@ struct OnboardingView: View {
     }
 
     private func summaryRow(_ icon: String, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 9) {
-            Image(systemName: icon).font(.caption).foregroundStyle(GPTheme.teal).frame(width: 16)
+        HStack(alignment: .center, spacing: 11) {
+            ZStack {
+                Circle().fill(HyggeTheme.sageTint).frame(width: 34, height: 34)
+                Image(systemName: icon).font(.system(size: 14)).foregroundStyle(GPTheme.teal)
+            }
             Text(text).font(.subheadline).foregroundStyle(GPTheme.ink)
+            Spacer(minLength: 0)
         }
     }
 
@@ -389,7 +393,7 @@ struct OnboardingView: View {
                 Image(systemName: icon).font(.system(size: 14)).foregroundStyle(GPTheme.teal)
             }
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(GPTheme.ink)
+                Text(title).font(.body.weight(.semibold)).foregroundStyle(GPTheme.ink)
                 Text(why).font(.caption).foregroundStyle(GPTheme.secondary)
             }
             Spacer()
@@ -449,12 +453,12 @@ struct OnboardingView: View {
                                action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 7) {
-                Text(title).font(.subheadline.weight(.semibold))
+                Text(title).font(.body.weight(.semibold))
                 if let icon { Image(systemName: icon).font(.system(size: 12, weight: .semibold)) }
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 13)
-            .background(GPTheme.amber, in: RoundedRectangle(cornerRadius: 13))
+            .padding(.vertical, 15)
+            .background(GPTheme.amber, in: Capsule())
             .foregroundStyle(.white)
         }
         .buttonStyle(.plain)
@@ -501,8 +505,8 @@ struct OnboardingView: View {
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
-            .padding(.horizontal, 15).padding(.vertical, 12)
+            .frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
+            .padding(.horizontal, 16).padding(.vertical, 14)
             .background(selected ? HyggeTheme.peach : GPTheme.card,
                         in: RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20)
