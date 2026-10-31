@@ -20,6 +20,8 @@ jobs:
         run: swift test --disable-sandbox
       - name: User-facing copy check
         run: node scripts/check-user-copy.mjs
+      - name: Flame assets are full-frame APNGs
+        run: python3 scripts/check-flame-assets.py
       - name: iOS build (unsigned)
         run: >
           xcodebuild -project Hygge.xcodeproj -scheme Hygge

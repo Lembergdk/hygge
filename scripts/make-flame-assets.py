@@ -14,10 +14,7 @@
 #
 # Run: python3 scripts/make-flame-assets.py [source-dir]
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 
 from PIL import Image
 
@@ -63,30 +60,86 @@ def write_static_and_icon() -> None:
 
 
 def write_animation(anim_dir: str, expected: int, out_name: str) -> None:
-    # Palette APNG via ffmpeg palettegen/paletteuse: shared 256-color
-    # palette with reserved transparency, 360x450 (flame displays at
-    # <=150pt). ~65% smaller than the RGBA encode, visually identical.
+    # Palette APNG with FULL-CANVAS frames (PIL, not ffmpeg): shared
+    # 255-color palette + index-0 transparency, 360x450 at 40ms.
+    # ffmpeg's APNG muxer writes partial subframes with dispose ops,
+    # which ImageIO renders miscomposited on device (pale, clipped) —
+    # full frames render identically everywhere. Guarded by
+    # scripts/check-flame-assets.py.
     files = sorted(name for name in os.listdir(anim_dir) if name.endswith(".png"))
     if len(files) != expected:
         raise SystemExit(f"expected {expected} frames in {anim_dir}, found {len(files)}")
-    if not shutil.which("ffmpeg"):
-        raise SystemExit("ffmpeg is required to encode the palette APNGs")
+
+    frames = [
+        Image.open(os.path.join(anim_dir, name)).convert("RGBA").resize(
+            (360, 450), Image.LANCZOS)
+        for name in files
+    ]
+
+    # Shared palette from a mosaic of all frames (on black; transparent
+    # pixels are remapped to index 0 below, so their RGB is irrelevant).
+    mosaic = Image.new("RGB", (360 * 6, 450 * ((len(frames) + 5) // 6)))
+    for i, frame in enumerate(frames):
+        mosaic.paste(frame.convert("RGB"), ((i % 6) * 360, (i // 6) * 450))
+    palette_img = mosaic.quantize(colors=255, method=Image.MEDIANCUT)
+    palette = [0, 0, 0] + (palette_img.getpalette() or [])[: 255 * 3]
+
+    quantized = []
+    for frame in frames:
+        q = frame.convert("RGB").quantize(
+            colors=255, palette=palette_img, dither=Image.FLOYDSTEINBERG)
+        idx = q.point(lambda i: i + 1)
+        alpha = frame.getchannel("A").point(lambda a: 0 if a < 96 else 255)
+        idx.paste(0, mask=alpha.point(lambda a: 255 - a))
+        idx.putpalette(palette)
+        idx.info["transparency"] = 0
+        quantized.append(idx)
 
     out = os.path.join(ROOT, "App", out_name)
-    with tempfile.TemporaryDirectory() as tmp:
-        for i, name in enumerate(files, 1):
-            frame = Image.open(os.path.join(anim_dir, name)).convert("RGBA")
-            frame.resize((360, 450), Image.LANCZOS).save(
-                os.path.join(tmp, f"frame_{i:04d}.png"))
-        vf = ("split[a][b];"
-              "[a]palettegen=reserve_transparent=1:transparency_color=000000[p];"
-              "[b][p]paletteuse=alpha_threshold=96:dither=bayer:bayer_scale=3")
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-framerate", "25",
-             "-i", os.path.join(tmp, "frame_%04d.png"),
-             "-vf", vf, "-f", "apng", "-plays", "0", out],
-            check=True)
+    save_apng_full_frames(quantized, palette, out)
     print(f"anim:   {out} ({expected} frames, {os.path.getsize(out) // 1024} KB)")
+
+
+def save_apng_full_frames(frames, palette, out_path) -> None:
+    # Hand-written APNG: both ffmpeg and Pillow crop frames to the
+    # changed bounding box, which ImageIO miscomposites on device.
+    # Here every fcTL covers the full canvas at (0,0), blend=SOURCE.
+    import binascii
+    import struct
+    import zlib
+
+    w, h = frames[0].size
+
+    def chunk(typ, payload):
+        return (struct.pack(">I", len(payload)) + typ + payload
+                + struct.pack(">I", binascii.crc32(typ + payload) & 0xFFFFFFFF))
+
+    seq = 0
+
+    def fctl():
+        nonlocal seq
+        payload = struct.pack(">IIIIIHHBB", seq, w, h, 0, 0, 1, 25, 0, 0)
+        seq += 1
+        return chunk(b"fcTL", payload)
+
+    parts = [b"\x89PNG\r\n\x1a\n",
+             chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 3, 0, 0, 0)),
+             chunk(b"acTL", struct.pack(">II", len(frames), 0)),
+             chunk(b"PLTE", bytes(palette[: 256 * 3])),
+             chunk(b"tRNS", bytes([0]))]
+    for i, frame in enumerate(frames):
+        raw = frame.tobytes()
+        scan = b"".join(b"\x00" + raw[y * w:(y + 1) * w] for y in range(h))
+        comp = zlib.compress(scan, 9)
+        parts.append(fctl())
+        if i == 0:
+            parts.append(chunk(b"IDAT", comp))
+        else:
+            parts.append(chunk(b"fdAT", struct.pack(">I", seq) + comp))
+            seq += 1
+    parts.append(chunk(b"IEND", b""))
+    with open(out_path, "wb") as f:
+        f.write(b"".join(parts))
 
 
 write_static_and_icon()
