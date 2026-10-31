@@ -6,7 +6,7 @@
 
 <p align="center"><strong>Work you like, without the boring parts.</strong></p>
 
-<p align="center">Hygge (Danish, pronounced "hoo-gah") is being cozy and spending quality time with the people you love. This app gets you more of that — more money, fewer worries — by doing the boring work of finding it and managing it.</p>
+<p align="center">Hygge (Danish, pronounced "hoo-gah") is being cozy and spending quality time with the people you love. This app gets you more of that — more money, fewer worries — by doing the boring work of finding work and managing work for you.</p>
 
 <p align="center"><a href="https://usehygge.app">usehygge.app</a> · Built for the Meta Global AI Developer Hackathon — theme: <em>Build for Your World</em></p>
 
@@ -14,15 +14,15 @@
 
 Finding work is itself unpaid work. Gig opportunities are scattered across dozens of sites, boards, subreddits, and Facebook groups, and nobody has time to watch them all — and even when you find work, managing it is a second unpaid job: juggling accounts, checking your calendar, confirming bookings, and keeping up communication before and after every gig.
 
-Hygge watches all of it for you, and only asks for your time when there's something worth deciding.
+Hygge does all of it for you, and only asks for your time when there's something worth deciding.
 
-## What Hygge does
+## How Hygge works
 
 **Find work.** Hygge builds one earnings profile from your skills and interests, then finds work that fits: tailored job applications, freelancer and gig-site signup with profile management and proposals, and scans of boards, subreddits, and Facebook groups for paid opportunities — so you never miss a beat.
 
 **Manage it end-to-end.** Hygge doesn't stop at finding the job. It manages your accounts and each job from start to finish: checking your calendar for availability, adding confirmed bookings to your calendar, and handling communication before and after gigs.
 
-**One approval queue.** Everything Hygge finds and drafts lands in a single queue, and nothing ever acts in your name without your approval.
+**Always your voice.** Hygge never acts in your name without your approval.
 
 ## Screenshots
 
