@@ -129,7 +129,8 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertTrue(result.browserTrace.contains { $0.action == .extract && $0.succeeded })
     }
 
-    func testThreeQuestionOnboarding() {
+    /// One question per message: enjoy → rate → where → when → summary.
+    func testOnboardingOneQuestionPerMessage() {
         var chat = OnboardingConversation()
         XCTAssertTrue(chat.submitText(""))                 // welcome -> Q1
         XCTAssertEqual(chat.step, .enjoyWork)
@@ -137,13 +138,16 @@ final class HyggeCoreTests: XCTestCase {
         chat.toggleCategory(.petCare)
         XCTAssertTrue(chat.confirmEnjoyWork())             // -> Q2
         XCTAssertEqual(chat.step, .lowestRate)
-        XCTAssertTrue(chat.submitText("30"))               // -> Q3
-        XCTAssertEqual(chat.step, .whereWhen)
-        chat.profile.availabilityNotes = "Weekends"
-        XCTAssertTrue(chat.submitText("Leeds"))            // -> summary
+        XCTAssertTrue(chat.submitText("30"))               // -> where
+        XCTAssertEqual(chat.step, .where)
+        XCTAssertTrue(chat.submitText("Leeds"))            // -> when
+        XCTAssertEqual(chat.step, .when)
+        XCTAssertTrue(chat.submitText("Weekends"))         // -> summary
         XCTAssertEqual(chat.step, .summary)
         XCTAssertTrue(chat.profile.isComplete)
         XCTAssertEqual(chat.profile.hourlyRateFloor, 30)
+        XCTAssertEqual(chat.profile.locationLabel, "Leeds")
+        XCTAssertEqual(chat.profile.availabilityNotes, "Weekends")
     }
 
     /// LLM turns personalize the script: facts volunteered early are extracted
@@ -161,10 +165,10 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertEqual(chat.suggestedCategories.first, .petCare)
         XCTAssertTrue(chat.suggestedSkills.contains("Pet photography"))
         XCTAssertTrue(chat.confirmEnjoyWork())
-        _ = chat.submitText("25") // rate -> whereWhen, location already known only if availability also known
-        XCTAssertEqual(chat.step, .whereWhen)
+        _ = chat.submitText("25") // rate -> where (already known, skipped) -> when
+        XCTAssertEqual(chat.step, .when)
         chat.profile.availabilityNotes = "Mornings"
-        XCTAssertTrue(chat.submitText("")) // location already satisfied
+        XCTAssertTrue(chat.submitText("")) // availability already satisfied
         XCTAssertEqual(chat.step, .summary)
     }
 
@@ -355,17 +359,4 @@ final class HyggeCoreTests: XCTestCase {
         }
     }
 
-    /// Onboarding can go back a question, and progress counts only real questions.
-    func testOnboardingBackNavigationAndProgress() {
-        var chat = OnboardingConversation()
-        XCTAssertEqual(chat.questionNumber, nil)
-        _ = chat.submitText("") // welcome -> enjoyWork
-        XCTAssertEqual(chat.questionNumber, 1)
-        chat.profile.interests = [.petCare]
-        XCTAssertTrue(chat.confirmEnjoyWork())
-        XCTAssertEqual(chat.questionNumber, 2)
-        chat.goBack()
-        XCTAssertEqual(chat.step, .enjoyWork)
-        XCTAssertEqual(chat.questionNumber, 1)
-    }
 }

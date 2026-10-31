@@ -104,10 +104,6 @@ struct ProfileHubView: View {
                 Button(store.isPaused ? "Resume" : "Pause") { store.setPaused(!store.isPaused) }
                     .font(.caption.weight(.semibold)).buttonStyle(.bordered).tint(HyggeTheme.sageDeep)
             }
-            #if DEBUG
-            NavigationLink("Permissions & agent service") { BackendSettingsView() }
-                .font(.caption.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
-            #endif
             Button("Start over (reset everything)", role: .destructive) { store.resetAll() }
                 .font(.caption)
         }
