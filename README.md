@@ -37,8 +37,8 @@ Hygge watches all of it for you, and only asks for your time when there's someth
 ## How it works
 
 1. **Tell Hygge what you're good at.** A conversational onboarding builds your earnings profile from your skills and interests — personalized replies, free-text extraction, tailored suggestions.
-2. **Radar scans the sites you approve.** A cloud browser agent works on *any* website you point it at — pet-sitting sites, Upwork, Reddit, Facebook groups, local task boards, or a URL you paste in. No per-site APIs, integrations, or scripts: the agent starts each mission from its goal, looks at the page, and decides every action itself.
-3. **Agents draft, you approve.** Every task is drafted first (goal, site, exact text), and nothing runs until you tap approve. Afterwards each run is distilled into advisory site memory — hints that make future visits faster, never replayed as a script.
+2. **Hygge scans the sites you approve.** A cloud browser agent works on *any* website you point it at — pet-sitting sites, Upwork, Reddit, Facebook groups, local task boards, or a URL you paste in. No per-site APIs, integrations, or scripts: the agent starts each mission from its goal, looks at the page, and decides every action itself.
+3. **Hygge draft, you approve.** Every task is drafted first (goal, site, exact text), and nothing runs until you tap approve. Afterwards each run is distilled into advisory site memory — hints that make future visits faster, never replayed as a script.
 4. **Hygge runs the job end-to-end.** Once you approve, Hygge checks your calendar for availability, adds the confirmed booking to your calendar, and handles the communication around the gig — before and after — so the work itself is the only part left for you.
 
 ## For judges
