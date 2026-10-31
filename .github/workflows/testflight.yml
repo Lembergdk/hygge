@@ -1,0 +1,54 @@
+name: TestFlight
+
+# Manual: Actions -> TestFlight -> Run workflow.
+# Build numbers come from the workflow run number (+100), so they
+# always increase and never collide with local uploads.
+on:
+  workflow_dispatch:
+
+jobs:
+  upload:
+    runs-on: macos-15
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+      ASC_ISSUER: ${{ secrets.ASC_API_ISSUER_ID }}
+      BUILD_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install App Store Connect API key
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "${{ secrets.ASC_API_KEY_P8_BASE64 }}" | base64 --decode \
+            > ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8
+          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8
+          echo "KEY_PATH=$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8" >> "$GITHUB_ENV"
+
+      - name: Archive
+        run: >
+          xcodebuild -project Hygge.xcodeproj -scheme Hygge
+          -configuration Release -destination 'generic/platform=iOS'
+          -archivePath /tmp/Hygge.xcarchive
+          CURRENT_PROJECT_VERSION=$((BUILD_NUMBER + 100))
+          -allowProvisioningUpdates
+          -authenticationKeyPath "$KEY_PATH"
+          -authenticationKeyID "$ASC_KEY_ID"
+          -authenticationKeyIssuerID "$ASC_ISSUER"
+          archive
+
+      - name: Export IPA
+        run: >
+          xcodebuild -exportArchive
+          -archivePath /tmp/Hygge.xcarchive
+          -exportPath /tmp/HyggeExport
+          -exportOptionsPlist ExportOptions.plist
+          -allowProvisioningUpdates
+          -authenticationKeyPath "$KEY_PATH"
+          -authenticationKeyID "$ASC_KEY_ID"
+          -authenticationKeyIssuerID "$ASC_ISSUER"
+
+      - name: Upload to TestFlight
+        run: >
+          xcrun altool --upload-app
+          -f /tmp/HyggeExport/Hygge.ipa -t ios
+          --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER"
