@@ -25,7 +25,6 @@ struct ConversationView: View {
                                     HStack(alignment: .bottom, spacing: 7) {
                                         FlameMark(size: 26)
                                         ThinkingDotsShared()
-                                        Text("Thinking…").font(.caption).foregroundStyle(HyggeTheme.secondary)
                                         Spacer()
                                     }
                                 }

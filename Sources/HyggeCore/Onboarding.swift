@@ -175,17 +175,18 @@ public struct ChatEntry: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
-// MARK: - First run: three questions, inside the same thread
+// MARK: - First run: one question per message, inside the same thread
 
 public enum OnboardingStep: String, Codable, CaseIterable, Sendable {
-    case welcome, enjoyWork, lowestRate, whereWhen, summary, done
+    case welcome, enjoyWork, lowestRate, `where`, when, summary, done
 
     public var prompt: String {
         switch self {
         case .welcome: return "Hygge — \"hoo-gah\". Danish for cozy time with the people you love. That is what the money is for. I'll find work across the internet, draft everything, and only tap you on the shoulder when a decision is really yours. Ready?"
         case .enjoyWork: return "What kinds of work do you actually enjoy? Tap any that fit, or just tell me."
         case .lowestRate: return "What's your lowest rate? Anything below it, I'll quietly drop — you'll never see it."
-        case .whereWhen: return "Roughly where are you, and when are you free? It keeps local work close and stops double-bookings."
+        case .where: return "Roughly where are you? It keeps local work close to home."
+        case .when: return "And when are you usually free? It stops me double-booking you."
         case .summary: return "That's all I need to start. I'll look overnight and tell you in the morning — sooner if something needs you."
         case .done: return "You're set up!"
         }
@@ -244,24 +245,6 @@ public struct OnboardingConversation: Equatable, Sendable {
 
     public var isFinished: Bool { step == .done }
 
-    /// Truthful progress: only the three real questions count.
-    public var questionNumber: Int? {
-        switch step {
-        case .enjoyWork: return 1
-        case .lowestRate: return 2
-        case .whereWhen: return 3
-        default: return nil
-        }
-    }
-
-    public var canGoBack: Bool { step != .welcome && step != .done }
-
-    public mutating func goBack() {
-        let all = OnboardingStep.allCases
-        guard let i = all.firstIndex(of: step), i > 0, step != .done else { return }
-        step = all[i - 1]
-    }
-
     public mutating func advance() {
         let all = OnboardingStep.allCases
         guard var i = all.firstIndex(of: step) else { return }
@@ -275,7 +258,8 @@ public struct OnboardingConversation: Equatable, Sendable {
     private func isAlreadySatisfied(_ step: OnboardingStep) -> Bool {
         switch step {
         case .enjoyWork: return false // taste always confirms with the user
-        case .whereWhen: return !profile.locationLabel.isEmpty && !profile.availabilityNotes.isEmpty
+        case .where: return !profile.locationLabel.isEmpty
+        case .when: return !profile.availabilityNotes.isEmpty
         default: return false
         }
     }
@@ -300,9 +284,12 @@ public struct OnboardingConversation: Equatable, Sendable {
             let digits = value.filter { $0.isNumber }
             if let rate = Double(digits), rate > 0 { profile.hourlyRateFloor = rate }
             advance(); return true
-        case .whereWhen:
+        case .where:
             if !value.isEmpty { profile.locationLabel = value }
             guard !profile.locationLabel.isEmpty else { return false }
+            advance(); return true
+        case .when:
+            if !value.isEmpty { profile.availabilityNotes = value }
             advance(); return true
         case .summary:
             advance(); return true

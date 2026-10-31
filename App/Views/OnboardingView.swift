@@ -33,11 +33,9 @@ struct OnboardingView: View {
     @State private var conversation = OnboardingConversation()
     @State private var entries: [FeedEntry] = []
     @State private var input = ""
-    @State private var availabilityInput = ""
     @State private var locationService = LocationService()
     @State private var calendarGranted: Bool?
     @State private var notificationsGranted: Bool?
-    @State private var showBackendSettings = false
     @State private var serviceOnline: Bool?
     @State private var streamingEntryID: UUID?
     @State private var started = false
@@ -57,18 +55,6 @@ struct OnboardingView: View {
                     }
                 }
             }
-            #if DEBUG
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showBackendSettings = true } label: {
-                        Image(systemName: "server.rack").foregroundStyle(GPTheme.ink)
-                    }
-                }
-            }
-            .sheet(isPresented: $showBackendSettings, onDismiss: { Task { await checkService() } }) {
-                BackendSettingsView()
-            }
-            #endif
             .onAppear {
                 Task { await checkService() }
                 if !started {
@@ -108,56 +94,13 @@ struct OnboardingView: View {
 
     @ViewBuilder
     private var header: some View {
-        // One row at standard sizes; stacked at accessibility sizes so
-        // Back, the offline note, and the counter never collide.
-        if dynamicTypeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .center) {
-                    backButton
-                    Spacer()
-                    questionCounter
-                }
-                offlineNote
-            }
-            .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 10)
-        } else {
-            HStack(alignment: .center) {
-                backButton
-                Spacer()
-                offlineNote
-                Spacer()
-                questionCounter
-            }
-            .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 10)
-        }
-    }
-
-    @ViewBuilder
-    private var backButton: some View {
-        if conversation.canGoBack {
-            Button { goBackOneQuestion() } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "chevron.backward").font(.system(size: 14, weight: .semibold))
-                    Text("Back").font(.body).lineLimit(1)
-                }
-                .foregroundStyle(GPTheme.amber)
-            }
-            .accessibilityLabel("Back one question")
-        }
-    }
-
-    @ViewBuilder
-    private var offlineNote: some View {
         if serviceOnline == false {
-            Text("Offline — simple mode").font(.caption).foregroundStyle(GPTheme.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    @ViewBuilder
-    private var questionCounter: some View {
-        if let q = questionNumber {
-            Text("\(q) of 3").font(.body).foregroundStyle(GPTheme.secondary).lineLimit(1)
+            HStack {
+                Text("Offline — simple mode").font(.caption).foregroundStyle(GPTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+            }
+            .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 10)
         }
     }
 
@@ -194,8 +137,6 @@ struct OnboardingView: View {
         }
     }
 
-    private var questionNumber: Int? { conversation.questionNumber }
-
     // MARK: - Feed entries
 
     @ViewBuilder
@@ -205,7 +146,6 @@ struct OnboardingView: View {
             HStack(alignment: .top, spacing: 9) {
                 avatar
                 VStack(alignment: .leading, spacing: 3) {
-                Text("Hygge").font(.caption).foregroundStyle(GPTheme.amber)
                 Text(entry.text.isEmpty ? " " : entry.text)
                     .font(.body)
                     .foregroundStyle(GPTheme.ink)
@@ -246,7 +186,6 @@ struct OnboardingView: View {
                         topLeadingRadius: 6, bottomLeadingRadius: 20,
                         bottomTrailingRadius: 20, topTrailingRadius: 20)
                         .stroke(GPTheme.hairline, lineWidth: 1))
-                Text("Thinking…").font(.caption).foregroundStyle(GPTheme.secondary)
                 Spacer()
             }
             .accessibilityLabel("Hygge is thinking")
@@ -314,8 +253,7 @@ struct OnboardingView: View {
                 primaryButton("Continue") {
                     finishInput(userText: "At least $\(Int(conversation.profile.hourlyRateFloor))/hr", mutate: { $0.advance() })
                 }
-            case .whereWhen:
-                Text("Where").font(.caption.weight(.semibold)).foregroundStyle(GPTheme.secondary)
+            case .where:
                 textRow(placeholder: "Town or city")
                 Button {
                     isLocating = true
@@ -346,27 +284,25 @@ struct OnboardingView: View {
                     Text("Couldn't find you — typing your town works just as well.")
                         .font(.caption).foregroundStyle(GPTheme.secondary)
                 }
-                Text("When").font(.caption.weight(.semibold)).foregroundStyle(GPTheme.secondary)
-                    .padding(.top, 4)
-                TextField("When are you free? e.g. Weekends, 10am-2pm", text: $availabilityInput)
-                    .textFieldStyle(.plain).font(.body)
-                    .padding(.horizontal, 17).padding(.vertical, 13)
-                    .background(GPTheme.card, in: Capsule())
-                    .overlay(Capsule().stroke(GPTheme.hairline, lineWidth: 1))
-                Divider().overlay(GPTheme.hairline).padding(.vertical, 2)
+                primaryButton("Continue") {
+                    let place = input.isEmpty ? conversation.profile.locationLabel : input
+                    submitUser(place, value: place)
+                    input = ""
+                }
+                .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty)
+                .opacity(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty ? 0.45 : 1)
+            case .when:
+                // Free text, like any other message — no invented picker UI.
+                textRow(placeholder: "Weekends, weekday evenings…")
                 permissionRow(icon: "calendar", title: "Calendar",
                               why: "So I never double-book you, and approved gigs land in your calendar.",
                               granted: calendarGranted) {
                     Task { calendarGranted = await PermissionService.requestCalendar() }
                 }
                 primaryButton("Continue") {
-                    conversation.profile.availabilityNotes = availabilityInput
-                    let place = input.isEmpty ? conversation.profile.locationLabel : input
-                    submitUser(place + (availabilityInput.isEmpty ? "" : " · " + availabilityInput), value: place)
+                    submitUser(input.isEmpty ? "It varies" : input, value: input)
                     input = ""
                 }
-                .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty)
-                .opacity(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty ? 0.45 : 1)
             case .summary:
                 summaryCard
             case .done:
@@ -379,31 +315,13 @@ struct OnboardingView: View {
         .shadow(color: GPTheme.ink.opacity(0.06), radius: 14, y: 5)
     }
 
-    @State private var nameDraft = ""
-
     private var summaryCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // The identity moment: one contextual question, asked when the
-            // name is actually about to be used on profiles — not upfront.
-            if conversation.profile.displayName.trimmingCharacters(in: .whitespaces).isEmpty {
-                Text("One last thing — what name should I use for you on profiles?")
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(GPTheme.ink)
-                HStack(spacing: 9) {
-                    TextField("Your name", text: $nameDraft)
-                        .textFieldStyle(.plain).font(.body)
-                        .padding(.horizontal, 13).padding(.vertical, 11)
-                        .background(GPTheme.paper, in: RoundedRectangle(cornerRadius: 12))
-                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(GPTheme.hairline, lineWidth: 1))
-                        .textInputAutocapitalization(.words)
-                    Button("Save name") {
-                        conversation.profile.displayName = nameDraft.trimmingCharacters(in: .whitespaces)
-                    }
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(GPTheme.teal)
-                    .disabled(nameDraft.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
+            // No name ask: the name arrives with account signup later.
+            if !conversation.profile.headline.isEmpty {
+                Text(conversation.profile.headline)
+                    .font(.system(.title3, design: .serif, weight: .semibold)).foregroundStyle(GPTheme.ink)
             }
-            Text(conversation.profile.headline.isEmpty ? conversation.profile.displayName : conversation.profile.headline)
-                .font(.system(.title3, design: .serif, weight: .semibold)).foregroundStyle(GPTheme.ink)
             summaryRow("briefcase", conversation.profile.interests.map(\.label).joined(separator: " · "))
             if !conversation.profile.skills.isEmpty {
                 summaryRow("wrench.and.screwdriver", conversation.profile.skills.joined(separator: ", "))
@@ -439,26 +357,29 @@ struct OnboardingView: View {
 
     private func permissionRow(icon: String, title: String, why: String, granted: Bool?,
                                action: @escaping () -> Void) -> some View {
-        HStack(spacing: 11) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 9).fill(GPTheme.teal.opacity(0.12)).frame(width: 34, height: 34)
-                Image(systemName: icon).font(.system(size: 14)).foregroundStyle(GPTheme.teal)
-            }
-            VStack(alignment: .leading, spacing: 1) {
+        // Icon, title, and the action share the top row; the explanation
+        // gets the full width below instead of a squeezed middle column.
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 11) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9).fill(GPTheme.teal.opacity(0.12)).frame(width: 34, height: 34)
+                    Image(systemName: icon).font(.system(size: 14)).foregroundStyle(GPTheme.teal)
+                }
                 Text(title).font(.body.weight(.semibold)).foregroundStyle(GPTheme.ink)
-                Text(why).font(.caption).foregroundStyle(GPTheme.secondary)
+                Spacer()
+                if let granted {
+                    Label(granted ? "On" : "Off", systemImage: granted ? "checkmark.circle.fill" : "circle")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(granted ? GPTheme.teal : GPTheme.secondary)
+                        .labelStyle(.iconOnly)
+                } else {
+                    Button("Allow") { action() }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.bordered).tint(GPTheme.teal).controlSize(.small)
+                }
             }
-            Spacer()
-            if let granted {
-                Label(granted ? "On" : "Off", systemImage: granted ? "checkmark.circle.fill" : "circle")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(granted ? GPTheme.teal : GPTheme.secondary)
-                    .labelStyle(.iconOnly)
-            } else {
-                Button("Allow") { action() }
-                    .font(.caption.weight(.semibold))
-                    .buttonStyle(.bordered).tint(GPTheme.teal).controlSize(.small)
-            }
+            Text(why).font(.caption).foregroundStyle(GPTheme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -508,7 +429,7 @@ struct OnboardingView: View {
     private func placeholder(for step: OnboardingStep) -> String {
         switch step {
         case .enjoyWork: return "Type another preference..."
-        case .whereWhen: return "Town or city"
+        case .where: return "Town or city"
         default: return "Type here"
         }
     }
@@ -595,16 +516,6 @@ struct OnboardingView: View {
 
     private func removeInputs() {
         entries.removeAll { $0.kind == .input }
-    }
-
-    /// Step back one question. History stays visible (it really happened);
-    /// Hygge simply asks again and the new answer wins.
-    private func goBackOneQuestion() {
-        guard conversation.canGoBack else { return }
-        removeInputs()
-        conversation.goBack()
-        entries.append(FeedEntry(kind: .agent, text: "No problem — let's redo that one. Your new answer replaces the old."))
-        Task { await agentTurn() }
     }
 
     /// Text-path submission: local script extraction first, then a generated turn.
@@ -778,41 +689,3 @@ private struct FlowLayout: Layout {
     }
 }
 
-#if DEBUG
-/// Where the agent service lives. On a phone, point this at the Mac running
-/// staging: paste a staging dev token; blank means the build default.
-struct BackendSettingsView: View {
-    @AppStorage("backendBaseURL") private var backendBaseURL = "https://api-staging.usehygge.app"
-    @AppStorage("backendToken") private var backendToken = ""
-    @Environment(\.dismiss) private var dismiss
-    @State private var testResult = ""
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Agent service") {
-                    TextField("Base URL", text: $backendBaseURL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                    SecureField("API token (LAN mode)", text: $backendToken)
-                    Text("Leave blank for the build default (staging in Debug, production in Release). Debug only: without a reachable service, onboarding falls back to built-in prompts and missions run locally (simulated).")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-                Button("Test connection") {
-                    Task {
-                        do {
-                            let health = try await BackendClient().testConnection()
-                            testResult = "Connected. LLM: \(health.llm ?? "?"), browser: \(health.browser ?? "?"). Token accepted."
-                        } catch {
-                            testResult = "Could not connect: \(error.localizedDescription). Check: same Wi-Fi, server running with LAN=1, URL/token correct, and allow Hygge under iOS Settings → Privacy & Security → Local Network."
-                        }
-                    }
-                }
-                if !testResult.isEmpty { Text(testResult).font(.footnote) }
-                Button("Done") { dismiss() }
-            }
-            .navigationTitle("Agent service")
-        }
-    }
-}
-#endif
