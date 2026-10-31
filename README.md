@@ -23,16 +23,14 @@ never shown in the app, logs, or prompts.
 The browser is driven by an LLM agent, one per user: **muse-spark-1.3** for
 routine steps/extraction, **muse-wonder-1.0** for planning, deviations, and
 drafting — routed per phase in `llm.mjs`. Point it at a live endpoint with
-`MUSE_LLM_BASE_URL` + `MUSE_LLM_API_KEY`; until then a labelled simulated
+the `HYGGE_LLM_*` Worker settings; without a key a labelled simulated
 decider runs the same loop offline.
 
-**Agent service** (cloud browser, site memory, credential vault)
-
-```bash
-cd backend/agent-service
-node test_server.mjs                                    # integration checks
-HYGGE_VAULT_KEY=$(openssl rand -hex 32) node server.mjs   # http://127.0.0.1:8787
-```
+**Agent service** (cloud browser, site memory, credential vault) —
+lives in `backend/cloudflare` (Worker + per-user sandbox). Staging:
+https://api-staging.usehygge.app, production: https://api.usehygge.app.
+See `backend/cloudflare/README.md`. The original local Node service
+was retired once the cloud port reached parity (in git history).
 
 Real browsing via Cloudflare Browser Run (isolated Chrome per session).
 On this machine the API token is read at runtime from the macOS Keychain
@@ -70,8 +68,7 @@ the feed as real items, site-memory distillation, encrypted credential
 vault with redacted injection, interactive cloud-browser view with
 takeover, applications pipeline, calendar booking.
 
-Live-verified on this machine (`npm run test:live:agent` in
-`backend/agent-service`): on a cold visit to Remote OK the agent chose its
+Live-verified on this machine (the original local service, since retired): on a cold visit to Remote OK the agent chose its
 own actions step by step (muse-spark-1.3, escalating to muse-wonder-1.0
 after a failed click), extracted real job listings, decided it was done,
 and only then distilled site-memory hints. Still to build: deduped,

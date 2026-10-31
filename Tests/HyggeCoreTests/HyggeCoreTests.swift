@@ -2,6 +2,22 @@ import XCTest
 @testable import HyggeCore
 
 final class HyggeCoreTests: XCTestCase {
+    func testCloudRequirementResolution() {
+        // Explicit Info.plist value wins, whatever the build.
+        XCTAssertTrue(CloudRequirement.resolve(infoPlistValue: "YES", isDebugBuild: true))
+        XCTAssertFalse(CloudRequirement.resolve(infoPlistValue: "NO", isDebugBuild: false))
+        // Absent value: Debug may work locally, Release must require cloud.
+        XCTAssertFalse(CloudRequirement.resolve(infoPlistValue: nil, isDebugBuild: true))
+        XCTAssertTrue(CloudRequirement.resolve(infoPlistValue: nil, isDebugBuild: false))
+        // Garbage is treated as absent, never as a silent yes in Debug.
+        XCTAssertFalse(CloudRequirement.resolve(infoPlistValue: "banana", isDebugBuild: true))
+    }
+
+    func testLocalFallbackRequiresPermission() {
+        XCTAssertTrue(CloudRequirement.mayRunLocally(requireCloud: false))
+        XCTAssertFalse(CloudRequirement.mayRunLocally(requireCloud: true))
+    }
+
     private func petProfile() -> EarningsProfile {
         EarningsProfile(displayName: "Sam", headline: "Dog sitter",
                         skills: ["Pet sitting", "Dog walking"], interests: [.petCare],

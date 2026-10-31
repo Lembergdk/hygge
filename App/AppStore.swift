@@ -397,6 +397,9 @@ final class AppStore {
                         task.memoryID = learned.id
                     }
                 }
+            } else if BackendClient.requireCloud {
+                task.status = .failed
+                task.log.append("I could not reach Hygge just now, so I left this one alone. Nothing was sent.")
             } else {
                 task.log.append("Working offline for this one — I could not reach the live helper.")
                 task = try localRunner.run(task, repository: &siteMemory)

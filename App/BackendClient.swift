@@ -5,11 +5,32 @@ import Foundation
 /// Every call is optional from the app's perspective: when unreachable, the
 /// store falls back to the local simulated runner and says so in the log.
 struct BackendClient {
-    /// Configurable in Profile/onboarding settings so a phone on the same
-    /// Wi-Fi can reach the service on the developer's Mac (LAN dev mode).
+    /// Whether this build must reach the cloud (HYGGE_REQUIRE_CLOUD:
+    /// NO in Debug, YES in Release). When true, an unreachable backend
+    /// fails the task honestly instead of simulating it on-device.
+    static var requireCloud: Bool {
+        let raw = Bundle.main.object(forInfoDictionaryKey: "HYGGE_REQUIRE_CLOUD")
+        let value = (raw as? String) ?? (raw as? Bool).map { $0 ? "YES" : "NO" }
+        #if DEBUG
+        return CloudRequirement.resolve(infoPlistValue: value, isDebugBuild: true)
+        #else
+        return CloudRequirement.resolve(infoPlistValue: value, isDebugBuild: false)
+        #endif
+    }
+
+    /// Default backend per build: staging for Debug, production for
+    /// Release. A user override (developer settings) still wins.
+    static var defaultBaseURLString: String {
+        #if DEBUG
+        return "https://api-staging.usehygge.app"
+        #else
+        return "https://api.usehygge.app"
+        #endif
+    }
+
     var baseURL: URL {
-        let raw = UserDefaults.standard.string(forKey: "backendBaseURL") ?? "http://127.0.0.1:8787"
-        return URL(string: raw) ?? URL(string: "http://127.0.0.1:8787")!
+        let raw = UserDefaults.standard.string(forKey: "backendBaseURL") ?? Self.defaultBaseURLString
+        return URL(string: raw) ?? URL(string: Self.defaultBaseURLString)!
     }
     var apiToken: String { UserDefaults.standard.string(forKey: "backendToken") ?? "" }
 

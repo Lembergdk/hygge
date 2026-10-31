@@ -721,7 +721,7 @@ private struct FlowLayout: Layout {
 
 #if DEBUG
 /// Where the agent service lives. On a phone, point this at the Mac running
-/// `LAN=1 ./run-live.sh` (it prints the token to paste here).
+/// staging: paste a staging dev token; blank means the build default.
 struct BackendSettingsView: View {
     @AppStorage("backendBaseURL") private var backendBaseURL = "http://127.0.0.1:8787"
     @AppStorage("backendToken") private var backendToken = ""
@@ -736,7 +736,7 @@ struct BackendSettingsView: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                     SecureField("API token (LAN mode)", text: $backendToken)
-                    Text("On this phone, use your computer's Wi-Fi address, e.g. http://192.168.1.20:8787, with the token printed by run-live.sh. Without a reachable service, onboarding falls back to built-in prompts and missions run locally (simulated).")
+                    Text("Leave blank for the build default (staging in Debug, production in Release). Debug only: without a reachable service, onboarding falls back to built-in prompts and missions run locally (simulated).")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Button("Test connection") {

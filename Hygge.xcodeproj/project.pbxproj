@@ -234,6 +234,7 @@
 				DEVELOPMENT_TEAM = 3KA38L8A4F;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				HYGGE_REQUIRE_CLOUD = NO;
 				INFOPLIST_KEY_CFBundleDisplayName = Hygge;
 				INFOPLIST_FILE = App/Info.plist;
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Hygge books gigs you approved into your calendar.";
@@ -265,6 +266,7 @@
 				DEVELOPMENT_TEAM = 3KA38L8A4F;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				HYGGE_REQUIRE_CLOUD = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Hygge;
 				INFOPLIST_FILE = App/Info.plist;
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Hygge books gigs you approved into your calendar.";
