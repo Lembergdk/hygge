@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  // Production environment. PROVISIONED ONLY AT THE STEP-5 GATE.
+  // Production environment (provisioned at the step-5 gate).
   // Separate config so nothing shares state with staging.
   "name": "hygge-api-production",
   "main": "src/index.ts",
@@ -29,7 +29,10 @@
     "HYGGE_LLM_MODEL_STRONG": "muse-wonder-1.0"
   },
   "d1_databases": [
-    { "binding": "DB", "database_name": "hygge-production", "database_id": "REPLACE_AFTER_PROVISION" }
+    { "binding": "DB", "database_name": "hygge-production", "database_id": "d36ecef4-1b4c-4679-bc52-158b6f552775" }
+  ],
+  "r2_buckets": [
+    { "binding": "BROWSER_PROFILES", "bucket_name": "hygge-browser-profiles-production" }
   ],
   "browser": { "binding": "BROWSER" }
 }
