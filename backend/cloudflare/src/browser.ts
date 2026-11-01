@@ -3,6 +3,7 @@
 /// (@cloudflare/puppeteer). Sessions live in this user's Durable
 /// Object; the mission loop (agent.ts) chooses every action.
 import { launch, type Browser, type Page } from "@cloudflare/puppeteer";
+import type { SessionState } from "./session-profile.ts";
 
 export interface PageElement {
   label: string;
@@ -32,13 +33,59 @@ export class BrowserRunBrowser {
   binding: Fetcher;
   constructor(binding: Fetcher) { this.binding = binding; }
 
-  async createSession(url: string): Promise<Snapshot> {
+  /// Open a session, optionally restoring a saved trusted sign-in
+  /// (cookies before navigation, same-origin localStorage after).
+  /// Restore is best-effort: a site that rejects the state simply
+  /// shows its login form and the mission re-logs in via the vault.
+  async createSession(url: string, restore?: SessionState | null): Promise<Snapshot> {
     const browser = await launch(this.binding);
     const page = await browser.newPage();
+    if (restore?.cookies?.length) {
+      await (page as Page).setCookie(...(restore.cookies as never[])).catch(() => {});
+    }
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    if (restore && Object.keys(restore.localStorage).length) {
+      await page
+        .evaluate((items: Record<string, string>) => {
+          for (const [k, v] of Object.entries(items)) {
+            try { window.localStorage.setItem(k, v); } catch { /* storage blocked */ }
+          }
+        }, restore.localStorage)
+        .catch(() => {});
+    }
     const id = crypto.randomUUID();
     this.sessions.set(id, { id, browser, page, humanControlled: false });
     return this.snapshot(id) as Promise<Snapshot>;
+  }
+
+  hasSession(id: string): boolean {
+    return this.sessions.has(id);
+  }
+
+  /// Capture the reusable sign-in state of a live session. The caller
+  /// seals this with the user's vault key before storing it anywhere.
+  async exportState(id: string): Promise<SessionState | null> {
+    const s = this.sessions.get(id);
+    if (!s) return null;
+    const cookies = (await s.page.cookies().catch(() => [])) as unknown[];
+    const localStorage = (await s.page
+      .evaluate(() => {
+        const out: Record<string, string> = {};
+        try {
+          for (let i = 0; i < window.localStorage.length; i++) {
+            const k = window.localStorage.key(i);
+            if (k) out[k] = window.localStorage.getItem(k) ?? "";
+          }
+        } catch { /* storage blocked */ }
+        return out;
+      })
+      .catch(() => ({}))) as Record<string, string>;
+    return {
+      cookies,
+      localStorage,
+      origin: (() => { try { return new URL(s.page.url()).origin; } catch { return ""; } })(),
+      savedAt: new Date().toISOString(),
+    };
   }
 
   async snapshot(id: string): Promise<Snapshot | null> {

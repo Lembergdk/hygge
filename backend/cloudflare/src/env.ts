@@ -27,9 +27,9 @@ export function json(body: unknown, status = 200): Response {
   });
 }
 
-/// Resolves the durable user id from the verified credential.
+/// Staging-only bridge (real sessions resolve in auth.ts).
 /// Staging bridge (phase 1): HYGGE_DEV_TOKENS maps a bearer token to
-/// a user id. Production: Sign in with Apple identity-token JWT.
+/// a user id. Production uses server-issued sessions (auth.ts).
 export function userIdFromRequest(request: Request, env: Env): string | null {
   const auth = request.headers.get("authorization") ?? "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
@@ -42,7 +42,6 @@ export function userIdFromRequest(request: Request, env: Env): string | null {
       return null;
     }
   }
-  // Phase 2: verify Apple JWT here and return its `sub`.
   return null;
 }
 

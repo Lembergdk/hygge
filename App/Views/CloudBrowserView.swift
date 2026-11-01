@@ -7,6 +7,9 @@ import SwiftUI
 struct CloudBrowserView: View {
     @Environment(AppStore.self) private var store
     let urlString: String
+    /// When set, show this already-open session (a paused sign-in
+    /// check) instead of starting a fresh one.
+    var existingSessionID: String? = nil
     @State private var snapshot: BrowserSessionSnapshot?
     @State private var offline = false
     @State private var typeText = ""
@@ -81,7 +84,12 @@ struct CloudBrowserView: View {
     }
 
     private func start() async {
-        if let live = try? await store.backend.createSession(url: urlString) {
+        if let existingSessionID,
+           let live = try? await store.backend.sessionSnapshot(sessionID: existingSessionID) {
+            snapshot = live
+            countedLiveSession = true
+            store.noteBrowserSessionOpened()
+        } else if let live = try? await store.backend.createSession(url: urlString) {
             snapshot = live
             countedLiveSession = true
             store.noteBrowserSessionOpened()

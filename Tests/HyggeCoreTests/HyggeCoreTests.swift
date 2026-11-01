@@ -350,6 +350,140 @@ final class HyggeCoreTests: XCTestCase {
         }
     }
 
+    // MARK: - Identity (Brief 00)
+
+    func testAuthEmailNormalizationAndPolicy() {
+        XCTAssertEqual(HyggeAuth.normalizeEmail("  Sam@Example.COM "), "sam@example.com")
+        XCTAssertTrue(HyggeAuth.isPlausibleEmail("sam@example.com"))
+        XCTAssertFalse(HyggeAuth.isPlausibleEmail("sam@"))
+        XCTAssertFalse(HyggeAuth.isPlausibleEmail("not an email"))
+        XCTAssertNil(HyggeAuth.passwordProblem("1234567890"))
+        XCTAssertNotNil(HyggeAuth.passwordProblem("short"))
+    }
+
+    func testPrivateRelayIsDetectedAndNeverRemovableLogic() {
+        XCTAssertTrue(HyggeAuth.isPrivateRelayEmail("abc@privaterelay.appleid.com"))
+        XCTAssertFalse(HyggeAuth.isPrivateRelayEmail("sam@example.com"))
+        XCTAssertFalse(HyggeAuth.isPrivateRelayEmail(nil))
+        // Last login method can never be removed (never orphan an account).
+        XCTAssertFalse(HyggeAuth.canRemoveLoginMethod(methodCount: 1))
+        XCTAssertTrue(HyggeAuth.canRemoveLoginMethod(methodCount: 2))
+    }
+
+    func testAuthGateRouting() {
+        // New user: carousel first, then sign-in, then onboarding, then home.
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: false, hasOnboarded: false, isSignedIn: false, authRequired: true), .carousel)
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: false, authRequired: true), .auth)
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: true, authRequired: true), .onboarding)
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: true, isSignedIn: true, authRequired: true), .home)
+        // Signed-out returning user goes back through sign-in.
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: true, isSignedIn: false, authRequired: true), .auth)
+        // Debug builds without required cloud keep the legacy flow.
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: false, authRequired: false), .onboarding)
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: false, hasOnboarded: true, isSignedIn: false, authRequired: false), .home)
+    }
+
+    func testLegacyTokenMigrationDecision() {
+        XCTAssertTrue(SessionTokenStorage.shouldMigrateLegacyToken(
+            storedToken: "tok", storedBaseURL: "https://api-staging.usehygge.app"))
+        XCTAssertFalse(SessionTokenStorage.shouldMigrateLegacyToken(
+            storedToken: "tok", storedBaseURL: "http://127.0.0.1:8787"),
+            "a token paired with the retired local backend is dropped, not migrated")
+        XCTAssertFalse(SessionTokenStorage.shouldMigrateLegacyToken(storedToken: "", storedBaseURL: nil))
+        XCTAssertFalse(SessionTokenStorage.shouldMigrateLegacyToken(storedToken: nil, storedBaseURL: nil))
+    }
+
+    // MARK: - Brief 01 server-side state
+
+    private func opportunity(_ title: String, demo: Bool) -> Opportunity {
+        Opportunity(siteID: "rover", title: title, summary: "", category: .petCare,
+                    payLabel: "$30/hr", estimatedHourly: 30, locationLabel: "Leeds",
+                    isRemote: false, requiredSkills: [], urlString: "https://rover.com/x", isDemo: demo)
+    }
+
+    /// Demo items show only until the first real item exists (locally
+    /// or on the server), and never upload.
+    func testDemoItemsHideOnceRealItemExists() {
+        let demo = opportunity("Demo", demo: true)
+        let real = opportunity("Real", demo: false)
+        XCTAssertEqual(StateSync.visibleOpportunities([demo], serverHasReal: false).map(\.title), ["Demo"])
+        XCTAssertEqual(StateSync.visibleOpportunities([demo, real], serverHasReal: false).map(\.title), ["Real"])
+        XCTAssertEqual(StateSync.visibleOpportunities([demo], serverHasReal: true).count, 0)
+        XCTAssertEqual(StateSync.uploadableOpportunities([demo, real]).map(\.title), ["Real"])
+    }
+
+    /// Server wins on newest timestamp; a fresh install (empty local)
+    /// resolves to exactly the server's feed/messages/profile rows.
+    func testMergeServerWinsAndFreshInstallMatches() {
+        let older = opportunity("Older title", demo: false)
+        var newer = older
+        newer.title = "Newer title"
+        let merged = StateSync.mergeByID(
+            local: [(value: older, updatedAt: "2026-10-31T10:00:00Z")],
+            server: [(value: newer, updatedAt: "2026-10-31T11:00:00Z")],
+            id: { $0.id.uuidString })
+        XCTAssertEqual(merged.map(\.title), ["Newer title"])
+        let fresh = StateSync.mergeByID(local: [], server: [(value: newer, updatedAt: "2026-10-31T11:00:00Z")],
+                                        id: { $0.id.uuidString })
+        XCTAssertEqual(fresh, [newer])
+        XCTAssertFalse(StateSync.shouldApply(existingUpdatedAt: "2026-10-31T11:00:00Z",
+                                             incomingUpdatedAt: "2026-10-31T10:00:00Z"))
+    }
+
+    /// Offline writes never claim to be saved; under require-cloud
+    /// they fail honestly.
+    func testOfflineWriteFailsHonestly() {
+        XCTAssertEqual(OfflineWritePolicy.outcome(reachable: true, requireCloud: true), .savedToServer)
+        XCTAssertEqual(OfflineWritePolicy.outcome(reachable: false, requireCloud: true), .failedUnreachable)
+        XCTAssertFalse(OfflineWritePolicy.outcome(reachable: false, requireCloud: true).claimsSaved)
+        XCTAssertFalse(OfflineWritePolicy.outcome(reachable: false, requireCloud: false).claimsSaved)
+    }
+
+    /// Migration payload drops demo items, cannot carry a secret, and
+    /// its expected counts verify against server counts (twice = same).
+    func testImportPayloadAndVerification() throws {
+        let payload = ServerImport(
+            profile: petProfile(), hasOnboarded: true, isPaused: false, lastVisitAt: nil,
+            sites: [SeedSites.site(id: "rover")!], siteMemory: SiteMemoryRepository(),
+            credentialRefs: [CredentialRef(domain: "rover.com", username: "sam@example.com")],
+            opportunities: [opportunity("Real", demo: false), opportunity("Demo", demo: true)],
+            tasks: [], applications: [], proposals: [], accountStates: ["rover": .watching],
+            chatTranscript: [ChatEntry(fromAgent: false, text: "Hej")],
+            activityEvents: [], beliefs: BeliefBook(), searchEvidence: [])
+        XCTAssertEqual(payload.opportunities.map(\.title), ["Real"])
+        let json = String(data: try JSONEncoder().encode(payload), encoding: .utf8)!.lowercased()
+        XCTAssertFalse(json.contains("\"secret\""))
+        XCTAssertFalse(json.contains("\"password\""))
+        let expected = StateSync.expectedImportCounts(payload)
+        XCTAssertTrue(StateSync.importMismatches(expected: expected, serverCounts: expected).isEmpty)
+        XCTAssertFalse(StateSync.importMismatches(expected: expected, serverCounts: [:]).isEmpty)
+    }
+
+    /// Every StoreSnapshot field maps to a server endpoint/table.
+    func testSnapshotAuditMappingIsComplete() {
+        XCTAssertEqual(StateSync.unmappedSnapshotFields, [])
+        XCTAssertTrue(StateSync.snapshotMapping.allSatisfy { !$0.endpoint.isEmpty && !$0.table.isEmpty })
+    }
+
+    /// Export JSON decodes into the same models the app renders.
+    func testServerExportRoundTrips() throws {
+        let profileRow = StateRow(id: "profile", updatedAt: "2026-10-31T11:00:00Z",
+                                  data: ProfileState(profile: petProfile(), hasOnboarded: true, isPaused: false, lastVisitAt: nil))
+        let export = ServerExport(profile: profileRow,
+                                  messages: [StateRow(id: "m1", updatedAt: "2026-10-31T11:00:00Z",
+                                                      data: ChatEntry(fromAgent: true, text: "Hej"))],
+                                  accountStates: ["rover": .watching],
+                                  counts: ["messages": 1], hasRealFeedItem: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(ServerExport.self, from: encoder.encode(export))
+        XCTAssertEqual(decoded.profile?.data.profile.displayName, "Sam")
+        XCTAssertEqual(decoded.messages.first?.data.text, "Hej")
+        XCTAssertTrue(decoded.hasRealFeedItem)
+    }
+
     /// Tile labels must fit a two-column tile whole — no hyphenated truncation.
     func testTileLabelsFit() {
         for category in OpportunityCategory.allCases {
@@ -357,6 +491,54 @@ final class HyggeCoreTests: XCTestCase {
             XCTAssertLessThanOrEqual(category.tileLabel.count, 12, "\(category) tile label too long")
             XCTAssertFalse(category.activityLabel.isEmpty)
         }
+    }
+
+    // MARK: - Brief 03: trusted sessions & 2FA handoff
+
+    /// After the user completes a human check, resume() re-approves the
+    /// same task in place; approve() must still refuse from needsHuman,
+    /// and a task still waiting on answers cannot resume past them.
+    func testResumeAfterHumanCheck() throws {
+        var task = AgentTask(kind: .apply, siteID: "rover.com", targetURLString: "https://rover.com",
+                             goal: "apply", title: "Apply", browserSessionID: "kept-session",
+                             status: .needsHuman)
+        XCTAssertThrowsError(try task.approve())
+        try task.resume()
+        XCTAssertEqual(task.status, .approved)
+        XCTAssertEqual(task.browserSessionID, "kept-session") // resume carries the same session
+
+        var asking = AgentTask(kind: .signup, siteID: "rover.com", targetURLString: "https://rover.com",
+                               goal: "join", title: "Join", informationRequests: ["Phone?"],
+                               status: .needsHuman)
+        XCTAssertThrowsError(try asking.resume())
+
+        var fresh = AgentTask(kind: .discover, siteID: "rover.com", targetURLString: "https://rover.com",
+                              goal: "look", title: "Look")
+        XCTAssertThrowsError(try fresh.resume())
+    }
+
+    /// Tasks saved before browserSessionID existed must still decode.
+    func testAgentTaskDecodesWithoutBrowserSessionID() throws {
+        let legacy = """
+        {"id":"00000000-0000-0000-0000-000000000001","kind":"discover","siteID":"rover.com",
+         "targetURLString":"https://rover.com","goal":"look","title":"Look","draftedPayload":{},
+         "browserTrace":[],"informationRequests":[],"status":"awaitingApproval","log":[],
+         "createdAt":730000000}
+        """
+        let task = try JSONDecoder().decode(AgentTask.self, from: Data(legacy.utf8))
+        XCTAssertNil(task.browserSessionID)
+        let reencoded = try JSONDecoder().decode(AgentTask.self, from: JSONEncoder().encode(task))
+        XCTAssertEqual(reencoded, task)
+    }
+
+    /// The helper's session-profile JSON decodes into metadata only.
+    func testSessionProfileRefDecodesHelperShape() throws {
+        let json = #"{"domain":"rover.com","trustSupport":"supported","hasProfile":true}"#
+        let ref = try JSONDecoder().decode(SessionProfileRef.self, from: Data(json.utf8))
+        XCTAssertEqual(ref.domain, "rover.com")
+        XCTAssertEqual(ref.trustSupport, .supported)
+        XCTAssertTrue(ref.hasProfile)
+        XCTAssertEqual(ref.id, "rover.com")
     }
 
 }

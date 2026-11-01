@@ -78,13 +78,45 @@ final class AppStore {
     var visitMarker: Date = .distantPast
     var lastMessage: String?
 
+    // Brief 01: the local snapshot below is a cache. Once the one-time
+    // migration verifies, `isBackendFirst` flips and pulls/pushes keep
+    // this device in step with the per-user server state.
+    private(set) var isBackendFirst = UserDefaults.standard.bool(forKey: AppStore.backendFirstKey)
+    private(set) var hasRealServerFeedItem = false
+    private(set) var isSyncing = false
+    /// Set only when a write could not be saved — reads quietly serve
+    /// the cache, writes never pretend. Cleared by the next good push.
+    var lastSyncError: String?
+    @ObservationIgnored private var pushTask: Task<Void, Never>?
+    static let backendFirstKey = "hyggeBackendFirstV1"
+    /// A pending "save this login" ask (Brief 03). Set the moment the
+    /// user confirms they already have a profile on a site and no
+    /// login is saved yet; the joining work waits for the sheet.
+    struct CredentialSaveRequest: Identifiable {
+        var id = UUID()
+        var siteID: String
+        var siteName: String
+        var domain: String
+        var taskID: UUID?
+    }
+    var pendingCredentialSave: CredentialSaveRequest?
+
+    /// Trusted sign-in metadata, refreshed from the helper. Transient
+    /// by design — the helper is the source of truth.
+    var sessionProfileRefs: [SessionProfileRef] = []
+
     let backend = BackendClient()
     private let localRunner = SimulatedMissionRunner()
+
+    /// True with a usable session token (Keychain, or a Debug
+    /// developer token). Drives the launch sign-in gate (Brief 00).
+    var isSignedIn = false
 
     init() {
         if !load() {
             opportunities = SampleData.opportunities
         }
+        isSignedIn = backend.hasSessionToken
         visitMarker = lastVisitAt ?? .distantPast
         lastVisitAt = Date()
     }
@@ -102,9 +134,15 @@ final class AppStore {
     func noteBrowserSessionOpened() { liveBrowserSessionCount += 1 }
     func noteBrowserSessionClosed() { liveBrowserSessionCount = max(0, liveBrowserSessionCount - 1) }
 
+    /// Demo listings are local-only colour until the first real item
+    /// exists for this user (here or on another device); then they go.
+    var visibleOpportunities: [Opportunity] {
+        StateSync.visibleOpportunities(opportunities, serverHasReal: hasRealServerFeedItem)
+    }
+
     var rankedOpportunities: [(Opportunity, MatchResult)] {
         MatchEngine.ranked(profile: profile,
-                           opportunities: opportunities.filter { $0.status != .dismissed })
+                           opportunities: visibleOpportunities.filter { $0.status != .dismissed })
     }
 
     func site(id: String) -> TargetSite? { sites.first { $0.id == id } }
@@ -112,6 +150,32 @@ final class AppStore {
 
     func credential(forDomain domain: String) -> CredentialRef? {
         credentialRefs.first { $0.domain == domain }
+    }
+
+    // MARK: - Identity (Brief 00)
+
+    func refreshAuthState() {
+        isSignedIn = backend.hasSessionToken
+    }
+
+    func signOut() async {
+        await backend.signOut()
+        isSignedIn = false
+        // Wipe every per-user local trace: the next account on this
+        // device must never see the previous account's cached feed,
+        // profile, or beliefs, and must not inherit backend-first mode.
+        pushTask?.cancel()
+        pushTask = nil
+        isBackendFirst = false
+        UserDefaults.standard.removeObject(forKey: Self.backendFirstKey)
+        hasRealServerFeedItem = false
+        lastSyncError = nil
+        pendingCredentialSave = nil
+        sessionProfileRefs = []
+        resetLocalState()
+        if let url = storeURL { try? FileManager.default.removeItem(at: url) }
+        writeCache()
+        lastMessage = "Signed out. Your Hygge account is still there whenever you sign back in."
     }
 
     // MARK: - Onboarding
@@ -150,6 +214,16 @@ final class AppStore {
         attachCredential(&task)
         attachSkill(&task)
         tasks.append(task)
+        // "I already have a profile" is the moment to ask for the login:
+        // present the save sheet first, then start the joining work with
+        // whatever the user chose (saved login attached, or none).
+        if alreadyHasAccount && credential(forDomain: site.domain) == nil {
+            pendingCredentialSave = CredentialSaveRequest(
+                siteID: site.id, siteName: site.name, domain: site.domain, taskID: task.id)
+            lastMessage = "Save your \(site.name) login and I'll sign in for you from now on — or skip and I'll still take a look."
+            save()
+            return
+        }
         lastMessage = "Joining \(site.name) — I'll work it out on the live site and only stop for things only you can do."
         save()
         // Consent was the approval: the joining mission starts now, with no
@@ -160,6 +234,21 @@ final class AppStore {
             return
         }
         let taskID = task.id
+        Task { await approveAndRun(taskID: taskID) }
+    }
+
+    /// The save sheet closed (saved or skipped): attach any freshly
+    /// saved login and start the work that was waiting on it.
+    func finishCredentialSave(_ request: CredentialSaveRequest, saved: Bool) {
+        if pendingCredentialSave?.id == request.id { pendingCredentialSave = nil }
+        guard let taskID = request.taskID,
+              let index = tasks.firstIndex(where: { $0.id == taskID }) else { save(); return }
+        attachCredential(&tasks[index])
+        save()
+        if isPaused {
+            lastMessage = "Saved for later — Hygge is paused, so joining \(request.siteName) will wait until you resume."
+            return
+        }
         Task { await approveAndRun(taskID: taskID) }
     }
 
@@ -245,17 +334,56 @@ final class AppStore {
     }
 
     /// The secret is sent once to the server vault; only the reference is kept.
-    func addCredential(domain: String, username: String, secret: String) async {
+    /// Returns false (with nothing stored anywhere) if saving failed.
+    @discardableResult
+    func addCredential(domain: String, username: String, secret: String) async -> Bool {
         let cleanDomain = domain.replacingOccurrences(of: "www.", with: "")
             .replacingOccurrences(of: "https://", with: "")
             .replacingOccurrences(of: "http://", with: "")
         do {
             let ref = try await backend.storeCredential(domain: cleanDomain, username: username, secret: secret)
+            // One saved login per site: a re-save replaces the old one.
+            for old in credentialRefs where old.domain == cleanDomain && old.id != ref.id {
+                await backend.deleteCredential(id: old.id)
+            }
+            credentialRefs.removeAll { $0.domain == cleanDomain }
             credentialRefs.append(ref)
             lastMessage = "Login for \(cleanDomain) saved safely. This phone keeps no copy of the password."
+            save()
+            return true
         } catch {
             lastMessage = "That login could not be saved just now. Nothing was stored — please try again in a moment."
+            save()
+            return false
         }
+    }
+
+    /// Deletes one saved login. The site's trusted sign-in is separate
+    /// and stays (forget it on its own if you want both gone).
+    func deleteCredential(id: UUID) async {
+        guard let ref = credentialRefs.first(where: { $0.id == id }) else { return }
+        await backend.deleteCredential(id: ref.id)
+        credentialRefs.removeAll { $0.id == ref.id }
+        lastMessage = "Saved login for \(ref.domain) deleted. Hygge can no longer sign in there for you."
+        save()
+    }
+
+    func sessionProfile(forDomain domain: String) -> SessionProfileRef? {
+        sessionProfileRefs.first { $0.domain == domain }
+    }
+
+    func refreshSessionProfiles() async {
+        if let profiles = try? await backend.sessionProfiles() {
+            sessionProfileRefs = profiles
+        }
+    }
+
+    /// Forgets one trusted sign-in. The saved login is kept, so the
+    /// next visit simply signs in with it again.
+    func deleteSessionProfile(domain: String) async {
+        await backend.deleteSessionProfile(domain: domain)
+        sessionProfileRefs.removeAll { $0.domain == domain }
+        lastMessage = "Trusted sign-in for \(domain) forgotten. Your saved login is still kept safely."
         save()
     }
 
@@ -382,7 +510,14 @@ final class AppStore {
         defer { noteRunFinished() }
         var finalStatus: AgentTaskStatus?
         do {
-            try tasks[index].approve()
+            // A task paused at a human check resumes in its kept-open
+            // session; one still waiting on answers must go through
+            // answerInformation -> requestReapproval first.
+            if tasks[index].status == .needsHuman && tasks[index].informationRequests.isEmpty {
+                try tasks[index].resume()
+            } else {
+                try tasks[index].approve()
+            }
             var task = tasks[index]
 
             if task.kind == .bookCalendar {
@@ -395,6 +530,8 @@ final class AppStore {
                 }
             } else if let result = try? await backend.runTask(task: task) {
                 task.browserTrace = result.browser_trace
+                // Kept-open session for a human check; nil when done.
+                task.browserSessionID = result.session_id
                 task.informationRequests = result.information_requests ?? []
                 task.log.append(contentsOf: result.log)
                 task.status = AgentTaskStatus(rawValue: result.status) ?? .failed
@@ -476,6 +613,13 @@ final class AppStore {
     }
 
     func resetAll() {
+        resetLocalState()
+        save()
+    }
+
+    /// Fresh-install local state (demo content only). Shared by
+    /// Start over and sign-out; callers decide how it is persisted.
+    private func resetLocalState() {
         profile = EarningsProfile()
         hasOnboarded = false
         sites = SeedSites.all
@@ -491,7 +635,6 @@ final class AppStore {
         beliefs = BeliefBook()
         searchEvidence = []
         isPaused = false
-        save()
     }
 
     private func attachCredential(_ task: inout AgentTask) {
@@ -557,10 +700,23 @@ final class AppStore {
         beliefs.propose(sentence: sentence, source: source, confidence: confidence)
         save()
     }
+    func clearProfileSkills() { profile.skills = []; save() }
     func confirmBelief(id: UUID) { beliefs.confirm(proposalID: id); save() }
-    func rejectBelief(id: UUID) { beliefs.reject(proposalID: id); save() }
+    func rejectBelief(id: UUID) {
+        beliefs.reject(proposalID: id); save()
+        deleteServerRow("beliefs", id: id)
+    }
     func editBelief(id: UUID, sentence: String) { beliefs.edit(beliefID: id, sentence: sentence); save() }
-    func deleteBelief(id: UUID) { beliefs.delete(beliefID: id); save() }
+    func deleteBelief(id: UUID) {
+        beliefs.delete(beliefID: id); save()
+        deleteServerRow("beliefs", id: id)
+    }
+
+    private func deleteServerRow(_ entityPath: String, id: UUID) {
+        guard isBackendFirst else { return }
+        let backend = self.backend
+        Task { await backend.deleteStateRow(entityPath: entityPath, id: id.uuidString.lowercased()) }
+    }
 
     /// Execute a confirmed (or confirmation-free) chat action and say what happened.
     func performChatAction(_ action: ChatAction) async -> String {
@@ -612,6 +768,10 @@ final class AppStore {
             await backend.deleteCredential(id: credential.id)
             credentialRefs.removeAll { $0.id == credential.id }
         }
+        // Disconnect ends everything for the site, trusted sign-in too
+        // (the separate per-item controls remain for partial removal).
+        await backend.deleteSessionProfile(domain: site.domain)
+        sessionProfileRefs.removeAll { $0.domain == site.domain }
         proposals.removeAll { $0.siteID == siteID }
         siteMemory.memories.removeAll { $0.domain == site.domain }
         for index in tasks.indices where tasks[index].siteID == siteID
@@ -629,6 +789,135 @@ final class AppStore {
         return "Needs-you cards waiting: \(needsYouCount). Paused: \(isPaused). Approved sites: \(accountStates.filter { $0.value == .hasAccount || $0.value.isWatching }.keys.joined(separator: ", ")). Recent journal: \(journal)"
     }
 
+    // MARK: - Server sync (Brief 01)
+    //
+    // Pull on launch and on foregrounding; push writes straight away
+    // (briefly debounced so a burst of edits is one round-trip). The
+    // push reuses the idempotent import: rows key by id, demo items
+    // are excluded by construction, and the newest write wins. If a
+    // push cannot get through, the change stays in the cache and
+    // `lastSyncError` says so plainly — it is never reported as saved.
+
+    func currentImport() -> ServerImport {
+        ServerImport(profile: profile, hasOnboarded: hasOnboarded, isPaused: isPaused,
+                     lastVisitAt: lastVisitAt, sites: sites, siteMemory: siteMemory,
+                     credentialRefs: credentialRefs, opportunities: opportunities, tasks: tasks,
+                     applications: applications, proposals: proposals, accountStates: accountStates,
+                     chatTranscript: chatTranscript, activityEvents: activityEvents,
+                     beliefs: beliefs, searchEvidence: searchEvidence)
+    }
+
+    /// Launch entry point: migrate once if needed, otherwise pull.
+    /// Any failure leaves the cache exactly as it was.
+    func syncOnLaunch() async {
+        guard !isSyncing else { return }
+        if isBackendFirst {
+            await pullFromServer()
+            return
+        }
+        isSyncing = true
+        do {
+            let counts = try await backend.stateCounts()
+            if counts.total > 0 {
+                // Already migrated (or a second device): adopt, don't overwrite.
+                markBackendFirst(hasReal: counts.hasRealFeedItem)
+            } else {
+                let payload = currentImport()
+                let result = try await backend.importState(payload)
+                let mismatches = StateSync.importMismatches(
+                    expected: StateSync.expectedImportCounts(payload), serverCounts: result.counts)
+                guard mismatches.isEmpty else { isSyncing = false; return }
+                markBackendFirst(hasReal: result.hasRealFeedItem)
+            }
+        } catch {
+            isSyncing = false
+            return // Unreachable or not signed in yet: cache serves, retry next launch.
+        }
+        isSyncing = false
+        await pullFromServer()
+    }
+
+    private func markBackendFirst(hasReal: Bool) {
+        isBackendFirst = true
+        hasRealServerFeedItem = hasReal
+        UserDefaults.standard.set(true, forKey: Self.backendFirstKey)
+    }
+
+    /// Foreground/launch pull: server state replaces the cache (local
+    /// demo listings survive until a real item hides them; drafts in
+    /// `tasks` are untouched — live task records keep their own flow).
+    func pullFromServer() async {
+        guard isBackendFirst, !isSyncing else { return }
+        isSyncing = true
+        defer { isSyncing = false }
+        guard let export = try? await backend.exportState() else { return }
+        applyServerExport(export)
+        if let refs = try? await backend.listCredentialRefs() { credentialRefs = refs }
+        if let memory = try? await backend.listSiteMemory(), !memory.memories.isEmpty {
+            siteMemory = memory
+        }
+        writeCache()
+    }
+
+    func applyServerExport(_ export: ServerExport) {
+        if let state = export.profile?.data {
+            profile = state.profile
+            hasOnboarded = state.hasOnboarded
+            isPaused = state.isPaused
+            if lastVisitAt == nil { lastVisitAt = state.lastVisitAt }
+        }
+        if !export.sites.isEmpty { sites = export.sites.map(\.data) }
+        let serverOpportunities = export.opportunities.map(\.data)
+        if !serverOpportunities.isEmpty || export.hasRealFeedItem {
+            let serverIDs = Set(serverOpportunities.map { $0.id.uuidString.lowercased() })
+            let localDemo = opportunities.filter { $0.isDemo && !serverIDs.contains($0.id.uuidString.lowercased()) }
+            opportunities = serverOpportunities + localDemo
+        }
+        chatTranscript = export.messages.map(\.data).sorted { $0.createdAt < $1.createdAt }
+        applications = export.applications.map(\.data)
+        proposals = export.proposals.map(\.data)
+        accountStates = export.accountStates
+        activityEvents = export.journalEvents.map(\.data)
+        searchEvidence = export.searchEvidence.map(\.data)
+        if !export.beliefRows.isEmpty {
+            var book = BeliefBook()
+            for row in export.beliefRows {
+                if row.data.pending { book.pending.append(row.data.belief) }
+                else { book.beliefs.append(row.data.belief) }
+            }
+            beliefs = book
+        } else {
+            beliefs = export.beliefs
+        }
+        hasRealServerFeedItem = export.hasRealFeedItem
+    }
+
+    private func schedulePush() {
+        guard isBackendFirst else { return }
+        pushTask?.cancel()
+        pushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.pushStateNow()
+        }
+    }
+
+    private func pushStateNow() async {
+        do {
+            let result = try await backend.importState(currentImport())
+            hasRealServerFeedItem = result.hasRealFeedItem
+            lastSyncError = nil
+        } catch {
+            let outcome = OfflineWritePolicy.outcome(reachable: false, requireCloud: BackendClient.requireCloud)
+            if outcome == .failedUnreachable {
+                lastSyncError = "Couldn't reach Hygge just now, so that last change is only on this phone for now. It hasn't been saved anywhere else yet."
+                lastMessage = lastSyncError
+            } else {
+                lastSyncError = "You're offline, so that last change is only on this phone for now."
+            }
+        }
+    }
+
     // MARK: - Persistence
 
     private var storeURL: URL? {
@@ -636,7 +925,13 @@ final class AppStore {
             .appendingPathComponent("hygge.json")
     }
 
+    /// Every local change lands in the cache, then pushes (Brief 01).
     private func save() {
+        writeCache()
+        schedulePush()
+    }
+
+    private func writeCache() {
         guard let url = storeURL else { return }
         let snapshot = StoreSnapshot(profile: profile, hasOnboarded: hasOnboarded, sites: sites,
                                      siteMemory: siteMemory, credentialRefs: credentialRefs,

@@ -47,7 +47,18 @@ struct TaskDetailView: View {
                         .disabled(task.informationRequests.contains { (answers[$0] ?? "").isEmpty })
                     }
                 }
-                if task.status == .awaitingApproval || task.status == .needsHuman {
+                if task.status == .needsHuman && task.informationRequests.isEmpty {
+                    Section("A check only you can finish") {
+                        Text("This paused at a sign-in check (like a code or \"I'm not a robot\"). Open the browser below, finish the check there, then tap Resume — Hygge carries on in the same place and won't ask for your password again.")
+                            .font(.callout)
+                        Button("Open the browser to finish the check") { showBrowser = true }
+                        Button("Resume — I've finished the check") {
+                            Task { await store.approveAndRun(taskID: task.id) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Reject", role: .destructive) { store.reject(taskID: task.id) }
+                    }
+                } else if task.status == .awaitingApproval || task.status == .needsHuman {
                     Section {
                         Button("Approve — go ahead") {
                             Task { await store.approveAndRun(taskID: task.id) }
@@ -74,7 +85,10 @@ struct TaskDetailView: View {
             .navigationTitle(task.title)
             .sheet(isPresented: $showBrowser) {
                 NavigationStack {
-                    CloudBrowserView(urlString: task.targetURLString)
+                    // Reopen the very session that paused, so a finished
+                    // check counts when the work resumes.
+                    CloudBrowserView(urlString: task.targetURLString,
+                                     existingSessionID: task.browserSessionID)
                         .navigationTitle("Browser")
                 }
             }
