@@ -190,6 +190,29 @@ struct BackendClient {
         await delete(path: "session-profiles/\(domain)")
     }
 
+    // MARK: - Hygge email address (Brief 04, receive only)
+    //
+    // The address endpoints only ever describe the signed-in user's
+    // own address. Filed mail is summary-level; codes never come
+    // to the device. There is no send call here by design.
+
+    func hyggeEmailAddress() async throws -> HyggeEmailAddress? {
+        let response: HyggeEmailAddressResponse = try await get("email/address")
+        return response.hyggeEmail
+    }
+
+    func allocateHyggeEmailAddress() async throws -> HyggeEmailAddress? {
+        let response: HyggeEmailAddressResponse = try await post("email/address", body: [String: String]())
+        return response.hyggeEmail
+    }
+
+    private struct FiledEmailResponse: Decodable { var messages: [FiledEmailSummary] }
+
+    func filedEmail() async throws -> [FiledEmailSummary] {
+        let response: FiledEmailResponse = try await get("email/messages")
+        return response.messages
+    }
+
     private func delete(path: String) async -> Bool {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "DELETE"
@@ -282,7 +305,9 @@ struct BackendClient {
 
     private static func stateDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        // Server timestamps carry fractional seconds; the plain
+        // .iso8601 strategy rejects those on older OS releases.
+        decoder.dateDecodingStrategy = HyggeISO8601.dateDecodingStrategy
         return decoder
     }
 
@@ -524,7 +549,7 @@ struct BackendClient {
             throw URLError(.badServerResponse)
         }
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = HyggeISO8601.dateDecodingStrategy
         return try decoder.decode(Response.self, from: data)
     }
 }

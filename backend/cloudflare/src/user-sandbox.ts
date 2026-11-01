@@ -4,7 +4,7 @@ import { json } from "./env.ts";
 import { LLMClient, type LLMConfig } from "./llm.ts";
 import { onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { BrowserRunBrowser } from "./browser.ts";
-import { makeDecider, runMission, distillHints } from "./agent.ts";
+import { makeDecider, runMission, distillHints, emailCodeAllowedForTask } from "./agent.ts";
 import * as vault from "./vault.ts";
 import { PROFILE_ROW_ID, STATE_ROUTES, StateStore, createSqliteStateDb, ensureStateSchema } from "./state.ts";
 import {
@@ -13,6 +13,10 @@ import {
   type SharedSkill, type SkillCandidate, type SkillOutcome,
 } from "./skills.ts";
 import {
+  attachEmailToTasks, takeFreshCode,
+  type InboundEmailDelivery,
+} from "./email.ts";
+import {
   sealSessionState,
   openSessionState,
   isEmptyState,
@@ -20,6 +24,12 @@ import {
   type SessionState,
   type TrustSupport,
 } from "./session-profile.ts";
+import {
+  CRON_SLOTS_UTC, ScanStore, categoriesToReopen, clearStaleEpisode,
+  createSqliteScanDb, effectiveTickNow, ensureScanSchema, extractProfile, runScheduledTick,
+  scanSiteFromRow, type ScanDeps, type ScanMissionInput, type ScanMissionOutcome,
+  type ScanProfile,
+} from "./scan.ts";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const CONTAINER_IMAGE = "cloudflare/debian-trixie";
@@ -135,6 +145,21 @@ export class UserSandbox extends DurableObject<Env> {
       -- primary blob store is R2 (BROWSER_PROFILES); the blob is
       -- always sealed with the user's DEK. Deleting a credential
       -- never touches this table, and vice versa.
+      -- Brief 04 receive-only email. Codes are sealed with this
+      -- user's DEK, expire in 30 minutes, and are deleted on first
+      -- consumption; summaries hold no code and no full body.
+      CREATE TABLE IF NOT EXISTS email_codes (
+        id TEXT PRIMARY KEY, sender_domain TEXT NOT NULL,
+        iv TEXT NOT NULL, ciphertext TEXT NOT NULL,
+        received_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS email_summaries (
+        id TEXT PRIMARY KEY, sender TEXT NOT NULL, sender_domain TEXT NOT NULL,
+        subject TEXT NOT NULL, mail_date TEXT, kind TEXT NOT NULL,
+        summary TEXT NOT NULL, actionable TEXT NOT NULL DEFAULT '[]',
+        attachments TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
       CREATE TABLE IF NOT EXISTS session_profiles (
         domain TEXT PRIMARY KEY,
         trust_support TEXT NOT NULL DEFAULT 'unknown',
@@ -148,10 +173,51 @@ export class UserSandbox extends DurableObject<Env> {
     // journal events, beliefs, search evidence). tasks/credentials/
     // memories above are unchanged.
     ensureStateSchema((sql) => ctx.storage.sql.exec(sql));
+    // Brief 05: scheduled-scan bookkeeping (category exhaustion
+    // memory, per-site login-failure episodes, scan run log). All
+    // per-user: this object only ever sees its own user's scans.
+    ensureScanSchema((sql) => ctx.storage.sql.exec(sql));
   }
 
   private stateStore(): StateStore {
     return new StateStore(createSqliteStateDb(this.ctx.storage.sql));
+  }
+
+  private scanStore(): ScanStore {
+    return new ScanStore(createSqliteScanDb(this.ctx.storage.sql));
+  }
+
+  /// Snapshot of the facts that reopen exhausted categories
+  /// (Brief 05 step 7): profile rate/location + site categories.
+  private reopenSnapshot(store: StateStore): { profile: ScanProfile; siteCategories: Map<string, string> } {
+    const siteCategories = new Map<string, string>();
+    for (const row of store.list("sites")) {
+      const site = scanSiteFromRow(row.id, row.data);
+      if (site) siteCategories.set(site.id, site.category.toLowerCase());
+    }
+    return {
+      profile: extractProfile(store.get("profile", PROFILE_ROW_ID)?.data).profile,
+      siteCategories,
+    };
+  }
+
+  private applyCategoryReopen(
+    before: { profile: ScanProfile; siteCategories: Map<string, string> } | null,
+    store: StateStore,
+  ) {
+    if (!before) return;
+    try {
+      const reopen = categoriesToReopen(before, this.reopenSnapshot(store));
+      if (reopen === "*" || reopen.length) this.scanStore().clearExhaustion(reopen);
+    } catch { /* scan bookkeeping must never fail a state write */ }
+  }
+
+  /// A working sign-in on a domain ends any scan login-failure
+  /// episode for it (re-saved login, or a mission that succeeded).
+  private healScanEpisodes(domain: string) {
+    try {
+      clearStaleEpisode(this.scanStore(), this.stateStore(), domain);
+    } catch { /* bookkeeping only; never fail the caller's work */ }
   }
 
   /// Fold snapshot site memories into the existing `memories` table
@@ -354,6 +420,94 @@ export class UserSandbox extends DurableObject<Env> {
     );
   }
 
+  // ---- Brief 04 inbox (receive only) ------------------------------
+  // Deliveries arrive only from the Email Worker handler in
+  // email.ts (x-hygge-email-delivery). The code, when present, is
+  // sealed immediately with this user's DEK; plaintext exists only
+  // while typing it into the site on the next run. This object logs
+  // no code, sender, subject, or body anywhere.
+
+  private emailCodeAAD(senderDomain: string): string {
+    return `email-code\n${senderDomain}`;
+  }
+
+  private pendingEmailCodes(domain?: string) {
+    const rows = [...this.ctx.storage.sql.exec(
+      "SELECT id, sender_domain, iv, ciphertext, received_at FROM email_codes ORDER BY received_at DESC",
+    )] as Row[];
+    const records = rows.map((r) => ({
+      id: String(r.id), senderDomain: String(r.sender_domain),
+      iv: String(r.iv), ciphertext: String(r.ciphertext), receivedAt: String(r.received_at),
+    }));
+    if (domain) {
+      const fresh = takeFreshCode(records, domain);
+      return fresh ? [fresh] : [];
+    }
+    const now = Date.now();
+    return records.filter((r) => now - Date.parse(r.receivedAt) <= 30 * 60 * 1000);
+  }
+
+  private hasEmailCode(domain: string): boolean {
+    return this.pendingEmailCodes(domain).length > 0;
+  }
+
+  /// Consume = open + delete. The row is removed before the value
+  /// is used, so a code can never be replayed or read twice.
+  private async consumeEmailCode(domain: string): Promise<string | null> {
+    const [record] = this.pendingEmailCodes(domain);
+    if (!record) return null;
+    this.ctx.storage.sql.exec("DELETE FROM email_codes WHERE id = ?", record.id);
+    try {
+      return await vault.open(await this.dek(),
+        { iv: record.iv, ciphertext: record.ciphertext }, this.emailCodeAAD(record.senderDomain));
+    } catch {
+      return null; // deleted either way — a code that cannot open is dead
+    }
+  }
+
+  private pruneExpiredEmailCodes() {
+    const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    this.ctx.storage.sql.exec("DELETE FROM email_codes WHERE received_at < ?", cutoff);
+  }
+
+  private async handleEmailInbound(delivery: InboundEmailDelivery) {
+    this.pruneExpiredEmailCodes();
+    const summaryId = crypto.randomUUID();
+    const s = delivery.summary;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      summaryId, s.sender, s.senderDomain, s.subject, s.date, s.kind,
+      s.summary, JSON.stringify(s.actionableItems), JSON.stringify(s.attachments),
+    );
+    if (delivery.code) {
+      const blob = await vault.seal(await this.dek(), delivery.code, this.emailCodeAAD(s.senderDomain));
+      this.ctx.storage.sql.exec(
+        "INSERT INTO email_codes (id, sender_domain, iv, ciphertext, received_at) VALUES (?, ?, ?, ?, ?)",
+        crypto.randomUUID(), s.senderDomain, blob.iv, blob.ciphertext, delivery.receivedAt,
+      );
+    }
+    // Attach verification/code outcomes to the pending signup task.
+    const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks ORDER BY created_at")] as Row[];
+    const tasks = rows.map((r) => JSON.parse(String(r.task)));
+    for (const task of attachEmailToTasks(tasks, delivery)) this.saveTask(task);
+    // Other site mail is filed to the journal (Brief 01 state). The
+    // sentence is summary-level only — no body, no code, no link.
+    if (delivery.kind === "other") {
+      const journalId = crypto.randomUUID();
+      this.stateStore().upsert("journalEvents", journalId, {
+        id: journalId,
+        occurredAt: delivery.receivedAt,
+        kind: "filedEmail",
+        sentence: `Filed mail from ${s.senderDomain || "a site"}: ${s.subject || "(no subject)"}`,
+        detail: s.summary,
+        siteID: null, applicationID: null, grossAmount: null,
+        currencyCode: "USD", listingsChecked: 0,
+      }, delivery.receivedAt);
+    }
+    return { filed: true, kind: delivery.kind };
+  }
+
   private recordOutcome(domain: string, kind: string, trace: any[], extractedItems: string[], success: boolean) {
     const rows = [
       ...this.ctx.storage.sql.exec("SELECT * FROM memories WHERE domain = ? AND kind = ?", domain, kind),
@@ -505,6 +659,23 @@ export class UserSandbox extends DurableObject<Env> {
       });
     };
 
+    // Brief 04: an emailed code for this domain is consumable
+    // information for this run only. It is typed from the sealed
+    // store and deleted by consumeEmailCode before use; the value
+    // never enters prompts, logs, traces, or task JSON. Brief 05
+    // seam: scheduled scans never see or spend a code — a check
+    // during an unattended scan pauses for the person instead.
+    this.pruneExpiredEmailCodes();
+    const emailCodeAllowed = emailCodeAllowedForTask(task);
+    const hasEmailCode = emailCodeAllowed && this.hasEmailCode(domain);
+    const fillEmailCodeValue = async (target: string, sessionID: string) => {
+      if (!emailCodeAllowed) throw new Error("emailed codes are not used during scheduled scans");
+      const code = await this.consumeEmailCode(domain);
+      if (!code) throw new Error("agent requested an emailed code but none is waiting");
+      await browser.act(sessionID, { action: "type", target, value: code });
+      task.email_code_available = false;
+    };
+
     const outcome = outcomeForTaskKind(task.kind);
     let activeSkill: SharedSkill | null = null;
     try { activeSkill = await this.skillRepo().loadActive(domain, outcome); }
@@ -524,6 +695,8 @@ export class UserSandbox extends DurableObject<Env> {
       hints,
       decider,
       fillCredentialValue,
+      fillEmailCodeValue,
+      hasEmailCode,
       hasCredential: Boolean(task.credential_id),
       skill: activeSkill,
       skillCandidate,
@@ -579,7 +752,104 @@ export class UserSandbox extends DurableObject<Env> {
       task.session_id = null;
     }
     this.saveTask(task);
+    // Brief 05: a mission that succeeded proves the sign-in works
+    // again — end any scheduled-scan login-failure episode here.
+    if (result.status === "succeeded") this.healScanEpisodes(domain);
     return task;
+  }
+
+  // ---- scheduled scanning (Brief 05) --------------------------------
+  // A scan is an ordinary discover mission through runTask (same
+  // skills routing, trusted sign-in restore + probe, checkpoint
+  // guard, vault-only credential fill). It is created directly in
+  // "approved" state because discover is not a write kind
+  // (requiresApprovalForKind is false) — the scan can only read.
+  // The mission text forbids write actions, and scan.ts has no
+  // write-task path at all: surfacing a listing never applies.
+
+  private async runScanMission(
+    input: ScanMissionInput, browser: BrowserRunBrowser,
+  ): Promise<ScanMissionOutcome> {
+    const { site, tier, credentialId, profile } = input;
+    const focus = [
+      profile.skills.length ? `Skills: ${profile.skills.join(", ")}.` : "",
+      profile.interests.length ? `Kinds of work: ${profile.interests.join(", ")}.` : "",
+      profile.locationLabel ? `Based in ${profile.locationLabel}.` : "",
+    ].filter(Boolean).join(" ");
+    const task = {
+      id: crypto.randomUUID(),
+      kind: "discover",
+      target_url: site.startURLString,
+      goal: `Find new paid work listings on ${site.name} that fit this person. ${focus} Read the listings and extract each one with its title, pay, and place. Only read: do not apply, do not sign up, do not send any message, and do not book anything.${tier === "public" ? " Browse only what is visible without signing in; do not try to sign in." : ""}`,
+      title: `Scheduled look at ${site.name}`,
+      drafted_payload: { searchTerms: profile.skills.join(", ") },
+      credential_id: tier === "logged" ? credentialId : null,
+      requires_approval: false,
+      status: "approved",
+      scheduled_scan: true,
+      scan_tier: tier,
+      memory_id: null,
+      session_id: null,
+      browser_trace: [] as any[],
+      extracted_items: [] as string[],
+      information_requests: [] as string[],
+      log: [`Scheduled scan on ${site.name} (${tier === "logged" ? "signed-in look" : "public listings only"}). Reading only — nothing will be sent, booked, or applied for.`],
+    };
+    this.saveTask(task);
+    const done = await this.runTask(task, browser);
+    const traceText = [
+      ...(done.log ?? []),
+      ...(done.browser_trace ?? []).map((t: any) => String(t.summary ?? "")),
+    ].join("\n");
+    const needsHuman = done.status === "needsHuman";
+    // An expired trusted sign-in logs "had expired" and falls back
+    // to the saved login inside the mission; if the mission still
+    // fails on sign-in, the saved login itself is the problem.
+    const loginFailure = tier === "logged" && !needsHuman && done.status !== "succeeded"
+      && /had expired|incorrect|invalid|wrong password|login failed|sign[- ]in failed|could not sign in|not recognized/i.test(traceText);
+    const skillLine = (done.log ?? []).find((l: string) => l.startsWith("skill_id=")) ?? null;
+    return {
+      status: done.status === "succeeded" ? "succeeded" : needsHuman ? "needs_human" : "failed",
+      items: Array.isArray(done.extracted_items) ? done.extracted_items : [],
+      loginFailure,
+      needsHuman,
+      skillPath: skillLine,
+      taskId: done.id,
+      errorReason: done.status === "succeeded" ? null
+        : needsHuman ? "site asked for a human-only check"
+        : loginFailure ? "saved login was rejected"
+        : "scan did not finish",
+    };
+  }
+
+  private scanDeps(browser: BrowserRunBrowser): ScanDeps {
+    return {
+      state: this.stateStore(),
+      scans: this.scanStore(),
+      credentialIdForDomain: (domain) => {
+        const rows = [
+          ...this.ctx.storage.sql.exec("SELECT id FROM credentials WHERE domain = ? LIMIT 1", domain),
+        ] as Row[];
+        return rows.length ? String(rows[0].id) : null;
+      },
+      sessionHealthForDomain: (domain) => {
+        const row = this.profileRow(domain);
+        if (!row) return null;
+        return {
+          domain,
+          trustSupport: this.trustSupport(domain),
+          hasProfile: Boolean(Number(row.has_profile ?? 0)),
+        };
+      },
+      runDiscoverMission: (input) => this.runScanMission(input, browser),
+      idFactory: () => crypto.randomUUID(),
+      log: (message) => {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO events (kind, payload) VALUES (?, ?)",
+          "scheduled-scan", JSON.stringify({ message }),
+        );
+      },
+    };
   }
 
   private async proposeSites(body: any) {
@@ -637,6 +907,44 @@ export class UserSandbox extends DurableObject<Env> {
         });
       }
 
+      // Brief 04 inbox (receive only). Inbound accepts only the
+      // Email Worker delivery marker; reads are this user's filed
+      // summaries and code METADATA — a code itself never leaves
+      // through any API. There is no send/reply route.
+      if (request.method === "POST" && parts.join("/") === "email/inbound") {
+        if (request.headers.get("x-hygge-email-delivery") !== "1") {
+          return json({ error: "not found", path }, 404);
+        }
+        if (!body?.summary || typeof body.receivedAt !== "string"
+            || !["verification", "security_code", "other"].includes(String(body.kind))) {
+          return json({ error: "malformed delivery" }, 400);
+        }
+        return json(await this.handleEmailInbound(body as InboundEmailDelivery), 201);
+      }
+      if (request.method === "GET" && parts.join("/") === "email/messages") {
+        const rows = [...this.ctx.storage.sql.exec(
+          "SELECT id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, created_at FROM email_summaries ORDER BY created_at DESC LIMIT 100",
+        )] as Row[];
+        return json({
+          messages: rows.map((r) => ({
+            id: r.id, sender: r.sender, senderDomain: r.sender_domain,
+            subject: r.subject, date: r.mail_date, kind: r.kind,
+            summary: r.summary,
+            actionableItems: JSON.parse(String(r.actionable)),
+            attachments: JSON.parse(String(r.attachments)),
+            filedAt: r.created_at,
+          })),
+        });
+      }
+      if (request.method === "GET" && parts.join("/") === "email/codes/pending") {
+        this.pruneExpiredEmailCodes();
+        return json({
+          pending: this.pendingEmailCodes().map((r) => ({
+            senderDomain: r.senderDomain, receivedAt: r.receivedAt,
+          })),
+        });
+      }
+
       // Credentials (metadata only leaves the vault API)
       if (request.method === "POST" && parts.join("/") === "credentials") {
         const { domain, username, secret } = body;
@@ -651,6 +959,9 @@ export class UserSandbox extends DurableObject<Env> {
           blob.iv,
           blob.ciphertext,
         );
+        // Brief 05: a re-saved login is the fix the needs-you item
+        // asked for — end the episode so scheduled scans resume.
+        this.healScanEpisodes(domainOf(String(domain)));
         return json({ id, domain, username, createdAt: new Date().toISOString() }, 201);
       }
       if (request.method === "GET" && parts.join("/") === "credentials") {
@@ -761,6 +1072,33 @@ export class UserSandbox extends DurableObject<Env> {
         return json({ closed: await browser.closeSession(parts[1]) });
       }
 
+      // Scheduled scanning (Brief 05). POST tick is both the cron
+      // sweeper's entry point (index.ts adds x-hygge-scheduled-sweep)
+      // and the manual trigger tests use to simulate a cron tick.
+      // Auth is unchanged: the request reached this object only as
+      // this verified user, and a tick can only scan this user.
+      if (request.method === "POST" && parts.join("/") === "scheduled-scan/tick") {
+        const slotRaw = Number(body.slot ?? 0);
+        const slot = Number.isFinite(slotRaw) ? Math.min(Math.max(Math.trunc(slotRaw), 0), 2) : 0;
+        // Only the sweeper may set the tick clock (its marker is
+        // stripped from outside requests in index.ts). A manual
+        // tick runs at server time, so client-chosen dates cannot
+        // reset the daily cap or once-per-slot keys.
+        const now = effectiveTickNow(body.now, request.headers.get("x-hygge-scheduled-sweep") === "1");
+        const summary = await this.exclusive(() =>
+          runScheduledTick(this.scanDeps(browser), { slot, now }));
+        return json(summary);
+      }
+      if (request.method === "GET" && parts.join("/") === "scheduled-scan/status") {
+        const scans = this.scanStore();
+        return json({
+          schedule: { slotsUtc: [...CRON_SLOTS_UTC], note: "signed-in sites every slot; public listings at the first slot only" },
+          runs: scans.db.listRecentRuns(50),
+          categories: scans.db.listCategories(),
+          sites: scans.db.listSiteStates(),
+        });
+      }
+
       // Tasks (approval gate enforced here)
       if (request.method === "POST" && parts.join("/") === "tasks") {
         const kind = body.kind ?? "discover";
@@ -775,6 +1113,15 @@ export class UserSandbox extends DurableObject<Env> {
           goal: body.goal ?? "",
           title: body.title ?? kind,
           drafted_payload: body.drafted_payload ?? {},
+          // Brief 04 site-signup email choice (approved draft keys
+          // email/emailChoice, or explicit fields). The address is a
+          // per-user draft value in this user's object only — skill
+          // promotion redacts draft values before anything is shared.
+          email_choice: body.email_choice ?? body.drafted_payload?.emailChoice ?? null,
+          awaiting_email_verification:
+            body.awaiting_email_verification === true
+            || body.drafted_payload?.awaitingEmailVerification === "true",
+          email_code_available: false,
           credential_id: body.credential_id ?? (cred.length ? cred[0].id : null),
           requires_approval: requiresApprovalForKind(kind),
           status: "awaiting_approval",
@@ -836,9 +1183,13 @@ export class UserSandbox extends DurableObject<Env> {
       if (parts[0] === "state") {
         const store = this.stateStore();
         if (request.method === "POST" && parts[1] === "import") {
+          // Brief 05: rate/location/site changes arriving through the
+          // app's debounced push reopen exhausted categories.
+          const reopenBefore = this.reopenSnapshot(store);
           const result = store.importSnapshot(body as Record<string, unknown>);
           this.importMemories(result.memories);
           this.importSnapshotTasks(result.tasks);
+          this.applyCategoryReopen(reopenBefore, store);
           return json({
             ok: true,
             counts: result.counts,
@@ -872,8 +1223,13 @@ export class UserSandbox extends DurableObject<Env> {
             ? PROFILE_ROW_ID
             : String(parts[1] ?? body.id ?? data.id ?? crypto.randomUUID());
           const updatedAt = typeof body.updatedAt === "string" ? body.updatedAt : undefined;
+          // Brief 05: profile/site writes can reopen exhausted
+          // categories (new site, new rate floor, new location).
+          const reopenBefore = stateEntity === "profile" || stateEntity === "sites"
+            ? this.reopenSnapshot(store) : null;
           try {
             const result = store.upsert(stateEntity, id, data, updatedAt);
+            if (result.applied) this.applyCategoryReopen(reopenBefore, store);
             return json(result, result.applied ? 200 : 409);
           } catch (e: any) {
             return json({ error: String(e?.message ?? e) }, 400);

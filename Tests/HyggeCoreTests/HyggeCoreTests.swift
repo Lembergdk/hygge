@@ -531,6 +531,77 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertEqual(reencoded, task)
     }
 
+    // MARK: - Brief 04 Hygge email (receive only)
+
+    func testHyggeEmailAddressValidation() {
+        XCTAssertEqual(HyggeEmail.digits(from: "4839201847@usehygge.cc"), "4839201847")
+        XCTAssertEqual(HyggeEmail.digits(from: " 4839201847@UseHygge.CC "), "4839201847")
+        XCTAssertNil(HyggeEmail.digits(from: "sam@usehygge.cc"))
+        XCTAssertNil(HyggeEmail.digits(from: "483920184@usehygge.cc"))
+        XCTAssertNil(HyggeEmail.digits(from: "4839201847@example.com"))
+        XCTAssertTrue(HyggeEmail.isHyggeAddress("0123456789@usehygge.cc")) // leading zero allowed
+        XCTAssertEqual(HyggeEmail.address(digits: "4839201847"), "4839201847@usehygge.cc")
+        XCTAssertNil(HyggeEmail.address(digits: "sam"))
+    }
+
+    func testSiteSignupEmailChoiceDraft() {
+        let hygge = SiteSignupEmailChoice.hygge.draftedPayload(
+            signupEmail: "4839201847@usehygge.cc", displayName: "Sam")
+        XCTAssertEqual(hygge["email"], "4839201847@usehygge.cc")
+        XCTAssertEqual(hygge["emailChoice"], "hygge")
+        XCTAssertEqual(hygge["awaitingEmailVerification"], "true")
+        let own = SiteSignupEmailChoice.own.draftedPayload(
+            signupEmail: " Sam@Example.com ", displayName: "Sam")
+        XCTAssertEqual(own["email"], "sam@example.com")
+        XCTAssertEqual(own["awaitingEmailVerification"], "false")
+    }
+
+    func testSignupTaskEmailChoice() {
+        let site = SeedSites.all[0]
+        let hyggeTask = AgentTaskFactory.signupTask(
+            profile: petProfile(), site: site,
+            emailChoice: .hygge, signupEmail: "4839201847@usehygge.cc")
+        XCTAssertEqual(hyggeTask.draftedPayload["email"], "4839201847@usehygge.cc")
+        XCTAssertTrue(hyggeTask.goal.contains("do not ask the user to open email"))
+        let ownTask = AgentTaskFactory.signupTask(profile: petProfile(), site: site)
+        XCTAssertEqual(ownTask.draftedPayload["emailChoice"], "own")
+    }
+
+    func testSuggestedSitePasswordsAreStrongAndVary() {
+        let first = SitePasswordSuggestion.generate()
+        let second = SitePasswordSuggestion.generate()
+        XCTAssertEqual(first.count, SitePasswordSuggestion.length)
+        XCTAssertTrue(SitePasswordSuggestion.isStrong(first))
+        XCTAssertNotEqual(first, second)
+        XCTAssertFalse(SitePasswordSuggestion.isStrong("correct horse battery"))
+    }
+
+    func testFiledEmailAndAddressDecode() throws {
+        let addressJSON = #"{"hyggeEmail":{"address":"4839201847@usehygge.cc","digits":"4839201847","createdAt":"2026-10-31T10:00:00.000Z"}}"#
+        let address = try JSONDecoder().decode(HyggeEmailAddressResponse.self, from: Data(addressJSON.utf8))
+        XCTAssertEqual(address.hyggeEmail?.address, "4839201847@usehygge.cc")
+        let noneJSON = #"{"hyggeEmail":null}"#
+        XCTAssertNil(try JSONDecoder().decode(HyggeEmailAddressResponse.self, from: Data(noneJSON.utf8)).hyggeEmail)
+
+        let filedJSON = #"{"id":"m1","sender":"Rover","senderDomain":"rover.com","subject":"New request","date":null,"kind":"other","summary":"A summary","actionableItems":["Link to rover.com"],"attachments":[{"filename":"a.pdf","contentType":"application/pdf","size":10}],"filedAt":"2026-10-31"}"#
+        let filed = try JSONDecoder().decode(FiledEmailSummary.self, from: Data(filedJSON.utf8))
+        XCTAssertEqual(filed.senderDomain, "rover.com")
+        XCTAssertEqual(filed.attachments.first?.filename, "a.pdf")
+
+        // Server-filed mail arrives as a filedEmail journal event.
+        // Server timestamps carry fractional seconds, which the
+        // plain .iso8601 strategy rejects on older OS releases —
+        // the app decodes them through HyggeISO8601 instead.
+        XCTAssertNotNil(HyggeISO8601.date(from: "2026-10-31T10:05:00.000Z"))
+        XCTAssertNotNil(HyggeISO8601.date(from: "2026-10-31T10:05:00Z"))
+        XCTAssertNil(HyggeISO8601.date(from: "31 Oct 2026"))
+        let eventJSON = #"{"id":"00000000-0000-0000-0000-000000000001","occurredAt":"2026-10-31T10:05:00.000Z","kind":"filedEmail","sentence":"Filed mail from rover.com: Hi","detail":"summary","currencyCode":"USD","listingsChecked":0}"#
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = HyggeISO8601.dateDecodingStrategy
+        let event = try decoder.decode(ActivityEvent.self, from: Data(eventJSON.utf8))
+        XCTAssertEqual(event.kind, .filedEmail)
+    }
+
     /// The helper's session-profile JSON decodes into metadata only.
     func testSessionProfileRefDecodesHelperShape() throws {
         let json = #"{"domain":"rover.com","trustSupport":"supported","hasProfile":true}"#

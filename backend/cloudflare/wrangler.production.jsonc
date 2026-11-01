@@ -11,6 +11,11 @@
   "routes": [
     { "pattern": "api.usehygge.app", "custom_domain": true }
   ],
+  // Brief 05: fleet scan sweeper, 3 slots/day UTC (07:00/13:00/19:00).
+  // Signed-in sites scan every slot; public-only sites at 07:00.
+  // Config is committed but NOT deployed by the implementer — the
+  // coordinator deploys after confirming cron quota on the account.
+  "triggers": { "crons": ["0 7 * * *", "0 13 * * *", "0 19 * * *"] },
   "containers": [
     { "class_name": "UserSandbox", "scheduling_policy": "durable_object" }
   ],
@@ -27,7 +32,11 @@
     "HYGGE_LLM_BASE_URL": "https://api.meta.ai/v1",
     "HYGGE_LLM_MODEL_FAST": "muse-spark-1.3",
     "HYGGE_LLM_MODEL_STRONG": "muse-wonder-1.0",
-    "HYGGE_APPLE_BUNDLE_ID": "app.usehygge"
+    "HYGGE_APPLE_BUNDLE_ID": "app.usehygge",
+    // Brief 04 receive-only email domain. Email Routing (MX +
+    // catch-all to this worker) is a dashboard step — see
+    // docs/email-usehygge-cc.md. No send binding exists.
+    "HYGGE_EMAIL_DOMAIN": "usehygge.cc"
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "hygge-production", "database_id": "d36ecef4-1b4c-4679-bc52-158b6f552775" }
