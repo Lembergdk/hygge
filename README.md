@@ -72,9 +72,9 @@ Free up to $100 earned per month — then Plus at $9.99/month or $99/year for un
 
 [Join the Hygge beta on TestFlight](https://testflight.apple.com/join/VQwBCNSP)
 
-The browser is driven by an LLM agent, one per user: **muse-spark-1.3** for routine steps/extraction, **muse-wonder-1.0** for planning, deviations, and drafting. Point it at a live endpoint with the `HYGGE_LLM_*` Worker settings; without a key a labelled simulated decider runs the same loop.
+**Agent service** (cloud browser, site memory, credential vault) — lives in `backend/cloudflare` (Worker + per-user sandbox). Staging: https://api-staging.usehygge.app, production: https://api.usehygge.app. See `backend/cloudflare/README.md` for deploy settings. The original local Node service is retired; the cloud Worker is the only backend.
 
-**Agent service** (cloud browser, site memory, credential vault) — lives in `backend/cloudflare` (Worker + per-user sandbox). Staging: https://api-staging.usehygge.app, production: https://api.usehygge.app. See `backend/cloudflare/README.md`. The original local Node service was retired once the cloud port reached parity (in git history).
+**How the agent runs** — one mission loop per user, driving a real browser: Muse Spark 1.3 for routine steps, escalating to Muse Wonder 1.0 on failures, loops, high-stakes submits, and drafting. The endpoint and models are Worker settings (`HYGGE_LLM_BASE_URL`, `HYGGE_LLM_MODEL_FAST`, `HYGGE_LLM_MODEL_STRONG`); the API key is a Worker secret (`HYGGE_LLM_API_KEY`). Without a key the same loop runs with a simulated decider instead, reported as `simulated` by `/health`.
 
 Release builds require the cloud backend (`HYGGE_REQUIRE_CLOUD`); Debug builds default to staging, Release builds to production, and a developer override still wins.
 
