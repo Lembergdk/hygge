@@ -13,6 +13,10 @@ import {
   type SharedSkill, type SkillCandidate, type SkillOutcome,
 } from "./skills.ts";
 import {
+  attachEmailToTasks, takeFreshCode,
+  type InboundEmailDelivery,
+} from "./email.ts";
+import {
   sealSessionState,
   openSessionState,
   isEmptyState,
@@ -135,6 +139,21 @@ export class UserSandbox extends DurableObject<Env> {
       -- primary blob store is R2 (BROWSER_PROFILES); the blob is
       -- always sealed with the user's DEK. Deleting a credential
       -- never touches this table, and vice versa.
+      -- Brief 04 receive-only email. Codes are sealed with this
+      -- user's DEK, expire in 30 minutes, and are deleted on first
+      -- consumption; summaries hold no code and no full body.
+      CREATE TABLE IF NOT EXISTS email_codes (
+        id TEXT PRIMARY KEY, sender_domain TEXT NOT NULL,
+        iv TEXT NOT NULL, ciphertext TEXT NOT NULL,
+        received_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS email_summaries (
+        id TEXT PRIMARY KEY, sender TEXT NOT NULL, sender_domain TEXT NOT NULL,
+        subject TEXT NOT NULL, mail_date TEXT, kind TEXT NOT NULL,
+        summary TEXT NOT NULL, actionable TEXT NOT NULL DEFAULT '[]',
+        attachments TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
       CREATE TABLE IF NOT EXISTS session_profiles (
         domain TEXT PRIMARY KEY,
         trust_support TEXT NOT NULL DEFAULT 'unknown',
@@ -354,6 +373,94 @@ export class UserSandbox extends DurableObject<Env> {
     );
   }
 
+  // ---- Brief 04 inbox (receive only) ------------------------------
+  // Deliveries arrive only from the Email Worker handler in
+  // email.ts (x-hygge-email-delivery). The code, when present, is
+  // sealed immediately with this user's DEK; plaintext exists only
+  // while typing it into the site on the next run. This object logs
+  // no code, sender, subject, or body anywhere.
+
+  private emailCodeAAD(senderDomain: string): string {
+    return `email-code\n${senderDomain}`;
+  }
+
+  private pendingEmailCodes(domain?: string) {
+    const rows = [...this.ctx.storage.sql.exec(
+      "SELECT id, sender_domain, iv, ciphertext, received_at FROM email_codes ORDER BY received_at DESC",
+    )] as Row[];
+    const records = rows.map((r) => ({
+      id: String(r.id), senderDomain: String(r.sender_domain),
+      iv: String(r.iv), ciphertext: String(r.ciphertext), receivedAt: String(r.received_at),
+    }));
+    if (domain) {
+      const fresh = takeFreshCode(records, domain);
+      return fresh ? [fresh] : [];
+    }
+    const now = Date.now();
+    return records.filter((r) => now - Date.parse(r.receivedAt) <= 30 * 60 * 1000);
+  }
+
+  private hasEmailCode(domain: string): boolean {
+    return this.pendingEmailCodes(domain).length > 0;
+  }
+
+  /// Consume = open + delete. The row is removed before the value
+  /// is used, so a code can never be replayed or read twice.
+  private async consumeEmailCode(domain: string): Promise<string | null> {
+    const [record] = this.pendingEmailCodes(domain);
+    if (!record) return null;
+    this.ctx.storage.sql.exec("DELETE FROM email_codes WHERE id = ?", record.id);
+    try {
+      return await vault.open(await this.dek(),
+        { iv: record.iv, ciphertext: record.ciphertext }, this.emailCodeAAD(record.senderDomain));
+    } catch {
+      return null; // deleted either way — a code that cannot open is dead
+    }
+  }
+
+  private pruneExpiredEmailCodes() {
+    const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    this.ctx.storage.sql.exec("DELETE FROM email_codes WHERE received_at < ?", cutoff);
+  }
+
+  private async handleEmailInbound(delivery: InboundEmailDelivery) {
+    this.pruneExpiredEmailCodes();
+    const summaryId = crypto.randomUUID();
+    const s = delivery.summary;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      summaryId, s.sender, s.senderDomain, s.subject, s.date, s.kind,
+      s.summary, JSON.stringify(s.actionableItems), JSON.stringify(s.attachments),
+    );
+    if (delivery.code) {
+      const blob = await vault.seal(await this.dek(), delivery.code, this.emailCodeAAD(s.senderDomain));
+      this.ctx.storage.sql.exec(
+        "INSERT INTO email_codes (id, sender_domain, iv, ciphertext, received_at) VALUES (?, ?, ?, ?, ?)",
+        crypto.randomUUID(), s.senderDomain, blob.iv, blob.ciphertext, delivery.receivedAt,
+      );
+    }
+    // Attach verification/code outcomes to the pending signup task.
+    const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks ORDER BY created_at")] as Row[];
+    const tasks = rows.map((r) => JSON.parse(String(r.task)));
+    for (const task of attachEmailToTasks(tasks, delivery)) this.saveTask(task);
+    // Other site mail is filed to the journal (Brief 01 state). The
+    // sentence is summary-level only — no body, no code, no link.
+    if (delivery.kind === "other") {
+      const journalId = crypto.randomUUID();
+      this.stateStore().upsert("journalEvents", journalId, {
+        id: journalId,
+        occurredAt: delivery.receivedAt,
+        kind: "filedEmail",
+        sentence: `Filed mail from ${s.senderDomain || "a site"}: ${s.subject || "(no subject)"}`,
+        detail: s.summary,
+        siteID: null, applicationID: null, grossAmount: null,
+        currencyCode: "USD", listingsChecked: 0,
+      }, delivery.receivedAt);
+    }
+    return { filed: true, kind: delivery.kind };
+  }
+
   private recordOutcome(domain: string, kind: string, trace: any[], extractedItems: string[], success: boolean) {
     const rows = [
       ...this.ctx.storage.sql.exec("SELECT * FROM memories WHERE domain = ? AND kind = ?", domain, kind),
@@ -505,6 +612,19 @@ export class UserSandbox extends DurableObject<Env> {
       });
     };
 
+    // Brief 04: an emailed code for this domain is consumable
+    // information for this run only. It is typed from the sealed
+    // store and deleted by consumeEmailCode before use; the value
+    // never enters prompts, logs, traces, or task JSON.
+    this.pruneExpiredEmailCodes();
+    const hasEmailCode = this.hasEmailCode(domain);
+    const fillEmailCodeValue = async (target: string, sessionID: string) => {
+      const code = await this.consumeEmailCode(domain);
+      if (!code) throw new Error("agent requested an emailed code but none is waiting");
+      await browser.act(sessionID, { action: "type", target, value: code });
+      task.email_code_available = false;
+    };
+
     const outcome = outcomeForTaskKind(task.kind);
     let activeSkill: SharedSkill | null = null;
     try { activeSkill = await this.skillRepo().loadActive(domain, outcome); }
@@ -524,6 +644,8 @@ export class UserSandbox extends DurableObject<Env> {
       hints,
       decider,
       fillCredentialValue,
+      fillEmailCodeValue,
+      hasEmailCode,
       hasCredential: Boolean(task.credential_id),
       skill: activeSkill,
       skillCandidate,
@@ -634,6 +756,44 @@ export class UserSandbox extends DurableObject<Env> {
           await this.ctx.storage.put("snapshotId", snapshot.id);
           await container.destroy();
           return json({ ok: true, snapshotId: snapshot.id, size: snapshot.size });
+        });
+      }
+
+      // Brief 04 inbox (receive only). Inbound accepts only the
+      // Email Worker delivery marker; reads are this user's filed
+      // summaries and code METADATA — a code itself never leaves
+      // through any API. There is no send/reply route.
+      if (request.method === "POST" && parts.join("/") === "email/inbound") {
+        if (request.headers.get("x-hygge-email-delivery") !== "1") {
+          return json({ error: "not found", path }, 404);
+        }
+        if (!body?.summary || typeof body.receivedAt !== "string"
+            || !["verification", "security_code", "other"].includes(String(body.kind))) {
+          return json({ error: "malformed delivery" }, 400);
+        }
+        return json(await this.handleEmailInbound(body as InboundEmailDelivery), 201);
+      }
+      if (request.method === "GET" && parts.join("/") === "email/messages") {
+        const rows = [...this.ctx.storage.sql.exec(
+          "SELECT id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, created_at FROM email_summaries ORDER BY created_at DESC LIMIT 100",
+        )] as Row[];
+        return json({
+          messages: rows.map((r) => ({
+            id: r.id, sender: r.sender, senderDomain: r.sender_domain,
+            subject: r.subject, date: r.mail_date, kind: r.kind,
+            summary: r.summary,
+            actionableItems: JSON.parse(String(r.actionable)),
+            attachments: JSON.parse(String(r.attachments)),
+            filedAt: r.created_at,
+          })),
+        });
+      }
+      if (request.method === "GET" && parts.join("/") === "email/codes/pending") {
+        this.pruneExpiredEmailCodes();
+        return json({
+          pending: this.pendingEmailCodes().map((r) => ({
+            senderDomain: r.senderDomain, receivedAt: r.receivedAt,
+          })),
         });
       }
 
@@ -775,6 +935,15 @@ export class UserSandbox extends DurableObject<Env> {
           goal: body.goal ?? "",
           title: body.title ?? kind,
           drafted_payload: body.drafted_payload ?? {},
+          // Brief 04 site-signup email choice (approved draft keys
+          // email/emailChoice, or explicit fields). The address is a
+          // per-user draft value in this user's object only — skill
+          // promotion redacts draft values before anything is shared.
+          email_choice: body.email_choice ?? body.drafted_payload?.emailChoice ?? null,
+          awaiting_email_verification:
+            body.awaiting_email_verification === true
+            || body.drafted_payload?.awaitingEmailVerification === "true",
+          email_code_available: false,
           credential_id: body.credential_id ?? (cred.length ? cred[0].id : null),
           requires_approval: requiresApprovalForKind(kind),
           status: "awaiting_approval",

@@ -33,11 +33,13 @@ const SYSTEM = [
   "You see the current page as a list of interactive elements. Reply with ONE",
   'JSON action: {"action":"navigate|click|type|extract|done|needsHuman",',
   '"target":"element label exactly as listed, or a URL","value":"text to type",',
-  '"valueRef":"credential.username|credential.secret|draft.<key>","reason":"short",',
+  '"valueRef":"credential.username|credential.secret|emailCode.code|draft.<key>","reason":"short",',
   '"questions":["for askUser: the exact things you need from the user"]}.',
   "Find your own path: there is no script. Memory hints from past visits are",
   "advice only — if the page disagrees, trust the page. Never invent or type",
-  "passwords; use valueRef credential.* and the vault fills them. Use extract",
+  "passwords or codes; use valueRef credential.* / emailCode.code and the",
+  "worker fills them. emailCode.code is available only when hasEmailedCode",
+  "is true (a code that arrived in the user's own Hygge inbox). Use extract",
   "to read listings/results, done when the mission is complete, needsHuman at",
   "CAPTCHA, 2FA, payment, or identity checks — never try to solve, bypass, or",
   "work around them. When logging in, tick any 'remember me' / 'trust this",
@@ -73,6 +75,7 @@ export class LLMDecider {
           : null,
         availableDraftRefs: Object.keys(ctx.draft ?? {}).map((k) => `draft.${k}`),
         hasStoredCredential: ctx.hasCredential,
+        hasEmailedCode: Boolean(ctx.hasEmailCode),
         restoredSession: Boolean(ctx.restoredSession),
         sessionProbe: ctx.sessionProbe ?? null,
         page: { url: ctx.snapshot.currentURLString, title: ctx.snapshot.title,
@@ -107,6 +110,19 @@ export class SimulatedDecider {
     const out = (d: any) => d.action === "done" && ctx.authoringMode
       ? { ...d, tier, skillDraft: distillSkillDraft({ site: ctx.site ?? "", outcome: outcomeForTaskKind(ctx.taskKind ?? ""), trace: ctx.history }) }
       : { ...d, tier };
+
+    // An emailed code (Brief 04) is typed from the sealed store,
+    // never from a literal the decider could invent; the step after
+    // typing may press the page's verify/continue button.
+    const codeField = has("verification code", "one-time code", "enter code", "code field", "passcode");
+    if (ctx.hasEmailCode && codeField && !did("type", "code")) {
+      return out({ action: "type", target: codeField, valueRef: "emailCode.code", reason: "code arrived in the Hygge inbox" });
+    }
+    const verifyBtn = labels.find((l) => /^(verify|continue|confirm|submit)( button)?$/i.test(l.trim()));
+    if (verifyBtn && did("type", "code") && !did("click", "verify") && !did("click", "continue")
+        && !did("click", "confirm") && !did("click", "submit")) {
+      return out({ action: "click", target: verifyBtn, reason: "submit the emailed code" });
+    }
 
     if (ctx.taskKind === "signup") {
       const onSignupForm = has("create account", "phone number", "date of birth");
@@ -192,13 +208,18 @@ export function makeDecider(client: LLMClient) {
  * Execute one validated decision. fillCredentialValue(ref, target) is provided
  * by the server and types vault secrets without exposing them here.
  */
-async function execute({ browser, sessionID, decision, task, fillCredentialValue }: any) {
-  if (/password/i.test(decision.target ?? "") && decision.value) {
-    return { succeeded: false, summary: "Refused: model tried to type a literal value into a password field" };
+async function execute({ browser, sessionID, decision, task, fillCredentialValue, fillEmailCodeValue }: any) {
+  if (/password|passcode|\bcode\b/i.test(decision.target ?? "") && decision.value) {
+    return { succeeded: false, summary: "Refused: model tried to type a literal value into a password/code field" };
   }
   if (decision.valueRef?.startsWith("credential.")) {
     await fillCredentialValue(decision.valueRef, decision.target, sessionID);
     return { succeeded: true, summary: "Credential injected from vault inside the browser worker (secret redacted)" };
+  }
+  if (decision.valueRef === "emailCode.code") {
+    if (!fillEmailCodeValue) return { succeeded: false, summary: "No emailed code is waiting for this site" };
+    await fillEmailCodeValue(decision.target, sessionID);
+    return { succeeded: true, summary: "Emailed code injected from the Hygge inbox and deleted (secret redacted)" };
   }
   let value = decision.value ?? "";
   if (decision.valueRef?.startsWith("draft.")) {
@@ -218,10 +239,12 @@ async function execute({ browser, sessionID, decision, task, fillCredentialValue
  * Statuses: succeeded | needs_human | failed (budget exhausted / looping).
  */
 export async function runMission({ browser, task, hints = [], hasCredential = false,
+                                   hasEmailCode = false, fillEmailCodeValue = null,
                                    decider, fillCredentialValue, maxSteps = MAX_STEPS,
                                    skill = null, skillCandidate = null,
                                    existingSessionID = null, restoreState = null }: {
   browser: any; task: any; hints?: string[]; hasCredential?: boolean;
+  hasEmailCode?: boolean; fillEmailCodeValue?: any;
   decider: any; fillCredentialValue?: any; maxSteps?: number;
   skill?: SharedSkill | null; skillCandidate?: { body: SkillBody } | null;
   existingSessionID?: string | null; restoreState?: any;
@@ -271,6 +294,7 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
     ? `skill_id=${skill.id} skill_version=${skill.version} outcome=${outcome} — shared skill loaded, Spark default (advisory only)`
     : `skill_id=none skill_version=none outcome=${outcome} — no active skill, Wonder authoring mode`);
   let failures = 0;
+  let emailedCodeSteps = 0; // Brief 04 two-factor window: type + submit
   const actionKeys = new Map<string, number>();
 
   for (let step = 1; step <= maxSteps; step++) {
@@ -279,7 +303,15 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
     // user with the session kept open. Enforced here — before the
     // model may act — so no decision can attempt to get past one.
     const checkpoint = detectCheckpoint(snapshot);
-    if (checkpoint) {
+    // Brief 04 narrow exception: when a code arrived in the user's
+    // own Hygge inbox, a two-factor page gets a two-step window —
+    // type the code via valueRef (sealed store, deleted on use),
+    // then press the page's own submit. This is using a
+    // legitimately received code, not solving/bypassing a check.
+    // CAPTCHA, ID, and every other checkpoint still pause.
+    const emailedCodeStep = checkpoint === "two-factor check" && hasEmailCode && emailedCodeSteps < 2;
+    if (emailedCodeStep) emailedCodeSteps += 1;
+    if (checkpoint && !emailedCodeStep) {
       trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
                    summary: `${checkpoint} — paused for you in the browser`, succeeded: false, modelTier: null });
       log.push(`Paused at a ${checkpoint}. The browser session stays open for you to finish it there.`);
@@ -291,7 +323,7 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
     try {
       decision = await decider.decide({
         mission: task.goal, taskKind: task.kind, draft: task.drafted_payload,
-        hints, hasCredential, snapshot, history: trace,
+        hints, hasCredential, hasEmailCode, snapshot, history: trace,
         skill, skillCandidate, authoringMode, site,
         restoredSession: Boolean(restoreState) || resumedSession, sessionProbe,
         tierContext: { taskKind: task.kind, failures, repeatedAction: repeated, skillCoverage },
@@ -306,6 +338,12 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
     const stamp = { modelTier: tierLabel, model: decision.tier?.model ?? null,
                     skillId: skill?.id ?? null, skillVersion: skill?.version ?? null };
 
+    if (emailedCodeStep && decision.valueRef !== "emailCode.code" && decision.action !== "click" && decision.action !== "needsHuman") {
+      trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
+                   summary: "two-factor check — paused for you in the browser", succeeded: false, ...stamp });
+      log.push("Paused at a two-factor check. The browser session stays open for you to finish it there.");
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, ...routing() };
+    }
     if (decision.action === "done") {
       trace.push({ action: "done", target: "", urlString: snapshot.currentURLString,
                    summary: decision.reason || "Mission complete", succeeded: true, ...stamp });
@@ -328,9 +366,15 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
       return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
     }
 
+    if (emailedCodeStep && decision.valueRef !== "emailCode.code" && decision.action !== "click") {
+      trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
+                   summary: "two-factor check — paused for you in the browser", succeeded: false, ...stamp });
+      log.push("Paused at a two-factor check. The browser session stays open for you to finish it there.");
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, ...routing() };
+    }
     let result: any;
     try {
-      result = await execute({ browser, sessionID: snap.sessionID, decision, task, fillCredentialValue });
+      result = await execute({ browser, sessionID: snap.sessionID, decision, task, fillCredentialValue, fillEmailCodeValue });
     } catch (e: any) {
       result = { succeeded: false, summary: `Action failed (deviation): ${e.message.slice(0, 140)}` };
     }

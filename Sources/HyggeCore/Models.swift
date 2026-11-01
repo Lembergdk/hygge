@@ -179,7 +179,7 @@ public struct ApplicationRecord: Codable, Identifiable, Equatable, Sendable {
 /// never reconstructed from mutable task/application state after the fact.
 public struct ActivityEvent: Codable, Identifiable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
-        case searchedSite, joinedSite, profileLive, applicationSent, messageSent, booked, workCompleted, learnedAboutSite
+        case searchedSite, joinedSite, profileLive, applicationSent, messageSent, booked, workCompleted, learnedAboutSite, filedEmail
     }
     public var id: UUID
     public var occurredAt: Date

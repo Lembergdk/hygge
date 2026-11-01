@@ -15,6 +15,7 @@ export interface Env {
   HYGGE_MASTER_KEY?: string; // base64, 32 bytes
   HYGGE_DEV_TOKENS?: string; // staging only: JSON map token -> userId
   HYGGE_APPLE_BUNDLE_ID?: string;
+  HYGGE_EMAIL_DOMAIN?: string; // receive-only @usehygge.cc domain (Brief 04)
   HYGGE_APNS_KEY_P8?: string;
   HYGGE_APNS_KEY_ID?: string;
   HYGGE_APNS_TEAM_ID?: string;

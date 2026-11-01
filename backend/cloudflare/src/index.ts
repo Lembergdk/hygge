@@ -1,6 +1,7 @@
 import type { Env } from "./env.ts";
 import { json, sandboxFor } from "./env.ts";
 import { handleAuthRequest, resolveRequestUserId } from "./auth.ts";
+import { handleEmailAddressRequest, handleEmailMessage } from "./email.ts";
 
 export { UserSandbox } from "./user-sandbox.ts";
 
@@ -26,6 +27,8 @@ const USER_ROUTES = [
   "/journal-events",
   "/beliefs",
   "/search-evidence",
+  // Brief 04 receive-only email: own address + filed mail + codes meta.
+  "/email",
 ];
 
 export default {
@@ -60,10 +63,21 @@ export default {
     const userId = await resolveRequestUserId(request, env);
     if (!userId) return json({ error: "unauthorized" }, 401);
 
+    // Own Hygge address lives in D1 (fleet-wide allocation), not the
+    // DO. Everything else user-scoped goes into the user's sandbox.
+    if (url.pathname === "/email/address") {
+      return handleEmailAddressRequest(request, env, userId);
+    }
+
     // Everything user-scoped happens inside that user's sandbox.
     const stub = sandboxFor(env, userId);
     const forwarded = new Request(request);
     forwarded.headers.set("x-hygge-user-id", userId);
     return stub.fetch(forwarded);
   },
+
+  // Brief 04: Cloudflare Email Routing catch-all target. Receive
+  // only — see src/email.ts. Routing itself is enabled in the
+  // Cloudflare dashboard (docs/email-usehygge-cc.md).
+  email: handleEmailMessage,
 };
