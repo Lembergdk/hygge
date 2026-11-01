@@ -305,7 +305,9 @@ struct BackendClient {
 
     private static func stateDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        // Server timestamps carry fractional seconds; the plain
+        // .iso8601 strategy rejects those on older OS releases.
+        decoder.dateDecodingStrategy = HyggeISO8601.dateDecodingStrategy
         return decoder
     }
 
@@ -547,7 +549,7 @@ struct BackendClient {
             throw URLError(.badServerResponse)
         }
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = HyggeISO8601.dateDecodingStrategy
         return try decoder.decode(Response.self, from: data)
     }
 }

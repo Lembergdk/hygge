@@ -589,9 +589,15 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertEqual(filed.attachments.first?.filename, "a.pdf")
 
         // Server-filed mail arrives as a filedEmail journal event.
+        // Server timestamps carry fractional seconds, which the
+        // plain .iso8601 strategy rejects on older OS releases —
+        // the app decodes them through HyggeISO8601 instead.
+        XCTAssertNotNil(HyggeISO8601.date(from: "2026-10-31T10:05:00.000Z"))
+        XCTAssertNotNil(HyggeISO8601.date(from: "2026-10-31T10:05:00Z"))
+        XCTAssertNil(HyggeISO8601.date(from: "31 Oct 2026"))
         let eventJSON = #"{"id":"00000000-0000-0000-0000-000000000001","occurredAt":"2026-10-31T10:05:00.000Z","kind":"filedEmail","sentence":"Filed mail from rover.com: Hi","detail":"summary","currencyCode":"USD","listingsChecked":0}"#
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = HyggeISO8601.dateDecodingStrategy
         let event = try decoder.decode(ActivityEvent.self, from: Data(eventJSON.utf8))
         XCTAssertEqual(event.kind, .filedEmail)
     }
