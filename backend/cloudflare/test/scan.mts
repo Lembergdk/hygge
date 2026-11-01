@@ -55,6 +55,18 @@ function harness(mission: (input: ScanMissionInput, call: number) => ScanMission
     credentialIdForDomain: (domain) => credentials[domain] ?? null,
     sessionHealthForDomain: () => ({ domain: "rover.com", trustSupport: "supported", hasProfile: true }),
     runDiscoverMission: async (input) => { calls.push(input); return mission(input, calls.length); },
+    // Brief 06: sites scan only with a verified web verdict. This
+    // harness's catalog says every test domain passed its probe
+    // recently; learning.mts covers the ineligible/unknown paths.
+    siteAccessForDomain: (domain) => ({
+      domain, displayName: domain, webAccessible: "true", probedAt: DAY1,
+      probeEvidence: "test catalog", unknownCyclesUsed: 0, appWallStrikes: 0,
+    }),
+    saveSiteAccess: () => {},
+    runProbeMission: async () => ({
+      status: "succeeded",
+      checks: { signupReachable: true, signupFormPresent: true, profileEditReachable: true, applyStartable: true },
+    }),
     idFactory: () => `run-${++seq}`,
   };
   return { state, scansDb, scans, deps, calls };
@@ -130,10 +142,11 @@ test("stable opportunity ids: same listing, same row, every time", () => {
   assert.match(scanOpportunityId("rover", "Dog Sit"), /^[0-9a-f-]{36}$/);
 });
 
-test("gate: each rule blocks on its own; unknown pay passes; web-access unknown eligible (TODO brief-06)", () => {
+test("gate: each rule blocks on its own; unknown pay passes; web verdict is site-level and fail-closed", () => {
   const base: GateContext = {
-    profile: { interests: ["petcare"], skills: ["Dog walking"], locationLabel: "Leeds", hourlyRateFloor: 25, remoteOK: true },
+    profile: { interests: ["petcare"], skills: ["Dog walking"], locationLabel: "Leeds", hourlyRateFloor: 25, radiusKm: 20, remoteOK: true },
     existingKeys: new Set(), existingIds: new Set(), declinedKeys: new Set(), appliedKeys: new Set(), appliedIds: new Set(),
+    siteWebEligibility: "eligible",
   };
   const listing = (patch: Partial<Parameters<typeof evaluateGate>[0]> = {}) => ({
     title: "Weekend dog sitting", summary: "", category: "petCare", payLabel: "", estimatedHourly: 35,
@@ -148,7 +161,15 @@ test("gate: each rule blocks on its own; unknown pay passes; web-access unknown 
   assert.deepEqual(evaluateGate(listing({ locationLabel: "Glasgow" }), base).reasons, ["noLocationFit"]);
   assert.equal(evaluateGate(listing({ locationLabel: "Glasgow", isRemote: true }), base).pass, true);
   assert.deepEqual(evaluateGate(listing({ webAccess: "no" }), base).reasons, ["notWebAccessible"]);
-  assert.equal(evaluateGate(listing({ webAccess: "unknown" }), base).pass, true, "permissive default until Brief 06");
+  // Brief 06 inverted the old permissive default: no site verdict,
+  // an ineligible verdict, and a spent unknown all block; only a
+  // verified verdict (or the single allowed unknown cycle, granted
+  // by the tick) passes.
+  const noVerdict: GateContext = { ...base, siteWebEligibility: undefined };
+  assert.deepEqual(evaluateGate(listing({ webAccess: "unknown" }), noVerdict).reasons, ["notWebAccessible"]);
+  assert.deepEqual(evaluateGate(listing(), { ...base, siteWebEligibility: "ineligible" }).reasons, ["notWebAccessible"]);
+  assert.deepEqual(evaluateGate(listing(), { ...base, siteWebEligibility: "unknownBlocked" }).reasons, ["notWebAccessible"]);
+  assert.equal(evaluateGate(listing({ webAccess: "unknown" }), { ...base, siteWebEligibility: "unknownAllowed" }).pass, true);
 });
 
 // ---- tick behaviour ---------------------------------------------------------
@@ -282,7 +303,7 @@ test("exhaustion: 7 quiet days -> monthly cooldown, logged skip, one re-check, r
 });
 
 test("exhaustion reopens immediately on a user decision (new site in category, rate/location change)", () => {
-  const profile = { interests: ["petcare"], skills: [], locationLabel: "Leeds", hourlyRateFloor: 25, remoteOK: true };
+  const profile = { interests: ["petcare"], skills: [], locationLabel: "Leeds", hourlyRateFloor: 25, radiusKm: 20, remoteOK: true };
   const before = { profile, siteCategories: new Map([["rover", "petcare"]]) };
   assert.deepEqual(
     categoriesToReopen(before, { profile, siteCategories: new Map([["rover", "petcare"], ["pawshake", "petcare"]]) }),

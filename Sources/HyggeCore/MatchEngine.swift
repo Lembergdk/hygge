@@ -73,6 +73,14 @@ public struct SearchEvidence: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// Display evidence only (Brief 06). What surfaces, and in what order,
+/// is decided by the ONE server ranker (backend/cloudflare/src/
+/// learning.ts, seeded from these weights: 0.35 category, 0.35 skills,
+/// 0.20 pay, 0.10 remote — see docs/profile-learning.md). This type
+/// still produces the plain facts shown on a card (evidence lines and
+/// the graded recommendation sentence) and the journal's negative-
+/// space survey for on-device discovery. It must NOT order the feed:
+/// feed order follows each opportunity's server `rankScore`.
 public enum MatchEngine {
     public static func evaluate(profile: EarningsProfile, opportunity: Opportunity) -> MatchResult {
         var score = 0.0
@@ -141,10 +149,17 @@ public enum MatchEngine {
         return MatchResult(score: min(max(score, 0), 1), reasons: reasons, evidence: evidence)
     }
 
-    public static func ranked(profile: EarningsProfile, opportunities: [Opportunity]) -> [(Opportunity, MatchResult)] {
-        opportunities
-            .map { ($0, evaluate(profile: profile, opportunity: $0)) }
-            .sorted { $0.1.score > $1.1.score }
+    /// Order by the server ranker's score only (stable for ties and
+    /// for listings with no server score), pairing each item with its
+    /// display-evidence result. Deliberately does NOT sort by the
+    /// local score — there is exactly one ranking truth (Brief 06).
+    public static func inServerRankOrder(profile: EarningsProfile, opportunities: [Opportunity]) -> [(Opportunity, MatchResult)] {
+        opportunities.enumerated()
+            .sorted { a, b in
+                let sa = a.element.rankScore ?? -1, sb = b.element.rankScore ?? -1
+                return sa != sb ? sa > sb : a.offset < b.offset
+            }
+            .map { ($0.element, evaluate(profile: profile, opportunity: $0.element)) }
     }
 
     /// Below this confidence Hygge shows evidence but makes NO recommendation.

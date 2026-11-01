@@ -28,6 +28,17 @@
 /// - Secrets never appear here: credentials are referenced by id
 ///   only; the vault resolution stays inside runTask.
 import { PROFILE_ROW_ID, normalizeId, type StateStore } from "./state.ts";
+import {
+  SURFACING_THRESHOLD, deriveIgnoredEvents, pruneExpiredInferredBeliefs,
+  rankItem, sortByRank, type LearningProfile,
+} from "./learning.ts";
+import {
+  applyAppWallStrike, applyProbeOutcome, consumeUnknownCycle, eligibilityOf,
+  reprobeDue, unknownAccessRecord, withdrawProposalsForSite,
+  type Eligibility, type ProbeOutcome, type SiteAccessRecord,
+} from "./web-access.ts";
+
+export type { ProbeOutcome, SiteAccessRecord } from "./web-access.ts";
 
 /// Cron slots per day (UTC). Logged-in sites scan at every slot
 /// (3x/day); public-only sites scan at the first slot only (1x/day).
@@ -54,6 +65,8 @@ export interface ScanProfile {
   skills: string[];
   locationLabel: string;
   hourlyRateFloor: number;
+  /// Travel radius from the earnings profile (Brief 06 ranker input).
+  radiusKm: number;
   remoteOK: boolean;
 }
 
@@ -80,8 +93,15 @@ export interface ScanListing {
   requiredSkills: string[];
   urlString: string;
   siteId: string;
-  /// Web-accessibility probe verdict. "unknown" until Brief 06's
-  /// probe exists; see the gate.
+  /// Distance from the user when the listing states it. Null means
+  /// unknown: the ranker treats it as neutral, never blocking.
+  distanceKm: number | null;
+  /// When the listing was posted (ISO-8601) when stated. Null means
+  /// unknown freshness: neutral in the ranker, never blocking.
+  postedAt: string | null;
+  /// Per-listing web-access claim from extraction, kept only as a
+  /// defense-in-depth signal. The authoritative verdict is site-level
+  /// (catalog by domain; see web-access.ts and GateContext).
   webAccess: "yes" | "no" | "unknown" | null;
 }
 
@@ -237,6 +257,7 @@ export function extractProfile(payload: unknown): { profile: ScanProfile; isPaus
   const inner = asRecord(row.profile);
   const source = Object.keys(inner).length ? inner : row;
   const floor = Number(source.hourlyRateFloor ?? source.rateFloor ?? source.minimumRate);
+  const radius = Number(source.radiusKm ?? source.radius_km);
   return {
     isPaused: row.isPaused === true || row.is_paused === true,
     profile: {
@@ -244,6 +265,7 @@ export function extractProfile(payload: unknown): { profile: ScanProfile; isPaus
       skills: stringArray(source.skills),
       locationLabel: String(source.locationLabel ?? source.location ?? ""),
       hourlyRateFloor: Number.isFinite(floor) && floor > 0 ? floor : 0,
+      radiusKm: Number.isFinite(radius) && radius > 0 ? radius : 20,
       remoteOK: source.remoteOK !== false,
     },
   };
@@ -375,6 +397,10 @@ export function parseListings(items: string[], site: ScanSite): ScanListing[] {
             requiredSkills: stringArray(obj.requiredSkills ?? obj.skills),
             urlString: String(obj.urlString ?? obj.url ?? site.startURLString),
             siteId: site.id,
+            distanceKm: Number.isFinite(Number(obj.distanceKm)) && Number(obj.distanceKm) >= 0
+              ? Number(obj.distanceKm) : null,
+            postedAt: typeof obj.postedAt === "string" && Number.isFinite(Date.parse(obj.postedAt))
+              ? obj.postedAt : null,
             webAccess: obj.webAccess === "yes" || obj.webAccess === "no" ? obj.webAccess : null,
           };
         }
@@ -404,6 +430,7 @@ export function parseListings(items: string[], site: ScanSite): ScanListing[] {
             : [],
           urlString: url ?? site.startURLString,
           siteId: site.id,
+          distanceKm: null, postedAt: null,
           webAccess: null,
         };
       }
@@ -423,6 +450,7 @@ export function parseListings(items: string[], site: ScanSite): ScanListing[] {
         requiredSkills: [],
         urlString: url ?? site.startURLString,
         siteId: site.id,
+        distanceKm: null, postedAt: null,
         webAccess: null,
       };
     }
@@ -440,6 +468,12 @@ export interface GateContext {
   declinedKeys: Set<string>;
   appliedKeys: Set<string>;
   appliedIds: Set<string>;
+  /// Site-level web verdict for the site being scanned (catalog by
+  /// domain). Absent means "unknown with its fallback cycle spent" —
+  /// there is no permissive default: the tick verifies eligibility
+  /// (probe / one-cycle unknown) before any listing reaches the gate
+  /// and passes that verdict here explicitly.
+  siteWebEligibility?: Eligibility;
 }
 
 export type GateReason =
@@ -450,7 +484,8 @@ export type GateReason =
   | "noCategoryFit"
   | "noSkillFit"
   | "noLocationFit"
-  | "notWebAccessible";
+  | "notWebAccessible"
+  | "belowRankThreshold";
 
 export interface GateDecision {
   pass: boolean;
@@ -464,15 +499,19 @@ function overlaps(a: string, b: string): boolean {
 }
 
 /// The mandatory pre-surfacing gate (brief step 4). A listing
-/// surfaces only if EVERY check passes. Unknown facts (no known
-/// pay, no category, no location) do not block — only known-bad
-/// facts do — except the rate floor, which is a hard bound the
-/// moment a rate is known.
+/// surfaces only if EVERY check passes. Unknown listing facts (no
+/// known pay, no category, no location) do not block — only
+/// known-bad facts do — except the rate floor, which is a hard bound
+/// the moment a rate is known.
 ///
-/// TODO(brief-06): web-accessibility defaults to permissive
-/// ("unknown" is eligible, pending probe). Brief 06 replaces this
-/// with probe-verified eligibility; do not treat the permissive
-/// default as permanent.
+/// Web accessibility is site-level and probe-verified (Brief 06):
+/// the tick resolves the catalog verdict (probing unknown sites,
+/// allowing at most one unknown cycle) BEFORE running a mission, and
+/// passes it as `siteWebEligibility`. Ineligible and spent-unknown
+/// block here; an absent verdict blocks too. A per-listing "no" from
+/// extraction blocks as defense in depth. The ranker (learning.ts)
+/// then orders/filters ABOVE this gate — no score resurrects a
+/// gate-dropped (e.g. below-floor) listing.
 export function evaluateGate(listing: ScanListing, ctx: GateContext): GateDecision {
   const reasons: GateReason[] = [];
   const key = dedupeKey(listing.siteId, listing.title);
@@ -504,8 +543,12 @@ export function evaluateGate(listing: ScanListing, ctx: GateContext): GateDecisi
       reasons.push("noLocationFit");
     }
   }
-  // TODO(brief-06): permissive default — only a proven "no" blocks.
-  if (listing.webAccess === "no") reasons.push("notWebAccessible");
+  if (listing.webAccess === "no"
+    || ctx.siteWebEligibility === "ineligible"
+    || ctx.siteWebEligibility === "unknownBlocked"
+    || ctx.siteWebEligibility === undefined) {
+    reasons.push("notWebAccessible");
+  }
   return { pass: reasons.length === 0, reasons };
 }
 
@@ -873,6 +916,7 @@ export function createSqliteScanDb(
 /// StateStore for feed items; set here so opportunities agree.
 export function opportunityPayload(
   listing: ScanListing, site: ScanSite, id: string, foundAtIso: string,
+  rankScore: number | null = null,
 ): Record<string, unknown> {
   return {
     id,
@@ -895,6 +939,12 @@ export function opportunityPayload(
     sourceSiteId: site.siteID,
     foundAt: foundAtIso,
     foundVia: "scheduled-scan",
+    // Brief 06: the server ranker is the one ordering truth; the app
+    // orders by this score and uses its local match code for display
+    // evidence only.
+    rankScore,
+    distanceKm: listing.distanceKm,
+    postedAt: listing.postedAt,
   };
 }
 
@@ -971,9 +1021,18 @@ export interface ScanMissionOutcome {
   /// A human-only check (bot check, two-factor, identity) stopped
   /// the scan. Never bypassed; the user is asked once per episode.
   needsHuman?: boolean;
+  /// The mission hit a mobile-app wall (Brief 06 re-probe trigger).
+  /// Distinct from needsHuman, which is generic. One strike triggers
+  /// a probe; a confirming probe or a second strike disqualifies.
+  appWall?: boolean;
   errorReason?: string | null;
   skillPath?: string | null;
   taskId?: string | null;
+}
+
+export interface ProbeMissionInput {
+  site: ScanSite;
+  profile: ScanProfile;
 }
 
 export interface ScanDeps {
@@ -982,6 +1041,13 @@ export interface ScanDeps {
   credentialIdForDomain(domain: string): string | null;
   sessionHealthForDomain(domain: string): SessionHealthInfo | null;
   runDiscoverMission(input: ScanMissionInput): Promise<ScanMissionOutcome>;
+  /// Brief 06 site catalog (D1) access + probe. Fail-closed: with no
+  /// catalog injected, eligibility cannot be verified and nothing
+  /// scans (production always injects D1; tests inject fakes). See
+  /// web-access.ts for the unknown one-cycle rule.
+  siteAccessForDomain?: (domain: string) => Promise<SiteAccessRecord | null> | SiteAccessRecord | null;
+  saveSiteAccess?: (record: SiteAccessRecord) => Promise<void> | void;
+  runProbeMission?: (input: ProbeMissionInput) => Promise<ProbeOutcome>;
   idFactory?: () => string;
   log?: (message: string) => void;
 }
@@ -991,7 +1057,8 @@ export interface ScanSkip {
   siteName: string;
   reason:
     | "notApproved" | "missingUrl" | "staleLogin" | "publicOnlyBlocked"
-    | "notDueThisSlot" | "exhausted" | "alreadyRan" | "dailyCap";
+    | "notDueThisSlot" | "exhausted" | "alreadyRan" | "dailyCap"
+    | "notWebAccessible" | "webAccessUnknown";
   detail: string;
 }
 
@@ -1003,6 +1070,10 @@ export interface ScanTickSummary {
   skipped: ScanSkip[];
   surfacedIds: string[];
   needsYouItemIds: string[];
+  /// Site proposals withdrawn because their site became ineligible.
+  withdrawnProposalIds: string[];
+  /// "Ignored" feedback events derived this tick (ids).
+  ignoredEventIds: string[];
   filtered: { title: string; siteId: string; reasons: GateReason[] }[];
   /// Always zero by construction — asserted in tests. Scans create
   /// discover work and feed items only, never write tasks.
@@ -1022,7 +1093,8 @@ export async function runScheduledTick(
   const say = (m: string) => { log.push(m); deps.log?.(m); };
   const summary: ScanTickSummary = {
     slot: opts.slot, runDate, paused: false, scanned: [], skipped: [],
-    surfacedIds: [], needsYouItemIds: [], filtered: [], writeTasksCreated: 0, log,
+    surfacedIds: [], needsYouItemIds: [], withdrawnProposalIds: [],
+    ignoredEventIds: [], filtered: [], writeTasksCreated: 0, log,
   };
 
   const profileRow = deps.state.get("profile", PROFILE_ROW_ID);
@@ -1052,6 +1124,56 @@ export async function runScheduledTick(
   sites.sort((a, b) => a.id.localeCompare(b.id));
 
   const gate = buildGateContext(deps.state, profile);
+
+  // Brief 06 learning upkeep for this user only: derive "ignored"
+  // feedback for untouched listings, drop decayed inferred beliefs,
+  // and load the (possibly rebuilt) learning model the ranker reads.
+  const ignored = deriveIgnoredEvents(deps.state, opts.now);
+  summary.ignoredEventIds.push(...ignored.created.map((e) => e.id));
+  pruneExpiredInferredBeliefs(deps.state, opts.now);
+  const learning: LearningProfile = ignored.profile;
+
+  // Web-access resolution (Brief 06): catalog verdict by domain,
+  // probing first-contact/stale sites before any scan mission.
+  let journalSeq = 0;
+  const withdrawIfIneligible = (site: ScanSite, rec: SiteAccessRecord) => {
+    if (rec.webAccessible !== "false") return;
+    const withdrawn = withdrawProposalsForSite(
+      deps.state, { siteID: site.siteID, name: site.name },
+      rec.probeEvidence ?? "This site can only be used in its phone app.",
+      nowIso, () => deps.idFactory?.() ?? `withdrawn-${site.id}-${++journalSeq}`,
+    );
+    if (withdrawn.length) {
+      summary.withdrawnProposalIds.push(...withdrawn);
+      say(`${site.name}: withdrawn ${withdrawn.length} suggestion(s) — it can only be used in its phone app`);
+    }
+  };
+  const resolveAccess = async (site: ScanSite): Promise<{ eligibility: Eligibility; record: SiteAccessRecord }> => {
+    if (!deps.siteAccessForDomain) {
+      return { eligibility: "unknownBlocked", record: unknownAccessRecord(site.domain) };
+    }
+    let rec = (await deps.siteAccessForDomain(site.domain)) ?? unknownAccessRecord(site.domain);
+    if (reprobeDue(rec, opts.now) && deps.runProbeMission) {
+      let outcome: ProbeOutcome;
+      try {
+        outcome = await deps.runProbeMission({ site, profile });
+      } catch (e) {
+        outcome = { status: "failed", evidence: String((e as Error)?.message ?? e).slice(0, 200) };
+      }
+      rec = applyProbeOutcome(rec, outcome, nowIso);
+      if (!rec.displayName) rec = { ...rec, displayName: site.name };
+      await deps.saveSiteAccess?.(rec);
+      say(`${site.name}: web check finished (web_accessible=${rec.webAccessible})`);
+    }
+    withdrawIfIneligible(site, rec);
+    const eligibility = eligibilityOf(rec, site.domain);
+    if (eligibility === "unknownAllowed") {
+      rec = consumeUnknownCycle(rec);
+      await deps.saveSiteAccess?.(rec);
+      say(`${site.name}: web check still unknown; this is its one allowed look before a check must pass`);
+    }
+    return { eligibility, record: rec };
+  };
 
   // Cap from the approved mix; runs already recorded today count.
   let loggedCount = 0;
@@ -1108,6 +1230,24 @@ export async function runScheduledTick(
       continue;
     }
 
+    // Web-access gate: resolved (with a probe on first contact or a
+    // stale verdict) before any mission runs. Ineligible and
+    // spent-unknown sites are never scanned.
+    const access = await resolveAccess(site);
+    gate.siteWebEligibility = access.eligibility;
+    if (access.eligibility === "ineligible" || access.eligibility === "unknownBlocked") {
+      const ineligible = access.eligibility === "ineligible";
+      say(`${site.name}: ${ineligible ? "not usable on the web; not scanned" : "web check still unknown after its one allowed look; not scanned"}`);
+      summary.skipped.push({
+        siteId: site.id, siteName: site.name,
+        reason: ineligible ? "notWebAccessible" : "webAccessUnknown",
+        detail: ineligible
+          ? "skipped: this site can only be used in its phone app"
+          : "skipped: web check has not passed yet",
+      });
+      continue;
+    }
+
     // Expired trusted sign-ins do not change the tier: the mission
     // probes the restored session and falls back to the saved login
     // (agent.ts); only a login that then fails ends the episode
@@ -1121,6 +1261,22 @@ export async function runScheduledTick(
     }
     capRemaining -= 1;
     deps.scans.db.putSiteState({ ...siteState, lastScanAt: nowIso });
+
+    if (outcome.appWall) {
+      // Re-probe trigger: strike once, then let a fresh probe decide
+      // (the one retry). A confirming probe or a second strike
+      // disqualifies and withdraws any open suggestions.
+      let rec = applyAppWallStrike(access.record, nowIso);
+      if (rec.webAccessible !== "false" && deps.runProbeMission) {
+        try {
+          rec = applyProbeOutcome(rec, await deps.runProbeMission({ site, profile }), nowIso);
+        } catch { /* an inconclusive probe leaves the strike in place */ }
+      }
+      await deps.saveSiteAccess?.(rec);
+      say(`${site.name}: a step could only be done in its phone app (web_accessible=${rec.webAccessible})`);
+      withdrawIfIneligible(site, rec);
+      gate.siteWebEligibility = eligibilityOf(rec, site.domain);
+    }
 
     const baseRun: ScanRunRecord = {
       id: deps.idFactory?.() ?? `scan-${site.id}-${runDate}-${opts.slot}`,
@@ -1175,14 +1331,33 @@ export async function runScheduledTick(
 
     const listings = parseListings(outcome.items ?? [], site);
     let surfaced = 0;
+    // Gate first, then the one ranker orders what passed and drops
+    // anything below the surfacing threshold. No score can resurrect
+    // a gate-dropped listing (below-floor stays dropped).
+    const passed: { item: ScanListing; rank: ReturnType<typeof rankItem>; key: string }[] = [];
     for (const listing of listings) {
       const decision = evaluateGate(listing, gate);
       if (!decision.pass) {
         summary.filtered.push({ title: listing.title, siteId: site.id, reasons: decision.reasons });
         continue;
       }
+      const rank = rankItem({
+        category: listing.category || site.category,
+        requiredSkills: listing.requiredSkills,
+        estimatedHourly: listing.estimatedHourly,
+        distanceKm: listing.distanceKm ?? null,
+        isRemote: listing.isRemote,
+        postedAt: listing.postedAt ?? null,
+      }, profile, learning, opts.now);
+      if (rank.score < SURFACING_THRESHOLD) {
+        summary.filtered.push({ title: listing.title, siteId: site.id, reasons: ["belowRankThreshold"] });
+        continue;
+      }
+      passed.push({ item: listing, rank, key: dedupeKey(site.id, listing.title) });
+    }
+    for (const { item: listing, rank } of sortByRank(passed)) {
       const id = scanOpportunityId(site.id, listing.title);
-      const payload = opportunityPayload(listing, site, id, nowIso);
+      const payload = opportunityPayload(listing, site, id, nowIso, rank.score);
       deps.state.upsert("opportunities", id, payload, nowIso);
       deps.state.upsert("feedItems", id, payload, nowIso);
       gate.existingKeys.add(dedupeKey(site.id, listing.title));

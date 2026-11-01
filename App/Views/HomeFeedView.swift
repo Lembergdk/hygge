@@ -427,7 +427,9 @@ extension HomeFeedView {
     }
 
     private func notNow(_ task: AgentTask, reason: String) {
-        store.reject(taskID: task.id)
+        // The reason is recorded as structured feedback (Brief 06) so
+        // what Hygge suggests next learns from this "not now".
+        store.reject(taskID: task.id, reason: reason)
         switch reason {
         case "too far":
             store.proposeBelief(sentence: "Prefers work close to home", source: .learnedFromWork, confidence: 0.6)
