@@ -68,11 +68,9 @@ Free up to $100 earned per month — then Plus at $9.99/month or $99/year for un
 
 ## Run it
 
-**iOS app** — open `Hygge.xcodeproj`, run on an iOS 17+ simulator or device.
+**iOS app** — install the beta from TestFlight (iOS 17+):
 
-```bash
-xcodebuild -project Hygge.xcodeproj -scheme Hygge -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
-```
+[Join the Hygge beta on TestFlight](https://testflight.apple.com/join/VQwBCNSP)
 
 The browser is driven by an LLM agent, one per user: **muse-spark-1.3** for routine steps/extraction, **muse-wonder-1.0** for planning, deviations, and drafting. Point it at a live endpoint with the `HYGGE_LLM_*` Worker settings; without a key a labelled simulated decider runs the same loop.
 
