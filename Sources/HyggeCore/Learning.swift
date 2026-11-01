@@ -93,7 +93,9 @@ public struct CategoryAffinity: Codable, Equatable, Sendable {
 /// touches the rate floor.
 public struct LearningProfile: Codable, Equatable, Sendable {
     public var id: String = "learning"
-    /// Keyed by OpportunityCategory rawValue (server keys lowercase).
+    /// Keyed by lowercase OpportunityCategory rawValue, exactly
+    /// matching the server keys (learning.ts lowercases), so a
+    /// server-built profile and local applies share one bucket.
     public var affinities: [String: CategoryAffinity] = [:]
     public var skillAffinities: [String: Double] = [:]
     public var rateSensitivity: Double = 0 // 0...1
@@ -113,8 +115,21 @@ public struct LearningProfile: Codable, Equatable, Sendable {
     }
 
     public func affinity(for category: OpportunityCategory) -> Double {
-        affinities[category.rawValue]?.score
-            ?? affinities[category.rawValue.lowercased()]?.score ?? 0
+        affinities[category.rawValue.lowercased()]?.score
+            ?? affinities[category.rawValue]?.score ?? 0
+    }
+
+    /// The one bucket for a category, under its lowercase server
+    /// key. A legacy mixed-case bucket (written by an older build)
+    /// is folded in rather than left as a divergent second score.
+    private mutating func normalizedBucket(for category: OpportunityCategory) -> CategoryAffinity {
+        let key = category.rawValue.lowercased()
+        if let current = affinities[key] { return current }
+        if key != category.rawValue, let legacy = affinities[category.rawValue] {
+            affinities[category.rawValue] = nil
+            return legacy
+        }
+        return CategoryAffinity()
     }
 
     /// Top affinities by absolute score, for "what Hygge has learned".
@@ -132,16 +147,16 @@ public struct LearningProfile: Codable, Equatable, Sendable {
     public mutating func apply(_ event: FeedbackEvent) {
         func touch(_ delta: Double) {
             guard let category = event.category else { return }
-            var a = affinities[category.rawValue] ?? CategoryAffinity()
+            var a = normalizedBucket(for: category)
             a.score = Self.clamp(a.score + delta, -1, 1)
             a.updatedAt = event.occurredAt
-            affinities[category.rawValue] = a
+            affinities[category.rawValue.lowercased()] = a
         }
         func count(_ field: (inout CategoryAffinity) -> Void) {
             guard let category = event.category else { return }
-            var a = affinities[category.rawValue] ?? CategoryAffinity()
+            var a = normalizedBucket(for: category)
             field(&a)
-            affinities[category.rawValue] = a
+            affinities[category.rawValue.lowercased()] = a
         }
         func bumpSkills(_ delta: Double) {
             for skill in event.requiredSkills {

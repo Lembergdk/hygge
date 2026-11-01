@@ -62,7 +62,9 @@ export interface ProbeOutcome {
 export type Eligibility = "eligible" | "ineligible" | "unknownAllowed" | "unknownBlocked";
 
 export function reprobeDue(rec: SiteAccessRecord, now: Date): boolean {
-  if (rec.webAccessible === "unknown") return true;
+  // Unknowns are throttled too: applyProbeOutcome stamps probedAt
+  // even when undecided, so an undecidable site is re-probed at
+  // most monthly instead of burning a browser mission every tick.
   if (!rec.probedAt) return true;
   const t = Date.parse(rec.probedAt);
   return !Number.isFinite(t) || now.getTime() - t >= REPROBE_AFTER_DAYS * DAY_MS;

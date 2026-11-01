@@ -6,7 +6,7 @@ import { onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { BrowserRunBrowser } from "./browser.ts";
 import { makeDecider, runMission, distillHints, emailCodeAllowedForTask } from "./agent.ts";
 import * as vault from "./vault.ts";
-import { PROFILE_ROW_ID, STATE_ROUTES, StateStore, createSqliteStateDb, ensureStateSchema } from "./state.ts";
+import { PROFILE_ROW_ID, STATE_ROUTES, StateStore, createSqliteStateDb, ensureStateSchema, normalizeId } from "./state.ts";
 import {
   D1SkillRepository, applySkillOutcome, outcomeForTaskKind, promoteCandidate,
   requiresApprovalForKind, shouldPromote, skillImplicatedByFailure,
@@ -33,7 +33,7 @@ import {
 import { ensureLearningProfile, rankSiteProposals } from "./learning.ts";
 import {
   applyProbeOutcome, consumeUnknownCycle, eligibilityOf, reprobeDue,
-  unknownAccessRecord, type Eligibility, type ProbeOutcome, type SiteAccessRecord,
+  unknownAccessRecord, withdrawProposalsForSite, type Eligibility, type ProbeOutcome, type SiteAccessRecord,
 } from "./web-access.ts";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
@@ -833,39 +833,67 @@ export class UserSandbox extends DurableObject<Env> {
 
   // ---- Brief 06 web-access catalog (D1, fleet-level, no user data) --
 
+  // Catalog errors (e.g. migration 0005 not applied yet) throw on
+  // purpose: callers fail closed (unknownBlocked) instead of
+  // mistaking them for a fresh unknown site with a free cycle.
   private async siteAccessRecord(domain: string): Promise<SiteAccessRecord | null> {
-    try {
-      const row = await this.env.DB.prepare(
-        "SELECT host, display_name, web_accessible, probed_at, probe_evidence, unknown_cycles_used, app_wall_strikes FROM site_catalog WHERE host = ?1",
-      ).bind(domain).first<Row>();
-      if (!row) return null;
-      const v = String(row.web_accessible ?? "unknown");
-      return {
-        domain: String(row.host),
-        displayName: row.display_name ? String(row.display_name) : null,
-        webAccessible: v === "true" || v === "false" ? v : "unknown",
-        probedAt: row.probed_at ? String(row.probed_at) : null,
-        probeEvidence: row.probe_evidence ? String(row.probe_evidence) : null,
-        unknownCyclesUsed: Number(row.unknown_cycles_used ?? 0),
-        appWallStrikes: Number(row.app_wall_strikes ?? 0),
-      };
-    } catch {
-      return null; // catalog/migration unavailable: treated as unknown
-    }
+    const row = await this.env.DB.prepare(
+      "SELECT host, display_name, web_accessible, probed_at, probe_evidence, unknown_cycles_used, app_wall_strikes FROM site_catalog WHERE host = ?1",
+    ).bind(domain).first<Row>();
+    if (!row) return null;
+    const v = String(row.web_accessible ?? "unknown");
+    return {
+      domain: String(row.host),
+      displayName: row.display_name ? String(row.display_name) : null,
+      webAccessible: v === "true" || v === "false" ? v : "unknown",
+      probedAt: row.probed_at ? String(row.probed_at) : null,
+      probeEvidence: row.probe_evidence ? String(row.probe_evidence) : null,
+      unknownCyclesUsed: Number(row.unknown_cycles_used ?? 0),
+      appWallStrikes: Number(row.app_wall_strikes ?? 0),
+    };
   }
 
   private async saveSiteAccessRecord(rec: SiteAccessRecord): Promise<void> {
-    try {
-      await this.env.DB.prepare(
-        `INSERT INTO site_catalog (host, display_name, web_accessible, probed_at, probe_evidence, unknown_cycles_used, app_wall_strikes, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
-         ON CONFLICT(host) DO UPDATE SET web_accessible = excluded.web_accessible,
-           probed_at = excluded.probed_at, probe_evidence = excluded.probe_evidence,
-           unknown_cycles_used = excluded.unknown_cycles_used,
-           app_wall_strikes = excluded.app_wall_strikes, updated_at = datetime('now')`,
-      ).bind(rec.domain, rec.displayName ?? rec.domain, rec.webAccessible,
-        rec.probedAt, rec.probeEvidence, rec.unknownCyclesUsed, rec.appWallStrikes).run();
-    } catch { /* a failed catalog write never fails the user's tick */ }
+    // display_name is seeded from the domain, never a user-typed
+    // site name: this catalog is fleet-level and holds no user data.
+    await this.env.DB.prepare(
+      `INSERT INTO site_catalog (host, display_name, web_accessible, probed_at, probe_evidence, unknown_cycles_used, app_wall_strikes, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+       ON CONFLICT(host) DO UPDATE SET web_accessible = excluded.web_accessible,
+         probed_at = excluded.probed_at, probe_evidence = excluded.probe_evidence,
+         unknown_cycles_used = excluded.unknown_cycles_used,
+         app_wall_strikes = excluded.app_wall_strikes, updated_at = datetime('now')`,
+    ).bind(rec.domain, rec.displayName ?? rec.domain, rec.webAccessible,
+      rec.probedAt, rec.probeEvidence, rec.unknownCyclesUsed, rec.appWallStrikes).run();
+  }
+
+  /// Withdraw open proposals whose site is proven web-ineligible.
+  /// Runs on app state pushes: onboarding-generated suggestions are
+  /// created on-device without catalog access, so this server-side
+  /// sweep is where "ineligible is never proposed" is enforced for
+  /// them. Verdicts are only read here — probing stays in the
+  /// scheduled-scan and backend-proposal paths.
+  private async sweepIneligibleProposals(store: StateStore): Promise<void> {
+    const sites = new Map<string, ScanSite>();
+    for (const row of store.list("sites")) {
+      const site = scanSiteFromRow(row.id, row.data);
+      if (site) sites.set(normalizeId(site.siteID), site);
+    }
+    if (!sites.size || !store.list("proposals").length) return;
+    const checked = new Set<string>();
+    const nowIso = new Date().toISOString();
+    for (const row of store.list("proposals")) {
+      const site = sites.get(normalizeId((row.data as Record<string, unknown>)?.siteID ?? (row.data as Record<string, unknown>)?.siteId));
+      if (!site || checked.has(site.domain)) continue;
+      checked.add(site.domain);
+      let rec: SiteAccessRecord | null = null;
+      try { rec = await this.siteAccessRecord(site.domain); } catch { continue; }
+      if (rec?.webAccessible === "false") {
+        withdrawProposalsForSite(store, { siteID: site.siteID, name: site.name },
+          rec.probeEvidence ?? "This site can only be used in its phone app.",
+          nowIso, () => crypto.randomUUID());
+      }
+    }
   }
 
   /// The probe reuses the ordinary discover mission path on desktop
@@ -990,23 +1018,30 @@ export class UserSandbox extends DurableObject<Env> {
     const eligibility = new Map<string, Eligibility>();
     for (const c of candidates) {
       const domain = domainOfUrl(c.url);
-      let rec = (await this.siteAccessRecord(domain)) ?? unknownAccessRecord(domain);
-      if (reprobeDue(rec, now)) {
-        const site: ScanSite = {
-          id: domain, siteID: domain, name: c.name,
-          startURLString: c.url, domain, category: String(category),
-        };
-        try {
-          const outcome = await this.runWebProbe({ site, profile }, this.browser());
+      // Fail closed per candidate: any catalog read/write failure
+      // blocks this suggestion instead of minting a fresh unknown.
+      let verdict: Eligibility = "unknownBlocked";
+      try {
+        let rec = (await this.siteAccessRecord(domain)) ?? unknownAccessRecord(domain);
+        if (reprobeDue(rec, now)) {
+          const site: ScanSite = {
+            id: domain, siteID: domain, name: c.name,
+            startURLString: c.url, domain, category: String(category),
+          };
+          let outcome: ProbeOutcome;
+          try {
+            outcome = await this.runWebProbe({ site, profile }, this.browser());
+          } catch (e) {
+            outcome = { status: "failed", evidence: String((e as Error)?.message ?? e).slice(0, 200) };
+          }
           rec = applyProbeOutcome(rec, outcome, now.toISOString());
-          if (!rec.displayName) rec = { ...rec, displayName: c.name };
           await this.saveSiteAccessRecord(rec);
-        } catch { /* undecided: the unknown one-cycle rule applies */ }
-      }
-      const verdict = eligibilityOf(rec, domain);
-      if (verdict === "unknownAllowed") {
-        await this.saveSiteAccessRecord(consumeUnknownCycle(rec));
-      }
+        }
+        verdict = eligibilityOf(rec, domain);
+        if (verdict === "unknownAllowed") {
+          await this.saveSiteAccessRecord(consumeUnknownCycle(rec));
+        }
+      } catch { /* catalog unavailable: verdict stays unknownBlocked */ }
       eligibility.set(domain, verdict);
     }
     const ranked = rankSiteProposals(
@@ -1338,6 +1373,9 @@ export class UserSandbox extends DurableObject<Env> {
           this.applyCategoryReopen(reopenBefore, store);
           // Brief 06: feedback events in the push refresh the model.
           this.refreshLearning(store);
+          // Brief 06: onboarding suggestions are created on-device;
+          // withdraw any whose site is proven web-ineligible.
+          try { await this.sweepIneligibleProposals(store); } catch { /* never fail a state push */ }
           return json({
             ok: true,
             counts: result.counts,
@@ -1379,6 +1417,9 @@ export class UserSandbox extends DurableObject<Env> {
             const result = store.upsert(stateEntity, id, data, updatedAt);
             if (result.applied) this.applyCategoryReopen(reopenBefore, store);
             if (result.applied && stateEntity === "feedbackEvents") this.refreshLearning(store);
+            if (result.applied && (stateEntity === "proposals" || stateEntity === "sites")) {
+              try { await this.sweepIneligibleProposals(store); } catch { /* never fail a state write */ }
+            }
             return json(result, result.applied ? 200 : 409);
           } catch (e: any) {
             return json({ error: String(e?.message ?? e) }, 400);

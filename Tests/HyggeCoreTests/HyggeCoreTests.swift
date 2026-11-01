@@ -366,6 +366,25 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertEqual(mixed.affinity(for: .creative), -0.20, accuracy: 1e-9)
     }
 
+    func testServerProfileJSONExtendsSingleAffinityBucket() throws {
+        // Golden fixture in the exact shape the server writes
+        // (learning.ts: lowercase affinity keys). A local apply must
+        // extend that bucket, never start a parallel mixed-case one.
+        let json = #"{"id":"learning","affinities":{"petcare":{"score":-0.3,"accepts":0,"declines":2,"ignores":0,"updatedAt":"2026-11-10T07:00:00.000Z"}},"skillAffinities":{},"rateSensitivity":0,"distanceSensitivity":0,"reasonCounts":{"notMyThing":1},"tooLowDeclines":0,"eventCount":2,"updatedAt":"2026-11-10T07:00:00.000Z"}"#
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = HyggeISO8601.dateDecodingStrategy
+        var profile = try decoder.decode(LearningProfile.self, from: Data(json.utf8))
+        XCTAssertEqual(profile.affinity(for: .petCare), -0.3, accuracy: 1e-9)
+        profile.apply(FeedbackEvent(subjectType: .opportunity, subjectId: "local-1",
+                                    action: .declined, reason: .other, category: .petCare,
+                                    occurredAt: Date(timeIntervalSince1970: 1_800_000_000)))
+        XCTAssertEqual(profile.affinities.count, 1, "one bucket per category across server and device")
+        XCTAssertNotNil(profile.affinities["petcare"])
+        XCTAssertNil(profile.affinities["petCare"])
+        XCTAssertEqual(profile.affinity(for: .petCare), -0.5, accuracy: 1e-9, "server score and local decline accumulate")
+        XCTAssertEqual(profile.affinities["petcare"]?.declines, 3)
+    }
+
     func testBeliefKindsStatedNeverDecaysInferredExpires() {
         var book = BeliefBook()
         let now = Date(timeIntervalSince1970: 1_800_000_000)

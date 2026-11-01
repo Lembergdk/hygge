@@ -19,12 +19,21 @@ fully on the web.
    `proposeSites` in `backend/cloudflare/src/user-sandbox.ts` after
    web-eligibility filtering.
 
-The Swift `MatchEngine` no longer orders anything. Feed order follows
-`rankScore` (`MatchEngine.inServerRankOrder`); `MatchEngine.evaluate`
-is display evidence only (card facts + recommendation wording), and its
-`survey` remains the journal's negative-space report for on-device
-discovery. App-side learning types mirror the server model in
-`Sources/HyggeCore/Learning.swift`.
+The Swift `MatchEngine` no longer orders anything.
+`MatchEngine.evaluate` is display evidence only (card facts +
+recommendation wording), and its `survey` remains the journal's
+negative-space report for on-device discovery. App-side learning
+types mirror the server model in `Sources/HyggeCore/Learning.swift`.
+
+Honest limit, today: the ranker's **threshold** is fully live
+server-side (below-threshold finds never surface), and every
+surfaced payload carries its `rankScore`. The **ordering** is not
+yet user-visible — the app feed has no ranked opportunity-list
+consumer, and server state lists order by `updated_at`, so feed
+order does not currently follow `rankScore`.
+`MatchEngine.inServerRankOrder` is the ready-made ordering for the
+feed work that wires that consumer; until then, do not claim feed
+order is ranked.
 
 ### Formula (final values)
 

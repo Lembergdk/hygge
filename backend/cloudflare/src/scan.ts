@@ -1148,12 +1148,27 @@ export async function runScheduledTick(
       say(`${site.name}: withdrawn ${withdrawn.length} suggestion(s) — it can only be used in its phone app`);
     }
   };
-  const resolveAccess = async (site: ScanSite): Promise<{ eligibility: Eligibility; record: SiteAccessRecord }> => {
+  const resolveAccess = async (site: ScanSite): Promise<{ eligibility: Eligibility; record: SiteAccessRecord; probed: boolean }> => {
+    // Fail closed on catalog trouble: a read/write failure (e.g. the
+    // 0005 migration not applied yet) is NOT a fresh unknown — it
+    // must never re-arm the one-cycle allowance or an unthrottled
+    // probe on every tick.
     if (!deps.siteAccessForDomain) {
-      return { eligibility: "unknownBlocked", record: unknownAccessRecord(site.domain) };
+      return { eligibility: "unknownBlocked", record: unknownAccessRecord(site.domain), probed: false };
     }
-    let rec = (await deps.siteAccessForDomain(site.domain)) ?? unknownAccessRecord(site.domain);
+    let rec: SiteAccessRecord;
+    try {
+      rec = (await deps.siteAccessForDomain(site.domain)) ?? unknownAccessRecord(site.domain);
+    } catch {
+      say(`${site.name}: web check catalog unavailable; not scanned`);
+      return { eligibility: "unknownBlocked", record: unknownAccessRecord(site.domain), probed: false };
+    }
+    const trySave = async (r: SiteAccessRecord): Promise<boolean> => {
+      try { await deps.saveSiteAccess?.(r); return true; } catch { return false; }
+    };
+    let probed = false;
     if (reprobeDue(rec, opts.now) && deps.runProbeMission) {
+      probed = true;
       let outcome: ProbeOutcome;
       try {
         outcome = await deps.runProbeMission({ site, profile });
@@ -1161,18 +1176,23 @@ export async function runScheduledTick(
         outcome = { status: "failed", evidence: String((e as Error)?.message ?? e).slice(0, 200) };
       }
       rec = applyProbeOutcome(rec, outcome, nowIso);
-      if (!rec.displayName) rec = { ...rec, displayName: site.name };
-      await deps.saveSiteAccess?.(rec);
+      if (!(await trySave(rec))) {
+        say(`${site.name}: web check result could not be recorded; not scanned`);
+        return { eligibility: "unknownBlocked", record: rec, probed };
+      }
       say(`${site.name}: web check finished (web_accessible=${rec.webAccessible})`);
     }
     withdrawIfIneligible(site, rec);
     const eligibility = eligibilityOf(rec, site.domain);
     if (eligibility === "unknownAllowed") {
       rec = consumeUnknownCycle(rec);
-      await deps.saveSiteAccess?.(rec);
+      if (!(await trySave(rec))) {
+        say(`${site.name}: web check allowance could not be recorded; not scanned`);
+        return { eligibility: "unknownBlocked", record: rec, probed };
+      }
       say(`${site.name}: web check still unknown; this is its one allowed look before a check must pass`);
     }
-    return { eligibility, record: rec };
+    return { eligibility, record: rec, probed };
   };
 
   // Cap from the approved mix; runs already recorded today count.
@@ -1192,7 +1212,16 @@ export async function runScheduledTick(
   for (const site of sites) {
     const accountState = accountStates.get(site.id) ?? "";
     if (!isSiteApproved(accountState)) {
-      // Proposed but not approved: never scanned (brief).
+      // Proposed but not approved: never scanned and never probed
+      // (brief), but a proven-ineligible verdict still withdraws
+      // the open suggestion — most proposals live exactly here, in
+      // the .proposed state (onboarding/backend generated alike).
+      if (deps.siteAccessForDomain) {
+        try {
+          const rec = await deps.siteAccessForDomain(site.domain);
+          if (rec) withdrawIfIneligible(site, rec);
+        } catch { /* catalog error: proposals stay until a verdict can be read */ }
+      }
       summary.skipped.push({ siteId: site.id, siteName: site.name, reason: "notApproved", detail: `account state "${accountState || "none"}" has no user approval to watch` });
       continue;
     }
@@ -1234,6 +1263,7 @@ export async function runScheduledTick(
     // stale verdict) before any mission runs. Ineligible and
     // spent-unknown sites are never scanned.
     const access = await resolveAccess(site);
+    if (access.probed) capRemaining -= 1; // probes are missions too: debited from the daily cap
     gate.siteWebEligibility = access.eligibility;
     if (access.eligibility === "ineligible" || access.eligibility === "unknownBlocked") {
       const ineligible = access.eligibility === "ineligible";
@@ -1245,6 +1275,11 @@ export async function runScheduledTick(
           ? "skipped: this site can only be used in its phone app"
           : "skipped: web check has not passed yet",
       });
+      continue;
+    }
+    if (access.probed && capRemaining <= 0) {
+      say(`daily scan cap reached (${cap}); ${site.name} waits until tomorrow`);
+      summary.skipped.push({ siteId: site.id, siteName: site.name, reason: "dailyCap", detail: `daily cap of ${cap} mission(s) reached (web check included)` });
       continue;
     }
 
@@ -1270,6 +1305,7 @@ export async function runScheduledTick(
       if (rec.webAccessible !== "false" && deps.runProbeMission) {
         try {
           rec = applyProbeOutcome(rec, await deps.runProbeMission({ site, profile }), nowIso);
+          capRemaining -= 1; // the retry probe is a mission too
         } catch { /* an inconclusive probe leaves the strike in place */ }
       }
       await deps.saveSiteAccess?.(rec);

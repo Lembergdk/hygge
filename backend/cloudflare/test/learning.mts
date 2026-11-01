@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { MemoryStateDb, StateStore } from "../src/state.ts";
 import {
   SURFACING_THRESHOLD, beliefKind, deriveIgnoredEvents, effectiveBeliefConfidence,
-  emptyLearningProfile, ensureLearningProfile, isBeliefExpired, listFeedbackEvents,
+  emptyLearningProfile, ensureLearningProfile, isBeliefExpired, listBeliefs, listFeedbackEvents,
   normalizeFeedbackReason, pruneExpiredInferredBeliefs, rankItem, rankSiteProposals,
   rateFloorPrompt, rebuildLearningProfile, recordFeedback, resolveBeliefs,
   type FeedbackEvent, type RankableItem,
@@ -289,6 +289,7 @@ function harness(opts: {
   catalog?: Map<string, SiteAccessRecord>;
   probe?: () => ProbeOutcome;
   mission?: () => ScanMissionOutcome;
+  catalogError?: "read" | "save";
 } = {}) {
   const state = new StateStore(new MemoryStateDb());
   const scans = new ScanStore(new MemoryScanDb());
@@ -304,8 +305,14 @@ function harness(opts: {
       calls.push(input.site.id);
       return opts.mission?.() ?? { status: "succeeded", items: ["Weekend dog sitting | $35/hr | Leeds"] };
     },
-    siteAccessForDomain: (d) => catalog.get(d) ?? null,
-    saveSiteAccess: (rec) => { catalog.set(rec.domain, { ...rec }); },
+    siteAccessForDomain: (d) => {
+      if (opts.catalogError === "read") throw new Error("catalog unavailable (simulated)");
+      return catalog.get(d) ?? null;
+    },
+    saveSiteAccess: (rec) => {
+      if (opts.catalogError === "save") throw new Error("catalog write failed (simulated)");
+      catalog.set(rec.domain, { ...rec });
+    },
     runProbeMission: async (input) => {
       probeCalls.push(input.site.id);
       return opts.probe?.() ?? {
@@ -376,6 +383,7 @@ test("probe: unknown gets exactly one scan cycle, then blocks until a probe reso
   const second = await runScheduledTick(h.deps, { slot: 1, now: D("2026-11-10T13:00:00.000Z") });
   assert.equal(h.calls.length, 1, "no second unknown cycle");
   assert.equal(second.skipped[0].reason, "webAccessUnknown");
+  assert.equal(h.probeCalls.length, 1, "undecided unknowns are not re-probed every tick");
 });
 
 test("app-wall mission signal triggers a reprobe; confirming probe disqualifies and withdraws", async () => {
@@ -394,6 +402,58 @@ test("app-wall mission signal triggers a reprobe; confirming probe disqualifies 
   const next = await runScheduledTick(h.deps, { slot: 1, now: D("2026-11-10T13:00:00.000Z") });
   assert.equal(h.calls.length, 1, "ineligible sites stop scanning");
   assert.equal(next.skipped[0].reason, "notWebAccessible");
+});
+
+test("catalog read failure fails closed: no probe, no scan, allowance never re-arms", async () => {
+  const h = harness({ catalogError: "read" });
+  seedUser(h.state);
+  const first = await runScheduledTick(h.deps, { slot: 0, now: NOW });
+  assert.equal(h.probeCalls.length, 0);
+  assert.equal(h.calls.length, 0);
+  assert.equal(first.skipped[0].reason, "webAccessUnknown");
+  const second = await runScheduledTick(h.deps, { slot: 1, now: D("2026-11-10T13:00:00.000Z") });
+  assert.equal(h.calls.length, 0, "still blocked next slot");
+  assert.equal(second.skipped[0].reason, "webAccessUnknown");
+});
+
+test("catalog write failure after a passing probe still blocks the scan", async () => {
+  const h = harness({ catalogError: "save" });
+  seedUser(h.state);
+  const summary = await runScheduledTick(h.deps, { slot: 0, now: NOW });
+  assert.equal(h.probeCalls.length, 1, "the probe ran");
+  assert.equal(h.calls.length, 0, "but its unrecorded verdict buys no scan");
+  assert.equal(summary.skipped[0].reason, "webAccessUnknown");
+});
+
+test("withdrawal reaches real .proposed suggestions without any probe or scan", async () => {
+  const h = harness({
+    catalog: new Map([["rover.com", { ...eligibleRecord(), webAccessible: "false" as const }]]),
+  });
+  seedUser(h.state);
+  h.state.upsert("accountStates", ROVER.id, { siteID: ROVER.id, state: "proposed" }, NOWISO);
+  h.state.upsert("proposals", "p1", { id: "p1", siteID: "rover", rationale: "pets", status: "proposed" }, NOWISO);
+  const summary = await runScheduledTick(h.deps, { slot: 0, now: NOW });
+  assert.deepEqual(summary.withdrawnProposalIds, ["p1"]);
+  assert.equal(h.state.list("proposals").length, 0);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.probeCalls.length, 0, "proposals are never probed from the tick");
+  assert.equal(summary.skipped[0].reason, "notApproved");
+});
+
+test("app-imported feedback proposes inferred beliefs via ensureLearningProfile (production ingress)", () => {
+  const state = new StateStore(new MemoryStateDb());
+  // Rows exactly as the app's state push delivers them — no recordFeedback.
+  for (let i = 0; i < 2; i++) {
+    state.upsert("feedbackEvents", `imp-${i}`, {
+      id: `imp-${i}`, subjectType: "opportunity", subjectId: `o-${i}`, action: "declined",
+      reason: "tooFar", category: "petCare", requiredSkills: [], occurredAt: NOWISO,
+    }, NOWISO);
+  }
+  ensureLearningProfile(state, NOWISO);
+  const inferred = listBeliefs(state).filter((b) => beliefKind(b) === "inferred");
+  assert.equal(inferred.length, 1);
+  assert.equal(inferred[0].pending, true);
+  assert.match(inferred[0].sentence, /close to home/);
 });
 
 test("tick ranking: learned 'too low' sensitivity orders surfaced items; below-floor stays gate-dropped", async () => {
@@ -418,9 +478,12 @@ test("tick ranking: learned 'too low' sensitivity orders surfaced items; below-f
   assert.ok(!titles.includes("Below floor dog walks"), "no score resurrects a below-floor listing");
   const below = summary.filtered.find((f) => f.title === "Below floor dog walks");
   assert.deepEqual(below?.reasons, ["belowRateFloor"]);
-  // Below-threshold items are filtered above the gate with their own reason.
-  assert.ok(summary.filtered.some((f) => f.reasons.includes("belowRankThreshold"))
-    || titles.length >= 2, "threshold filtering is active");
+  // Full surfaced order follows the learned scores exactly:
+  // well-paid > near-floor > tiny/far/stale (threshold filtering of
+  // sub-0.45 items is proven by the dedicated threshold test below).
+  assert.deepEqual(titles,
+    ["Well paid dog sitting", "Near floor dog walks", "Tiny far job listing"],
+    "surfaced items arrive in rank order");
   // The stored profile floor never moved.
   const { profile } = extractProfile(h.state.get("profile", "profile")?.data);
   assert.equal(profile.hourlyRateFloor, 25);

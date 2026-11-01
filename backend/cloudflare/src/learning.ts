@@ -297,6 +297,10 @@ export function ensureLearningProfile(state: StateStore, nowIso: string): Learni
   if (cached.eventCount === events.length) return cached;
   const rebuilt = rebuildLearningProfile(events);
   saveLearningProfile(state, rebuilt, nowIso);
+  // Every rebuild path (app import via refreshLearning included)
+  // re-proposes inferred beliefs from the new pattern — this is
+  // the production ingress, not just recordFeedback.
+  proposeInferredBeliefs(state, rebuilt, nowIso);
   return rebuilt;
 }
 
@@ -371,7 +375,12 @@ export function deriveIgnoredEvents(
   state.list("opportunities").forEach(consider);
   state.list("feedItems").forEach(consider);
   const profile = created.length
-    ? (() => { const p = rebuildLearningProfile(listFeedbackEvents(state)); saveLearningProfile(state, p, nowIso); return p; })()
+    ? (() => {
+        const p = rebuildLearningProfile(listFeedbackEvents(state));
+        saveLearningProfile(state, p, nowIso);
+        proposeInferredBeliefs(state, p, nowIso);
+        return p;
+      })()
     : ensureLearningProfile(state, nowIso);
   return { created, profile };
 }
@@ -661,7 +670,7 @@ export function rankSiteProposals(
 ): { candidate: SiteProposalCandidate; rank: RankResult }[] {
   const scored: { item: SiteProposalCandidate; rank: RankResult; key: string }[] = [];
   for (const c of candidates) {
-    const verdict = eligibilityByDomain.get(domainOf(c.url)) ?? "unknownAllowed";
+    const verdict = eligibilityByDomain.get(domainOf(c.url)) ?? "unknownBlocked";
     if (verdict === "ineligible" || verdict === "unknownBlocked") continue;
     const rank = rankItem({
       category: c.category, requiredSkills: [], estimatedHourly: null,
