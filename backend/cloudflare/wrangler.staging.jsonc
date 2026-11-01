@@ -27,7 +27,8 @@
     "HYGGE_ENV": "staging",
     "HYGGE_LLM_BASE_URL": "https://api.meta.ai/v1",
     "HYGGE_LLM_MODEL_FAST": "muse-spark-1.3",
-    "HYGGE_LLM_MODEL_STRONG": "muse-wonder-1.0"
+    "HYGGE_LLM_MODEL_STRONG": "muse-wonder-1.0",
+    "HYGGE_APPLE_BUNDLE_ID": "app.usehygge"
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "hygge-staging", "database_id": "927c5fb0-c7ee-4430-a7b4-04eb06656777" }

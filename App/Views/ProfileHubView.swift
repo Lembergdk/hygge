@@ -8,6 +8,7 @@ struct ProfileHubView: View {
     @State private var credentialDomain = ""
     @State private var credentialUsername = ""
     @State private var credentialSecret = ""
+    @State private var saveLoginSite: TargetSite?
     @State private var editingBelief: Belief?
     @State private var beliefDraft = ""
 
@@ -24,6 +25,7 @@ struct ProfileHubView: View {
                         approvedSites
                         insights
                         invite
+                        hyggeAccount
                         loginsAndService
                         Color.clear.frame(height: 12)
                     }
@@ -31,6 +33,11 @@ struct ProfileHubView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
+            .task { await store.refreshSessionProfiles() }
+            .sheet(item: $saveLoginSite) { site in
+                CredentialSaveSheet(siteName: site.name, domain: site.domain)
+                    .presentationDragIndicator(.visible)
+            }
             .alert("Edit belief", isPresented: Binding(get: { editingBelief != nil },
                                                        set: { if !$0 { editingBelief = nil } })) {
                 TextField("Belief", text: $beliefDraft)
@@ -115,7 +122,7 @@ struct ProfileHubView: View {
         sectionCard("What Hygge has saved about you", badge: "heart.fill", badgeTint: HyggeTheme.butterTint) {
             if !store.profile.skills.isEmpty {
                 beliefRow("Skills: \(store.profile.skills.joined(separator: ", "))", deletable: {
-                    store.profile.skills = []
+                    store.clearProfileSkills()
                 })
             }
             ForEach(store.beliefs.beliefs) { belief in
@@ -198,9 +205,31 @@ struct ProfileHubView: View {
                         Text(site.name).font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
                         Text((store.accountStates[site.id] ?? .unknown).label)
                             .font(.caption).foregroundStyle(HyggeTheme.secondary)
+                        if let credential = store.credential(forDomain: site.domain) {
+                            Text("Login saved as \(credential.username)")
+                                .font(.caption).foregroundStyle(HyggeTheme.secondary)
+                        }
+                        if store.sessionProfile(forDomain: site.domain)?.hasProfile == true {
+                            Text("Trusted sign-in saved — later visits can skip the login form")
+                                .font(.caption).foregroundStyle(HyggeTheme.secondary)
+                        }
                     }
                     Spacer()
                     Menu {
+                        Button(store.credential(forDomain: site.domain) == nil ? "Save login" : "Update saved login") {
+                            saveLoginSite = site
+                        }
+                        if let credential = store.credential(forDomain: site.domain) {
+                            Button("Delete saved login", role: .destructive) {
+                                Task { await store.deleteCredential(id: credential.id) }
+                            }
+                        }
+                        if store.sessionProfile(forDomain: site.domain)?.hasProfile == true {
+                            Button("Forget trusted sign-in") {
+                                Task { await store.deleteSessionProfile(domain: site.domain) }
+                            }
+                        }
+                        Divider()
                         Button("Stop watching this") { store.stopWatching(siteID: site.id) }
                         Button("Disconnect (deletes saved login)", role: .destructive) {
                             Task { await store.disconnect(siteID: site.id) }
@@ -267,6 +296,14 @@ struct ProfileHubView: View {
         }
     }
 
+    /// Ways into THIS Hygge account (Brief 00) — separate from the
+    /// site logins Hygge uses on your behalf below.
+    private var hyggeAccount: some View {
+        sectionCard("Your Hygge account", badge: "person.crop.circle") {
+            LoginMethodsContent()
+        }
+    }
+
     private var loginsAndService: some View {
         sectionCard("Site logins (kept safe)", badge: "key.fill") {
             Text("Passwords are kept safely and encrypted, typed only into the site itself — never shown in chat, drafts, or anywhere they could leak by accident. This phone keeps no copy.")
@@ -276,6 +313,27 @@ struct ProfileHubView: View {
                     Text(credential.domain).font(.subheadline).foregroundStyle(HyggeTheme.ink)
                     Spacer()
                     Text(credential.username).font(.caption).foregroundStyle(HyggeTheme.secondary)
+                    Button(role: .destructive) {
+                        Task { await store.deleteCredential(id: credential.id) }
+                    } label: {
+                        Image(systemName: "trash").font(.caption)
+                    }
+                    .accessibilityLabel("Delete saved login for \(credential.domain)")
+                }
+            }
+            // Trusted sign-ins are separate from saved logins: forgetting
+            // one keeps the other.
+            ForEach(store.sessionProfileRefs.filter(\.hasProfile)) { profile in
+                HStack {
+                    Text(profile.domain).font(.subheadline).foregroundStyle(HyggeTheme.ink)
+                    Spacer()
+                    Text("Trusted sign-in").font(.caption).foregroundStyle(HyggeTheme.secondary)
+                    Button {
+                        Task { await store.deleteSessionProfile(domain: profile.domain) }
+                    } label: {
+                        Image(systemName: "trash").font(.caption)
+                    }
+                    .accessibilityLabel("Forget trusted sign-in for \(profile.domain)")
                 }
             }
             TextField("Site domain, e.g. rover.com", text: $credentialDomain).autocorrectionDisabled()

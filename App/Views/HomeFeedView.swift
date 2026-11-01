@@ -81,6 +81,15 @@ struct HomeFeedView: View {
         .sheet(item: $editingTask) { task in
             NavigationStack { TaskDetailView(taskID: task.id) }
         }
+        // "I already have a profile" asks for the login right away;
+        // the joining work starts when the sheet closes.
+        .sheet(item: Binding(get: { store.pendingCredentialSave },
+                             set: { store.pendingCredentialSave = $0 })) { request in
+            CredentialSaveSheet(siteName: request.siteName, domain: request.domain) { saved in
+                store.finishCredentialSave(request, saved: saved)
+            }
+            .presentationDragIndicator(.visible)
+        }
         .sheet(item: Binding(get: { reviewQueue.first },
                              set: { if $0 == nil, !reviewQueue.isEmpty { reviewQueue.removeFirst() } })) { task in
             NavigationStack {
@@ -159,6 +168,11 @@ struct HomeFeedView: View {
             }
             if let message = store.lastMessage {
                 Text(message).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+            }
+            if let syncError = store.lastSyncError, syncError != store.lastMessage {
+                // Honest offline write state: cached here, not saved yet.
+                Label(syncError, systemImage: "wifi.slash")
+                    .font(.caption).foregroundStyle(HyggeTheme.emberDeep)
             }
         }
     }

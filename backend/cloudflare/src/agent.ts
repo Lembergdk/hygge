@@ -22,6 +22,8 @@
 // - Hard step budget; CAPTCHA/2FA/payment/ID -> needsHuman, never bypassed.
 import { selectTier, parseDecision, type LLMClient } from "./llm.ts";
 import type { BrowserRunBrowser, Snapshot } from "./browser.ts";
+import { distillSkillDraft, outcomeForTaskKind, type SharedSkill, type SkillBody } from "./skills.ts";
+import { detectCheckpoint, probeAuthenticated, isRememberMeLabel } from "./session-profile.ts";
 
 const ACTIONS = new Set(["navigate", "click", "type", "extract", "askUser", "done", "needsHuman"]);
 export const MAX_STEPS = 25;
@@ -37,7 +39,11 @@ const SYSTEM = [
   "advice only — if the page disagrees, trust the page. Never invent or type",
   "passwords; use valueRef credential.* and the vault fills them. Use extract",
   "to read listings/results, done when the mission is complete, needsHuman at",
-  "CAPTCHA, 2FA, payment, or identity checks. SIGNUP/LOGIN missions have",
+  "CAPTCHA, 2FA, payment, or identity checks — never try to solve, bypass, or",
+  "work around them. When logging in, tick any 'remember me' / 'trust this",
+  "device' / 'stay signed in' option the page offers. If restoredSession is",
+  "true you may already be signed in — check the page before logging in.",
+  "SIGNUP/LOGIN missions have",
   "unknowns you must resolve by looking: does this user already have an",
   "account (a login that works with the vault credential means yes)? What",
   "information does this site's form require? NEVER invent personal data.",
@@ -59,8 +65,16 @@ export class LLMDecider {
         mission: ctx.mission,
         plan: "No predefined steps. Decide from the page in front of you.",
         memoryHints: ctx.hints,
+        sharedSkill: ctx.skill ? { id: ctx.skill.id, version: ctx.skill.version, body: ctx.skill.body } : null,
+        skillCandidate: ctx.skillCandidate ? { body: ctx.skillCandidate.body } : null,
+        authoringMode: Boolean(ctx.authoringMode),
+        authoringInstruction: ctx.authoringMode
+          ? 'No corroborated skill exists for this site/outcome. When you reply {"action":"done"}, also include "skillDraft":{"summary":"...","steps":["..."],"pitfalls":["..."],"notes":"..."} distilled from this run. Use placeholders (<username>, <rate>) for any user value; NEVER include credentials, tokens, names, emails, addresses, phone numbers, or dates of birth. Steps are advisory guidance, never a script.'
+          : null,
         availableDraftRefs: Object.keys(ctx.draft ?? {}).map((k) => `draft.${k}`),
         hasStoredCredential: ctx.hasCredential,
+        restoredSession: Boolean(ctx.restoredSession),
+        sessionProbe: ctx.sessionProbe ?? null,
         page: { url: ctx.snapshot.currentURLString, title: ctx.snapshot.title,
                 elements: ctx.snapshot.elements.map((e: any) => e.label) },
         soFar: ctx.history.map((h: any) => `${h.action} ${h.target} -> ${h.succeeded ? "ok" : "FAILED"}`),
@@ -90,7 +104,9 @@ export class SimulatedDecider {
     const labels: string[] = ctx.snapshot.elements.map((e: any) => e.label);
     const has = (...subs: string[]) => labels.find((l) => subs.some((s) => l.toLowerCase().includes(s)));
     const did = (action: string, sub: string) => ctx.history.some((h: any) => h.action === action && h.target.toLowerCase().includes(sub));
-    const out = (d: any) => ({ ...d, tier });
+    const out = (d: any) => d.action === "done" && ctx.authoringMode
+      ? { ...d, tier, skillDraft: distillSkillDraft({ site: ctx.site ?? "", outcome: outcomeForTaskKind(ctx.taskKind ?? ""), trace: ctx.history }) }
+      : { ...d, tier };
 
     if (ctx.taskKind === "signup") {
       const onSignupForm = has("create account", "phone number", "date of birth");
@@ -120,6 +136,11 @@ export class SimulatedDecider {
         return out({ action: "type", target: userField, valueRef: "credential.username", reason: "login form visible" });
       }
       return out({ action: "type", target: passwordField, valueRef: "credential.secret", reason: "login form visible" });
+    }
+    // Trust this device where the site offers it, before submitting login.
+    const remember = labels.find((l) => isRememberMeLabel(l));
+    if (ctx.hasCredential && remember && did("type", "password") && !ctx.history.some((h: any) => h.action === "click" && isRememberMeLabel(h.target))) {
+      return out({ action: "click", target: remember, reason: "trust this device so later visits can skip login" });
     }
     const loginBtn = has("log in button", "sign in button");
     if (ctx.hasCredential && loginBtn && did("type", "password")) {
@@ -197,19 +218,73 @@ async function execute({ browser, sessionID, decision, task, fillCredentialValue
  * Statuses: succeeded | needs_human | failed (budget exhausted / looping).
  */
 export async function runMission({ browser, task, hints = [], hasCredential = false,
-                                   decider, fillCredentialValue, maxSteps = MAX_STEPS }: any) {
+                                   decider, fillCredentialValue, maxSteps = MAX_STEPS,
+                                   skill = null, skillCandidate = null,
+                                   existingSessionID = null, restoreState = null }: {
+  browser: any; task: any; hints?: string[]; hasCredential?: boolean;
+  decider: any; fillCredentialValue?: any; maxSteps?: number;
+  skill?: SharedSkill | null; skillCandidate?: { body: SkillBody } | null;
+  existingSessionID?: string | null; restoreState?: any;
+}): Promise<any> {
   const log: string[] = [];
   const trace: any[] = [];
   const extractedItems: string[] = [];
-  const snap = (await browser.createSession(task.target_url)) as Snapshot;
+  const skillCoverage = skill ? "active" : skillCandidate ? "candidate" : "none";
+  const authoringMode = !skill;
+  let site = "";
+  try { site = new URL(task.target_url).hostname.replace(/^www\./, ""); } catch { site = String(task.target_url ?? ""); }
+  const outcome = outcomeForTaskKind(task.kind ?? "");
+  const routing = () => ({
+    skillId: skill?.id ?? null, skillVersion: skill?.version ?? null,
+    skillCoverage, authoringMode,
+  });
+  // Resume path (2FA handoff): reuse the kept-open session when it is
+  // still alive; the user has already completed the check inside it.
+  let snap: Snapshot | null = null;
+  let resumedSession = false;
+  if (existingSessionID) {
+    snap = (await browser.snapshot(existingSessionID).catch(() => null)) as Snapshot | null;
+    if (snap) {
+      resumedSession = true;
+      log.push("Resuming in the same browser session you just used — no password needed again.");
+    }
+  }
+  if (!snap) {
+    snap = (await browser.createSession(task.target_url, restoreState)) as Snapshot;
+  }
+  // Health probe for a restored trusted sign-in: a visible password
+  // field means the saved sign-in expired -> fall through to the
+  // normal vault login; the caller refreshes the profile on success.
+  let sessionProbe: string | null = null;
+  if (restoreState && !resumedSession) {
+    sessionProbe = probeAuthenticated(snap);
+    if (sessionProbe === "authenticated") {
+      log.push("Your trusted sign-in on this site still works — skipped the login form.");
+    } else if (sessionProbe === "unauthenticated") {
+      log.push("Your trusted sign-in on this site had expired — signing in again with your saved login.");
+    }
+  }
   log.push(`Mission started on ${snap.currentURLString} (${browser.mode} browser, ` +
            `${decider.simulated ? "simulated decider — no API key" : "LLM decider"}, ` +
            `${hints.length} memory hint(s) from past runs, advisory only)`);
+  log.push(skill
+    ? `skill_id=${skill.id} skill_version=${skill.version} outcome=${outcome} — shared skill loaded, Spark default (advisory only)`
+    : `skill_id=none skill_version=none outcome=${outcome} — no active skill, Wonder authoring mode`);
   let failures = 0;
   const actionKeys = new Map<string, number>();
 
   for (let step = 1; step <= maxSteps; step++) {
     const snapshot = await browser.snapshot(snap.sessionID);
+    // Human checkpoint guard: CAPTCHA / 2FA / ID checks pause for the
+    // user with the session kept open. Enforced here — before the
+    // model may act — so no decision can attempt to get past one.
+    const checkpoint = detectCheckpoint(snapshot);
+    if (checkpoint) {
+      trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
+                   summary: `${checkpoint} — paused for you in the browser`, succeeded: false, modelTier: null });
+      log.push(`Paused at a ${checkpoint}. The browser session stays open for you to finish it there.`);
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, ...routing() };
+    }
     const lastKey = trace.length ? `${trace.at(-1).action}|${trace.at(-1).target}|${snapshot.currentURLString}` : "";
     const repeated = (actionKeys.get(lastKey) ?? 0) >= 2;
     let decision: any;
@@ -217,32 +292,40 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
       decision = await decider.decide({
         mission: task.goal, taskKind: task.kind, draft: task.drafted_payload,
         hints, hasCredential, snapshot, history: trace,
-        tierContext: { taskKind: task.kind, failures, repeatedAction: repeated },
+        skill, skillCandidate, authoringMode, site,
+        restoredSession: Boolean(restoreState) || resumedSession, sessionProbe,
+        tierContext: { taskKind: task.kind, failures, repeatedAction: repeated, skillCoverage },
       });
     } catch (e: any) {
       failures += 1;
       log.push(`Decider error at step ${step}: ${e.message}; escalating tier and retrying`);
-      if (failures >= 3) return { status: "failed", trace, extractedItems, log, sessionID: snap.sessionID };
+      if (failures >= 3) return { status: "failed", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
       continue;
     }
     const tierLabel = decision.tier ? `${decision.tier.model} (${decision.tier.reason})` : null;
+    const stamp = { modelTier: tierLabel, model: decision.tier?.model ?? null,
+                    skillId: skill?.id ?? null, skillVersion: skill?.version ?? null };
 
     if (decision.action === "done") {
       trace.push({ action: "done", target: "", urlString: snapshot.currentURLString,
-                   summary: decision.reason || "Mission complete", succeeded: true, modelTier: tierLabel });
-      return { status: "succeeded", trace, extractedItems, log, sessionID: snap.sessionID };
+                   summary: decision.reason || "Mission complete", succeeded: true, ...stamp });
+      const skillDraft = authoringMode
+        ? (decision.skillDraft ?? distillSkillDraft({ site, outcome, trace }))
+        : null;
+      if (skillDraft) log.push(`skill draft authored for ${site}/${outcome} (per-user candidate until corroborated + sanitized)`);
+      return { status: "succeeded", trace, extractedItems, log, sessionID: snap.sessionID, skillDraft, sessionProbe, resumedSession, ...routing() };
     }
     if (decision.action === "askUser") {
       const questions = Array.isArray(decision.questions) && decision.questions.length
         ? decision.questions : [decision.reason || "What information do you need?"];
       trace.push({ action: "askUser", target: "", urlString: snapshot.currentURLString,
-                   summary: `Agent needs information: ${questions.join(" ")}`, succeeded: false, modelTier: tierLabel });
-      return { status: "needs_info", trace, extractedItems, log, sessionID: snap.sessionID, informationRequests: questions };
+                   summary: `Agent needs information: ${questions.join(" ")}`, succeeded: false, ...stamp });
+      return { status: "needs_info", trace, extractedItems, log, sessionID: snap.sessionID, informationRequests: questions, sessionProbe, resumedSession, ...routing() };
     }
     if (decision.action === "needsHuman") {
       trace.push({ action: "needsHuman", target: decision.target ?? "", urlString: snapshot.currentURLString,
-                   summary: decision.reason || "Human checkpoint", succeeded: false, modelTier: tierLabel });
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID };
+                   summary: decision.reason || "Human checkpoint", succeeded: false, ...stamp });
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
     }
 
     let result: any;
@@ -258,14 +341,14 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
     trace.push({ action: decision.action, target: decision.target ?? "",
                  urlString: snapshot.currentURLString,
                  summary: `${result.summary}${decision.reason ? ` — ${decision.reason}` : ""}`,
-                 succeeded: result.succeeded, modelTier: tierLabel });
+                 succeeded: result.succeeded, ...stamp });
     if ((actionKeys.get(key) ?? 0) >= 4) {
       log.push("Stopped: agent repeated the same action without progress");
-      return { status: "failed", trace, extractedItems, log, sessionID: snap.sessionID };
+      return { status: "failed", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
     }
   }
   log.push(`Stopped: step budget (${maxSteps}) exhausted`);
-  return { status: "failed", trace, extractedItems, log, sessionID: snap.sessionID };
+  return { status: "failed", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
 }
 
 /**

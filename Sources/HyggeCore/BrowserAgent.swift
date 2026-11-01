@@ -152,6 +152,28 @@ public struct SiteMemoryRepository: Codable, Equatable, Sendable {
     }
 }
 
+/// Whether a site lets a saved "trust this device" sign-in be reused.
+/// Unknown means "try and learn", never "assume".
+public enum TrustSupport: String, Codable, Sendable {
+    case supported, unsupported, unknown
+}
+
+/// Metadata about a saved trusted sign-in for one site. By construction
+/// this cannot carry the sign-in itself (cookies stay sealed on the
+/// helper) — only whether one exists and what has been learned.
+/// Deleting this never deletes the saved login, and vice versa.
+public struct SessionProfileRef: Codable, Identifiable, Equatable, Sendable {
+    public var id: String { domain }
+    public var domain: String
+    public var trustSupport: TrustSupport
+    public var hasProfile: Bool
+    public init(domain: String, trustSupport: TrustSupport = .unknown, hasProfile: Bool) {
+        self.domain = domain
+        self.trustSupport = trustSupport
+        self.hasProfile = hasProfile
+    }
+}
+
 /// Reference to a credential in the server-side vault. By construction this
 /// type cannot carry the secret: the app holds only domain + username + id.
 public struct CredentialRef: Codable, Identifiable, Equatable, Sendable {

@@ -1,5 +1,18 @@
 import Foundation
 
+/// A sign-in failure in words the user can act on.
+enum AuthClientError: LocalizedError {
+    case message(String)
+    case unavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .message(let message): return message
+        case .unavailable: return "Sign-in is unavailable just now. Try again in a moment."
+        }
+    }
+}
+
 /// Talks to the Hygge agent service (backend/agent-service). The service
 /// owns the cloud browser, the skills repository, and the credential vault.
 /// Every call is optional from the app's perspective: when unreachable, the
@@ -35,24 +48,51 @@ struct BackendClient {
         return URL(string: raw) ?? URL(string: Self.defaultBaseURLString)!
     }
 
+    /// The session token, from the Keychain only (Brief 00). A token
+    /// left in UserDefaults by an older build is migrated once (or
+    /// dropped when paired with a retired local-backend URL), then
+    /// removed from UserDefaults. Debug may still fall back to a
+    /// baked staging token; Release requires a real session.
     var apiToken: String {
-        let stored = UserDefaults.standard.string(forKey: "backendToken") ?? ""
+        if let token = KeychainTokenStore.read() { return token }
+        let legacy = UserDefaults.standard.string(forKey: SessionTokenStorage.legacyUserDefaultsKey)
         let storedURL = UserDefaults.standard.string(forKey: "backendBaseURL")
-        // A token saved next to a retired local-backend URL belongs to
-        // that dead service; drop the pair together.
-        if !stored.isEmpty && !BackendAddress.isStaleLocal(stored: storedURL) { return stored }
+        if SessionTokenStorage.shouldMigrateLegacyToken(storedToken: legacy, storedBaseURL: storedURL),
+           let legacy {
+            _ = KeychainTokenStore.write(legacy)
+            UserDefaults.standard.removeObject(forKey: SessionTokenStorage.legacyUserDefaultsKey)
+            return legacy
+        }
+        if legacy != nil {
+            UserDefaults.standard.removeObject(forKey: SessionTokenStorage.legacyUserDefaultsKey)
+        }
         #if DEBUG
         // Personal dev builds can bake a staging token in at build time
         // (xcodebuild HYGGE_STAGING_TOKEN=…); never set in CI or Release.
         return Bundle.main.object(forInfoDictionaryKey: "HYGGE_STAGING_TOKEN") as? String ?? ""
         #else
-        return BackendAddress.isStaleLocal(stored: storedURL) ? "" : stored
+        return ""
         #endif
+    }
+
+    var hasSessionToken: Bool { !apiToken.isEmpty }
+
+    func setSessionToken(_ token: String) {
+        _ = KeychainTokenStore.write(token)
+        UserDefaults.standard.removeObject(forKey: SessionTokenStorage.legacyUserDefaultsKey)
+    }
+
+    func clearSessionToken() {
+        KeychainTokenStore.clear()
+        UserDefaults.standard.removeObject(forKey: SessionTokenStorage.legacyUserDefaultsKey)
     }
 
     struct BackendTaskResult: Decodable {
         var status: String
         var memory_id: String?
+        /// The kept-open browser session when the task paused for a
+        /// human check; carried back on resume. Identifier only.
+        var session_id: String?
         var extracted_items: [String]?
         var information_requests: [String]?
         var browser_trace: [BrowserTraceEvent]
@@ -81,19 +121,27 @@ struct BackendClient {
         var title: String
         var drafted_payload: [String: String]
         var credential_id: String?
+        var resume_session_id: String?
     }
 
     func runTask(task: AgentTask) async throws -> BackendTaskResult {
         let body = CreateTaskBody(
             kind: task.kind.rawValue, target_url: task.targetURLString, goal: task.goal,
             title: task.title, drafted_payload: task.draftedPayload,
-            credential_id: task.credentialRefID?.uuidString.lowercased())
+            credential_id: task.credentialRefID?.uuidString.lowercased(),
+            resume_session_id: task.browserSessionID)
         let created: CreatedTask = try await post("tasks", body: body)
         return try await post("tasks/\(created.id)/approve", body: [String: String]())
     }
 
     func createSession(url: String) async throws -> BrowserSessionSnapshot {
         try await post("sessions", body: ["url": url])
+    }
+
+    /// The live page of an already-open session — used so the user can
+    /// finish a CAPTCHA/2FA/ID check in the very session that paused.
+    func sessionSnapshot(sessionID: String) async throws -> BrowserSessionSnapshot {
+        try await get("sessions/\(sessionID)")
     }
 
     func act(sessionID: String, action: String, target: String?, value: String?) async throws -> BrowserSessionSnapshot {
@@ -121,11 +169,34 @@ struct BackendClient {
                          onDelta: onDelta)
     }
 
-    func deleteCredential(id: UUID) async {
-        var request = URLRequest(url: baseURL.appendingPathComponent("credentials/\(id.uuidString.lowercased())"))
+    /// Deletes a saved login. The trusted sign-in for the site is a
+    /// separate thing and is deliberately left alone (and vice versa).
+    @discardableResult
+    func deleteCredential(id: UUID) async -> Bool {
+        await delete(path: "credentials/\(id.uuidString.lowercased())")
+    }
+
+    private struct SessionProfilesResponse: Decodable { var profiles: [SessionProfileRef] }
+
+    /// Metadata about trusted sign-ins — never the sign-ins themselves.
+    func sessionProfiles() async throws -> [SessionProfileRef] {
+        let response: SessionProfilesResponse = try await get("session-profiles")
+        return response.profiles
+    }
+
+    /// Forgets a trusted sign-in. The saved login is kept.
+    @discardableResult
+    func deleteSessionProfile(domain: String) async -> Bool {
+        await delete(path: "session-profiles/\(domain)")
+    }
+
+    private func delete(path: String) async -> Bool {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "DELETE"
         if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
-        _ = try? await URLSession.shared.data(for: request)
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return false }
+        return (200...299).contains(http.statusCode)
     }
 
     func onboardingMessage(step: OnboardingStep, transcript: [TranscriptLine],
@@ -195,6 +266,109 @@ struct BackendClient {
         return response.proposals
     }
 
+    // MARK: - Server-side state (Brief 01)
+    //
+    // The per-user state endpoints are the source of truth; these
+    // calls carry model JSON only — never a credential secret (refs
+    // come from the vault metadata endpoints above). State traffic
+    // uses ISO-8601 dates in both directions so a second device
+    // decodes exactly what the first one wrote.
+
+    private static func stateEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+
+    private static func stateDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+
+    func exportState() async throws -> ServerExport {
+        try await stateGet("state/export")
+    }
+
+    func stateCounts() async throws -> StateCounts {
+        try await stateGet("state/counts")
+    }
+
+    @discardableResult
+    func importState(_ payload: ServerImport) async throws -> ImportResult {
+        try await statePost("state/import", body: payload)
+    }
+
+    /// Hard deletes (e.g. a deleted belief) must leave the server too,
+    /// or the next pull would resurrect them. Best-effort by design:
+    /// the caller reports sync trouble through its normal push path.
+    func deleteStateRow(entityPath: String, id: String) async {
+        var request = URLRequest(url: baseURL.appendingPathComponent("\(entityPath)/\(id)"))
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 8
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        _ = try? await URLSession.shared.data(for: request)
+    }
+
+    struct CredentialDTO: Decodable {
+        var id: UUID
+        var domain: String
+        var username: String
+    }
+    private struct CredentialsResponse: Decodable { var credentials: [CredentialDTO] }
+
+    /// Vault references for a fresh install (metadata only, as always).
+    func listCredentialRefs() async throws -> [CredentialRef] {
+        let response: CredentialsResponse = try await get("credentials")
+        return response.credentials.map { CredentialRef(id: $0.id, domain: $0.domain, username: $0.username) }
+    }
+
+    struct MemoryDTO: Decodable {
+        var id: UUID
+        var domain: String
+        var kind: String
+        var hints: [String]
+        var successCount: Int
+        var failureCount: Int
+    }
+    private struct MemoriesResponse: Decodable { var memories: [MemoryDTO] }
+
+    /// Advisory site know-how for a fresh install (hints, never steps).
+    func listSiteMemory() async throws -> SiteMemoryRepository {
+        let response: MemoriesResponse = try await get("memory")
+        let memories = response.memories.compactMap { dto -> SiteMemory? in
+            guard let kind = MemoryKind(rawValue: dto.kind) else { return nil }
+            return SiteMemory(id: dto.id, domain: dto.domain, kind: kind, hints: dto.hints,
+                              successCount: dto.successCount, failureCount: dto.failureCount)
+        }
+        return SiteMemoryRepository(memories: memories)
+    }
+
+    private func stateGet<Response: Decodable>(_ path: String) async throws -> Response {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        request.timeoutInterval = 15
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        return try Self.stateDecoder().decode(Response.self, from: data)
+    }
+
+    private func statePost<Response: Decodable, Body: Encodable>(_ path: String, body: Body) async throws -> Response {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        request.timeoutInterval = 20
+        request.httpBody = try Self.stateEncoder().encode(body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        return try Self.stateDecoder().decode(Response.self, from: data)
+    }
+
     struct Health: Decodable {
         var ok: Bool
         var browser: String?
@@ -213,6 +387,118 @@ struct BackendClient {
         struct AnyTaskList: Decodable { struct Item: Decodable { var id: String }; var tasks: [Item] }
         let _: AnyTaskList = try await get("tasks")
         return health
+    }
+
+    // MARK: - Identity (Brief 00)
+
+    struct AuthSessionResponse: Decodable {
+        var token: String
+        var expiresAt: String
+        var userId: String
+        var isNewUser: Bool?
+        var methods: [LinkedLoginMethod]?
+    }
+
+    private struct MethodsResponse: Decodable { var methods: [LinkedLoginMethod] }
+    private struct AppleBody: Encodable { var identityToken: String; var nonce: String?; var displayName: String? }
+    private struct EmailBody: Encodable { var email: String; var password: String; var displayName: String? }
+    private struct ChangePasswordBody: Encodable { var currentPassword: String; var newPassword: String }
+
+    /// Sign-up/sign-in with Apple: the identity token is verified by
+    /// the backend, which returns the app session kept in Keychain.
+    @discardableResult
+    func signInWithApple(identityToken: String, nonce: String?, displayName: String?) async throws -> AuthSessionResponse {
+        let session: AuthSessionResponse = try await authRequest(
+            "auth/apple", method: "POST",
+            body: AppleBody(identityToken: identityToken, nonce: nonce, displayName: displayName))
+        setSessionToken(session.token)
+        return session
+    }
+
+    @discardableResult
+    func emailSignUp(email: String, password: String) async throws -> AuthSessionResponse {
+        let session: AuthSessionResponse = try await authRequest(
+            "auth/email/signup", method: "POST",
+            body: EmailBody(email: HyggeAuth.normalizeEmail(email), password: password, displayName: nil))
+        setSessionToken(session.token)
+        return session
+    }
+
+    @discardableResult
+    func emailSignIn(email: String, password: String) async throws -> AuthSessionResponse {
+        let session: AuthSessionResponse = try await authRequest(
+            "auth/email/signin", method: "POST",
+            body: EmailBody(email: HyggeAuth.normalizeEmail(email), password: password, displayName: nil))
+        setSessionToken(session.token)
+        return session
+    }
+
+    func fetchLoginMethods() async throws -> [LinkedLoginMethod] {
+        let response: MethodsResponse = try await authRequest("auth/methods", method: "GET", body: Optional<String>.none)
+        return response.methods
+    }
+
+    @discardableResult
+    func linkApple(identityToken: String, nonce: String?) async throws -> [LinkedLoginMethod] {
+        let response: MethodsResponse = try await authRequest(
+            "auth/methods/link/apple", method: "POST",
+            body: AppleBody(identityToken: identityToken, nonce: nonce, displayName: nil))
+        return response.methods
+    }
+
+    @discardableResult
+    func linkEmail(email: String, password: String) async throws -> [LinkedLoginMethod] {
+        let response: MethodsResponse = try await authRequest(
+            "auth/methods/link/email", method: "POST",
+            body: EmailBody(email: HyggeAuth.normalizeEmail(email), password: password, displayName: nil))
+        return response.methods
+    }
+
+    @discardableResult
+    func unlinkLoginMethod(id: String) async throws -> [LinkedLoginMethod] {
+        let response: MethodsResponse = try await authRequest("auth/methods/\(id)", method: "DELETE", body: Optional<String>.none)
+        return response.methods
+    }
+
+    func changePassword(current: String, new: String) async throws {
+        let session: AuthSessionResponse = try await authRequest(
+            "auth/password/change", method: "POST",
+            body: ChangePasswordBody(currentPassword: current, newPassword: new))
+        setSessionToken(session.token)
+    }
+
+    /// Revokes the session, then forgets it on this device either way.
+    func signOut() async {
+        struct SignedOut: Decodable { var ok: Bool }
+        let _: SignedOut? = try? await authRequest("auth/signout", method: "POST", body: [String: String]())
+        clearSessionToken()
+    }
+
+    private struct AuthErrorBody: Decodable { var error: String?; var message: String? }
+
+    /// Like get/post, but surfaces the backend's plain-language message
+    /// instead of collapsing every failure into one opaque error.
+    private func authRequest<Response: Decodable, Body: Encodable>(
+        _ path: String, method: String, body: Body
+    ) async throws -> Response {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        request.httpMethod = method
+        request.timeoutInterval = 20
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        if method == "POST" {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(body)
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw AuthClientError.unavailable }
+        guard (200...299).contains(http.statusCode) else {
+            if let decoded = try? JSONDecoder().decode(AuthErrorBody.self, from: data),
+               let message = decoded.message, !message.isEmpty {
+                throw AuthClientError.message(message)
+            }
+            throw AuthClientError.unavailable
+        }
+        return try JSONDecoder().decode(Response.self, from: data)
     }
 
     private func get<Response: Decodable>(_ path: String) async throws -> Response {

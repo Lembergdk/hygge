@@ -50,6 +50,10 @@ public struct AgentTask: Codable, Identifiable, Equatable, Sendable {
     public var draftedPayload: [String: String]
     public var memoryID: UUID?
     public var credentialRefID: UUID?
+    /// The kept-open cloud-browser session for a task paused at a human
+    /// check (CAPTCHA/2FA/ID). Resume continues in this same session;
+    /// nil once the task finishes. An identifier only — never a secret.
+    public var browserSessionID: String?
     public var browserTrace: [BrowserTraceEvent]
     public var informationRequests: [String]
     public var status: AgentTaskStatus
@@ -61,6 +65,7 @@ public struct AgentTask: Codable, Identifiable, Equatable, Sendable {
                 opportunityID: UUID? = nil, title: String,
                 draftedPayload: [String: String] = [:],
                 memoryID: UUID? = nil, credentialRefID: UUID? = nil,
+                browserSessionID: String? = nil,
                 browserTrace: [BrowserTraceEvent] = [], informationRequests: [String] = [],
                 status: AgentTaskStatus = .awaitingApproval,
                 log: [String] = [], createdAt: Date = Date()) {
@@ -74,6 +79,7 @@ public struct AgentTask: Codable, Identifiable, Equatable, Sendable {
         self.draftedPayload = draftedPayload
         self.memoryID = memoryID
         self.credentialRefID = credentialRefID
+        self.browserSessionID = browserSessionID
         self.browserTrace = browserTrace
         self.informationRequests = informationRequests
         self.status = status
@@ -91,6 +97,17 @@ public struct AgentTask: Codable, Identifiable, Equatable, Sendable {
         }
         status = .approved
         log.append("Approved by user")
+    }
+
+    /// The user finished a CAPTCHA/2FA/ID check in the kept-open browser
+    /// session: resume the same work. Distinct from approve() so the
+    /// information-request path (requestReapproval) stays mandatory.
+    public mutating func resume() throws {
+        guard status == .needsHuman, informationRequests.isEmpty else {
+            throw AgentError.illegalTransition(from: status, to: .approved)
+        }
+        status = .approved
+        log.append("Resumed by user after completing the check")
     }
 
     /// After the user answers informationRequests, the mission goes back for
