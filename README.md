@@ -48,12 +48,6 @@ Hygge does all of it for you, and only asks for your time when there's something
 - **Verified live, not claimed.** On a cold visit to Remote OK (run on the original local service, since retired — the cloud port has since reached parity), the agent chose its own actions step by step (Spark 1.3, escalating to Wonder 1.0 after a failed click), extracted real job listings, decided it was done, and only then distilled site-memory hints. The mission loop (observe → decide → act) is tested on both stacks, including a page-variant test no canned script could pass.
 - **Rules the app never breaks.** It never invents data: when required information is unknown, a signup mission asks you instead of guessing. Nothing runs without your approval. Site passwords live encrypted in the server-side vault and are filled into login forms by the browser worker — never shown in the app, logs, or prompts. CAPTCHA, 2FA, and ID checks hand over to a human — never bypassed.
 
-## What it can do today
-
-Conversational onboarding with email, location, calendar, and notification permissions; site proposals with per-site approval and account tracking; signup missions that ask instead of inventing; matching; any-URL sites; goal-based missions with edit-and-approve; the LLM mission loop; live discoveries entering the feed as real items; site-memory distillation; encrypted credential vault with redacted injection; interactive cloud-browser view with takeover; applications pipeline; calendar booking; calendar availability checks; client communication drafted in the approval flow. Cloudflare Workers backend: per-user Durable Object sandboxes with encrypted vault and site memory — staging and production both live (api-staging.usehygge.app, api.usehygge.app). Release builds require the cloud backend; Debug defaults to staging, Release to production.
-
-Still to build: deduped click-through extraction into feed items (the feed still ships labelled demo items). See `docs/ARCHITECTURE.md`.
-
 ## Pricing
 
 Free up to $100 earned per month — then Plus at $9.99/month or $99/year for unlimited earnings. The goal is never a cut of every paycheck: it's becoming a trusted ally in your personal finances, where partnerships, in-house services, member perks, and sponsored opportunities do the rest.
