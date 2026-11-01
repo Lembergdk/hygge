@@ -12,6 +12,11 @@
   "routes": [
     { "pattern": "api-staging.usehygge.app", "custom_domain": true }
   ],
+  // Brief 05: fleet scan sweeper, 3 slots/day UTC (07:00/13:00/19:00).
+  // Signed-in sites scan every slot; public-only sites at 07:00.
+  // Config is committed but NOT deployed by the implementer — the
+  // coordinator deploys after confirming cron quota on the account.
+  "triggers": { "crons": ["0 7 * * *", "0 13 * * *", "0 19 * * *"] },
   "containers": [
     { "class_name": "UserSandbox", "scheduling_policy": "durable_object" }
   ],

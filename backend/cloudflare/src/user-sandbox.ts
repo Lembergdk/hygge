@@ -20,6 +20,12 @@ import {
   type SessionState,
   type TrustSupport,
 } from "./session-profile.ts";
+import {
+  CRON_SLOTS_UTC, ScanStore, categoriesToReopen, clearStaleEpisode,
+  createSqliteScanDb, ensureScanSchema, extractProfile, runScheduledTick,
+  scanSiteFromRow, type ScanDeps, type ScanMissionInput, type ScanMissionOutcome,
+  type ScanProfile,
+} from "./scan.ts";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const CONTAINER_IMAGE = "cloudflare/debian-trixie";
@@ -148,10 +154,51 @@ export class UserSandbox extends DurableObject<Env> {
     // journal events, beliefs, search evidence). tasks/credentials/
     // memories above are unchanged.
     ensureStateSchema((sql) => ctx.storage.sql.exec(sql));
+    // Brief 05: scheduled-scan bookkeeping (category exhaustion
+    // memory, per-site login-failure episodes, scan run log). All
+    // per-user: this object only ever sees its own user's scans.
+    ensureScanSchema((sql) => ctx.storage.sql.exec(sql));
   }
 
   private stateStore(): StateStore {
     return new StateStore(createSqliteStateDb(this.ctx.storage.sql));
+  }
+
+  private scanStore(): ScanStore {
+    return new ScanStore(createSqliteScanDb(this.ctx.storage.sql));
+  }
+
+  /// Snapshot of the facts that reopen exhausted categories
+  /// (Brief 05 step 7): profile rate/location + site categories.
+  private reopenSnapshot(store: StateStore): { profile: ScanProfile; siteCategories: Map<string, string> } {
+    const siteCategories = new Map<string, string>();
+    for (const row of store.list("sites")) {
+      const site = scanSiteFromRow(row.id, row.data);
+      if (site) siteCategories.set(site.id, site.category.toLowerCase());
+    }
+    return {
+      profile: extractProfile(store.get("profile", PROFILE_ROW_ID)?.data).profile,
+      siteCategories,
+    };
+  }
+
+  private applyCategoryReopen(
+    before: { profile: ScanProfile; siteCategories: Map<string, string> } | null,
+    store: StateStore,
+  ) {
+    if (!before) return;
+    try {
+      const reopen = categoriesToReopen(before, this.reopenSnapshot(store));
+      if (reopen === "*" || reopen.length) this.scanStore().clearExhaustion(reopen);
+    } catch { /* scan bookkeeping must never fail a state write */ }
+  }
+
+  /// A working sign-in on a domain ends any scan login-failure
+  /// episode for it (re-saved login, or a mission that succeeded).
+  private healScanEpisodes(domain: string) {
+    try {
+      clearStaleEpisode(this.scanStore(), this.stateStore(), domain);
+    } catch { /* bookkeeping only; never fail the caller's work */ }
   }
 
   /// Fold snapshot site memories into the existing `memories` table
@@ -579,7 +626,104 @@ export class UserSandbox extends DurableObject<Env> {
       task.session_id = null;
     }
     this.saveTask(task);
+    // Brief 05: a mission that succeeded proves the sign-in works
+    // again — end any scheduled-scan login-failure episode here.
+    if (result.status === "succeeded") this.healScanEpisodes(domain);
     return task;
+  }
+
+  // ---- scheduled scanning (Brief 05) --------------------------------
+  // A scan is an ordinary discover mission through runTask (same
+  // skills routing, trusted sign-in restore + probe, checkpoint
+  // guard, vault-only credential fill). It is created directly in
+  // "approved" state because discover is not a write kind
+  // (requiresApprovalForKind is false) — the scan can only read.
+  // The mission text forbids write actions, and scan.ts has no
+  // write-task path at all: surfacing a listing never applies.
+
+  private async runScanMission(
+    input: ScanMissionInput, browser: BrowserRunBrowser,
+  ): Promise<ScanMissionOutcome> {
+    const { site, tier, credentialId, profile } = input;
+    const focus = [
+      profile.skills.length ? `Skills: ${profile.skills.join(", ")}.` : "",
+      profile.interests.length ? `Kinds of work: ${profile.interests.join(", ")}.` : "",
+      profile.locationLabel ? `Based in ${profile.locationLabel}.` : "",
+    ].filter(Boolean).join(" ");
+    const task = {
+      id: crypto.randomUUID(),
+      kind: "discover",
+      target_url: site.startURLString,
+      goal: `Find new paid work listings on ${site.name} that fit this person. ${focus} Read the listings and extract each one with its title, pay, and place. Only read: do not apply, do not sign up, do not send any message, and do not book anything.${tier === "public" ? " Browse only what is visible without signing in; do not try to sign in." : ""}`,
+      title: `Scheduled look at ${site.name}`,
+      drafted_payload: { searchTerms: profile.skills.join(", ") },
+      credential_id: tier === "logged" ? credentialId : null,
+      requires_approval: false,
+      status: "approved",
+      scheduled_scan: true,
+      scan_tier: tier,
+      memory_id: null,
+      session_id: null,
+      browser_trace: [] as any[],
+      extracted_items: [] as string[],
+      information_requests: [] as string[],
+      log: [`Scheduled scan on ${site.name} (${tier === "logged" ? "signed-in look" : "public listings only"}). Reading only — nothing will be sent, booked, or applied for.`],
+    };
+    this.saveTask(task);
+    const done = await this.runTask(task, browser);
+    const traceText = [
+      ...(done.log ?? []),
+      ...(done.browser_trace ?? []).map((t: any) => String(t.summary ?? "")),
+    ].join("\n");
+    const needsHuman = done.status === "needsHuman";
+    // An expired trusted sign-in logs "had expired" and falls back
+    // to the saved login inside the mission; if the mission still
+    // fails on sign-in, the saved login itself is the problem.
+    const loginFailure = tier === "logged" && !needsHuman && done.status !== "succeeded"
+      && /had expired|incorrect|invalid|wrong password|login failed|sign[- ]in failed|could not sign in|not recognized/i.test(traceText);
+    const skillLine = (done.log ?? []).find((l: string) => l.startsWith("skill_id=")) ?? null;
+    return {
+      status: done.status === "succeeded" ? "succeeded" : needsHuman ? "needs_human" : "failed",
+      items: Array.isArray(done.extracted_items) ? done.extracted_items : [],
+      loginFailure,
+      needsHuman,
+      skillPath: skillLine,
+      taskId: done.id,
+      errorReason: done.status === "succeeded" ? null
+        : needsHuman ? "site asked for a human-only check"
+        : loginFailure ? "saved login was rejected"
+        : "scan did not finish",
+    };
+  }
+
+  private scanDeps(browser: BrowserRunBrowser): ScanDeps {
+    return {
+      state: this.stateStore(),
+      scans: this.scanStore(),
+      credentialIdForDomain: (domain) => {
+        const rows = [
+          ...this.ctx.storage.sql.exec("SELECT id FROM credentials WHERE domain = ? LIMIT 1", domain),
+        ] as Row[];
+        return rows.length ? String(rows[0].id) : null;
+      },
+      sessionHealthForDomain: (domain) => {
+        const row = this.profileRow(domain);
+        if (!row) return null;
+        return {
+          domain,
+          trustSupport: this.trustSupport(domain),
+          hasProfile: Boolean(Number(row.has_profile ?? 0)),
+        };
+      },
+      runDiscoverMission: (input) => this.runScanMission(input, browser),
+      idFactory: () => crypto.randomUUID(),
+      log: (message) => {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO events (kind, payload) VALUES (?, ?)",
+          "scheduled-scan", JSON.stringify({ message }),
+        );
+      },
+    };
   }
 
   private async proposeSites(body: any) {
@@ -651,6 +795,9 @@ export class UserSandbox extends DurableObject<Env> {
           blob.iv,
           blob.ciphertext,
         );
+        // Brief 05: a re-saved login is the fix the needs-you item
+        // asked for — end the episode so scheduled scans resume.
+        this.healScanEpisodes(domainOf(String(domain)));
         return json({ id, domain, username, createdAt: new Date().toISOString() }, 201);
       }
       if (request.method === "GET" && parts.join("/") === "credentials") {
@@ -761,6 +908,30 @@ export class UserSandbox extends DurableObject<Env> {
         return json({ closed: await browser.closeSession(parts[1]) });
       }
 
+      // Scheduled scanning (Brief 05). POST tick is both the cron
+      // sweeper's entry point (index.ts adds x-hygge-scheduled-sweep)
+      // and the manual trigger tests use to simulate a cron tick.
+      // Auth is unchanged: the request reached this object only as
+      // this verified user, and a tick can only scan this user.
+      if (request.method === "POST" && parts.join("/") === "scheduled-scan/tick") {
+        const slotRaw = Number(body.slot ?? 0);
+        const slot = Number.isFinite(slotRaw) ? Math.min(Math.max(Math.trunc(slotRaw), 0), 2) : 0;
+        const now = body.now ? new Date(String(body.now)) : new Date();
+        if (Number.isNaN(now.getTime())) return json({ error: "now must be a valid date when given" }, 400);
+        const summary = await this.exclusive(() =>
+          runScheduledTick(this.scanDeps(browser), { slot, now }));
+        return json(summary);
+      }
+      if (request.method === "GET" && parts.join("/") === "scheduled-scan/status") {
+        const scans = this.scanStore();
+        return json({
+          schedule: { slotsUtc: [...CRON_SLOTS_UTC], note: "signed-in sites every slot; public listings at the first slot only" },
+          runs: scans.db.listRecentRuns(50),
+          categories: scans.db.listCategories(),
+          sites: scans.db.listSiteStates(),
+        });
+      }
+
       // Tasks (approval gate enforced here)
       if (request.method === "POST" && parts.join("/") === "tasks") {
         const kind = body.kind ?? "discover";
@@ -836,9 +1007,13 @@ export class UserSandbox extends DurableObject<Env> {
       if (parts[0] === "state") {
         const store = this.stateStore();
         if (request.method === "POST" && parts[1] === "import") {
+          // Brief 05: rate/location/site changes arriving through the
+          // app's debounced push reopen exhausted categories.
+          const reopenBefore = this.reopenSnapshot(store);
           const result = store.importSnapshot(body as Record<string, unknown>);
           this.importMemories(result.memories);
           this.importSnapshotTasks(result.tasks);
+          this.applyCategoryReopen(reopenBefore, store);
           return json({
             ok: true,
             counts: result.counts,
@@ -872,8 +1047,13 @@ export class UserSandbox extends DurableObject<Env> {
             ? PROFILE_ROW_ID
             : String(parts[1] ?? body.id ?? data.id ?? crypto.randomUUID());
           const updatedAt = typeof body.updatedAt === "string" ? body.updatedAt : undefined;
+          // Brief 05: profile/site writes can reopen exhausted
+          // categories (new site, new rate floor, new location).
+          const reopenBefore = stateEntity === "profile" || stateEntity === "sites"
+            ? this.reopenSnapshot(store) : null;
           try {
             const result = store.upsert(stateEntity, id, data, updatedAt);
+            if (result.applied) this.applyCategoryReopen(reopenBefore, store);
             return json(result, result.applied ? 200 : 409);
           } catch (e: any) {
             return json({ error: String(e?.message ?? e) }, 400);
