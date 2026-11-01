@@ -111,7 +111,18 @@ the coordinator):
   (`parseMimeMessage`: attachment bodies dropped, metadata only)
   → classify (verification / security code / other) → deliver
   into the owning user's Durable Object (`/email/inbound`,
-  Email-Worker marker required).
+  Email-Worker marker required; the marker is stripped from
+  outside requests in `index.ts`, so deliveries cannot be forged
+  over HTTP).
+- Sender authentication: Hygge addresses are handed to sites at
+  signup, so forged mail is realistic. Sender-attributed actions
+  — sealing a code, following a verification link, completing a
+  signup — require an aligned DKIM/SPF/DMARC pass in
+  `Authentication-Results` for the From domain
+  (`senderPassesAuthentication`). Mail without one is only ever
+  filed as a summary. Scheduled scans never spend emailed codes
+  at all (see Brief 05); a check during a scan pauses for the
+  user instead.
 - Verification: the https verify link is followed server-side and
   the outcome (host only, never the token URL) is attached to the
   pending signup task; a Hygge-address signup awaiting email
