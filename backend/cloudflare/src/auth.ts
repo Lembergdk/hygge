@@ -18,7 +18,10 @@ export const PASSWORD_MIN_LENGTH = 10;
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, then sign in again
 export const RATE_LIMIT_MAX_FAILURES = 5;
 export const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
-export const PBKDF2_ITERATIONS = 210_000;
+// Workers WebCrypto caps PBKDF2 at 100_000 iterations (verified live on
+// staging: 210_000 throws NotSupportedError). The versioned hash format lets
+// this rise, or move to Argon2id WASM, without a migration.
+export const PBKDF2_ITERATIONS = 100_000;
 const APPLE_ISSUER = "https://appleid.apple.com";
 const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
 const INVALID_CREDENTIALS = "That email and password don't match. Check both and try again.";
@@ -711,6 +714,8 @@ export async function handleAuthRequest(request: Request, env: Env, db: AuthDb =
     return json({ error: "not_found", message: "That auth route doesn't exist." }, 404);
   } catch (e) {
     if (e instanceof AuthProblem) return json({ error: e.code, message: e.publicMessage }, e.status);
+    // Internal detail stays in worker logs only (no user data, no secrets).
+    console.error("auth request failed:", e instanceof Error ? `${e.name}: ${e.message}` : String(e));
     return json({ error: "auth_unavailable", message: "Sign-in is unavailable just now. Try again in a moment." }, 500);
   }
 }

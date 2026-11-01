@@ -9,6 +9,7 @@ import {
   emailSignUp,
   handleAuthRequest,
   hashPassword,
+  PBKDF2_ITERATIONS,
   linkApple,
   linkEmail,
   resolveSessionUserId,
@@ -20,6 +21,12 @@ import {
   type AuthSessionRow,
   type LinkedMethodRow,
 } from "../src/auth.ts";
+
+test("PBKDF2 iterations stay within the Workers WebCrypto cap", () => {
+  // Workers throws NotSupportedError above 100_000 (proven live on staging);
+  // node's WebCrypto does not enforce the cap, so pin it here.
+  assert.ok(PBKDF2_ITERATIONS <= 100_000, `PBKDF2_ITERATIONS=${PBKDF2_ITERATIONS} exceeds Workers cap`);
+});
 
 const FAST = { iterations: 1000 };
 const PASSWORD = "correct horse battery"; // test fixture, not a real credential
