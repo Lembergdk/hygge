@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { MemoryStateDb, StateStore } from "../src/state.ts";
 import {
   CRON_SLOTS_UTC, MemoryScanDb, ScanStore, categoriesToReopen,
-  checkExhaustion, clearStaleEpisode, dailyCap, evaluateGate,
+  checkExhaustion, clearStaleEpisode, dailyCap, effectiveTickNow, evaluateGate,
   extractProfile, isTierDueAtSlot, needsYouItemId, parseListings,
   runScheduledTick, scanOpportunityId, scanSchemaSQL, slotForCron,
   sweepOrder, validCategory,
@@ -75,6 +75,20 @@ test("schedule: three UTC slots, logged due always, public first slot only, cap 
   assert.equal(dailyCap(2, 3), 9);
   assert.match(scanSchemaSQL(), /scan_runs/);
   assert.match(scanSchemaSQL(), /UNIQUE INDEX.*scan_runs\(site_id, run_date, slot\)/);
+});
+
+test("tick clock: only the sweeper may choose the time; manual ticks use server time", () => {
+  const serverNow = D("2026-11-02T07:00:00.000Z");
+  const farFuture = "2030-01-01T00:00:00.000Z";
+  // A client-supplied future date must not move runDate keys, or the
+  // daily cap / once-per-slot / exhaustion windows could be reset
+  // into unbounded paid missions.
+  assert.equal(effectiveTickNow(farFuture, false, serverNow).toISOString(), serverNow.toISOString());
+  assert.equal(effectiveTickNow("not a date", false, serverNow).toISOString(), serverNow.toISOString());
+  assert.equal(effectiveTickNow(undefined, false, serverNow).toISOString(), serverNow.toISOString());
+  // The cron sweeper's scheduled time is honored; junk falls back.
+  assert.equal(effectiveTickNow(farFuture, true, serverNow).toISOString(), farFuture);
+  assert.equal(effectiveTickNow("not a date", true, serverNow).toISOString(), serverNow.toISOString());
 });
 
 test("sweepOrder rotates deterministically and loses nobody", () => {

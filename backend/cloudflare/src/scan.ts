@@ -182,6 +182,19 @@ export function slotForCron(cron: string): number {
   return index >= 0 ? index : 0;
 }
 
+/// The HTTP tick's clock. Only the cron sweeper (server-side, it
+/// presents the sweep marker that index.ts strips from outside
+/// requests) may choose the tick time. A signed-in manual tick
+/// always runs at server time, so future-dated requests cannot
+/// reset the daily cap, the once-per-(site, date, slot) keys, or
+/// exhaustion windows into unbounded paid missions. Tests that
+/// simulate time call runScheduledTick directly.
+export function effectiveTickNow(requested: unknown, isSweep: boolean, serverNow: Date = new Date()): Date {
+  if (!isSweep) return serverNow;
+  const parsed = typeof requested === "string" ? new Date(requested) : serverNow;
+  return Number.isNaN(parsed.getTime()) ? serverNow : parsed;
+}
+
 export function isTierDueAtSlot(tier: ScanTier, slot: number): boolean {
   return tier === "logged" ? true : slot === PUBLIC_SCAN_SLOT;
 }

@@ -26,6 +26,7 @@ struct ProfileHubView: View {
                         insights
                         invite
                         hyggeAccount
+                        hyggeEmail
                         loginsAndService
                         Color.clear.frame(height: 12)
                     }
@@ -33,7 +34,10 @@ struct ProfileHubView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
-            .task { await store.refreshSessionProfiles() }
+            .task {
+                await store.refreshSessionProfiles()
+                await store.refreshHyggeEmail()
+            }
             .sheet(item: $saveLoginSite) { site in
                 CredentialSaveSheet(siteName: site.name, domain: site.domain)
                     .presentationDragIndicator(.visible)
@@ -304,6 +308,38 @@ struct ProfileHubView: View {
         }
     }
 
+    /// Brief 04: the user's own Hygge email address (the only place
+    /// it is shown) plus the mail Hygge filed for them.
+    private var hyggeEmail: some View {
+        sectionCard("Your Hygge email address", badge: "envelope") {
+            if let address = store.hyggeEmailAddress {
+                Text(address.address).font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
+                    .textSelection(.enabled)
+                Text(HyggeEmail.forwardingHelp)
+                    .font(.caption).foregroundStyle(HyggeTheme.secondary)
+                if store.filedEmailSummaries.isEmpty {
+                    Text("Nothing filed yet. Mail that arrives here will be summed up for you.")
+                        .font(.caption).foregroundStyle(HyggeTheme.secondary)
+                }
+                ForEach(store.filedEmailSummaries) { filed in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(filed.subject.isEmpty ? "Mail from \(filed.senderDomain)" : filed.subject)
+                            .font(.subheadline).foregroundStyle(HyggeTheme.ink)
+                        Text(filed.summary).font(.caption).foregroundStyle(HyggeTheme.secondary)
+                            .lineLimit(3)
+                    }
+                }
+            } else {
+                Text("Get an email address just for Hygge. Hygge can use it when signing you up and finishes the email steps for you — you never need to open your email. You can also forward mail from gig sites to it and Hygge will file it.")
+                    .font(.caption).foregroundStyle(HyggeTheme.secondary)
+                Button("Get a Hygge email address") {
+                    Task { await store.chooseHyggeEmailAddress() }
+                }
+                .font(.caption.weight(.semibold)).buttonStyle(.bordered).tint(HyggeTheme.sageDeep)
+            }
+        }
+    }
+
     private var loginsAndService: some View {
         sectionCard("Site logins (kept safe)", badge: "key.fill") {
             Text("Passwords are kept safely and encrypted, typed only into the site itself — never shown in chat, drafts, or anywhere they could leak by accident. This phone keeps no copy.")
@@ -339,6 +375,10 @@ struct ProfileHubView: View {
             TextField("Site domain, e.g. rover.com", text: $credentialDomain).autocorrectionDisabled()
             TextField("Username / email", text: $credentialUsername).autocorrectionDisabled()
             SecureField("Password", text: $credentialSecret)
+            Button("Suggest a strong password") {
+                credentialSecret = SitePasswordSuggestion.generate()
+            }
+            .font(.caption.weight(.semibold))
             Button("Save login safely") {
                 let domain = credentialDomain, username = credentialUsername, secret = credentialSecret
                 credentialSecret = ""

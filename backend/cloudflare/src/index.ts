@@ -2,6 +2,7 @@ import type { Env } from "./env.ts";
 import { json, sandboxFor } from "./env.ts";
 import { handleAuthRequest, resolveRequestUserId } from "./auth.ts";
 import { runDateOf, slotForCron, sweepOrder } from "./scan.ts";
+import { handleEmailAddressRequest, handleEmailMessage } from "./email.ts";
 
 export { UserSandbox } from "./user-sandbox.ts";
 
@@ -30,6 +31,8 @@ const USER_ROUTES = [
   // Brief 05 scheduled scanning (manual tick + status; the cron
   // sweeper below calls the same per-user tick).
   "/scheduled-scan",
+  // Brief 04 receive-only email: own address + filed mail + codes meta.
+  "/email",
 ];
 
 /// Fleet sweeper (Brief 05): one cron tick fans out to every user's
@@ -116,13 +119,23 @@ export default {
     const userId = await resolveRequestUserId(request, env);
     if (!userId) return json({ error: "unauthorized" }, 401);
 
+    // Own Hygge address lives in D1 (fleet-wide allocation), not the
+    // DO. Everything else user-scoped goes into the user's sandbox.
+    if (url.pathname === "/email/address") {
+      return handleEmailAddressRequest(request, env, userId);
+    }
+
     // Everything user-scoped happens inside that user's sandbox.
     const stub = sandboxFor(env, userId);
     const forwarded = new Request(request);
-    // Only the cron sweeper may present the sweep marker; an
-    // outside caller can still tick their OWN scans (manual
-    // trigger) but cannot impersonate the fleet sweep.
+    // Only server-side callers may present trust markers: the
+    // cron sweeper (scheduled scans) and the Email Worker
+    // (inbound mail delivery into the sandbox). An outside
+    // caller can still tick their OWN scans (manual trigger)
+    // but cannot impersonate the fleet sweep or fabricate a
+    // mail delivery into even their own inbox.
     forwarded.headers.delete("x-hygge-scheduled-sweep");
+    forwarded.headers.delete("x-hygge-email-delivery");
     forwarded.headers.set("x-hygge-user-id", userId);
     return stub.fetch(forwarded);
   },
@@ -130,4 +143,9 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(sweepScheduledScans(env, controller.cron, controller.scheduledTime));
   },
+
+  // Brief 04: Cloudflare Email Routing catch-all target. Receive
+  // only — see src/email.ts. Routing itself is enabled in the
+  // Cloudflare dashboard (docs/email-usehygge-cc.md).
+  email: handleEmailMessage,
 };

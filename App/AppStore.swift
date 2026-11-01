@@ -105,6 +105,12 @@ final class AppStore {
     /// by design — the helper is the source of truth.
     var sessionProfileRefs: [SessionProfileRef] = []
 
+    /// Brief 04: the user's own Hygge email address and the mail
+    /// Hygge filed for them. Transient — refreshed from the user's
+    /// own inbox; codes never come to the device.
+    var hyggeEmailAddress: HyggeEmailAddress?
+    var filedEmailSummaries: [FiledEmailSummary] = []
+
     let backend = BackendClient()
     private let localRunner = SimulatedMissionRunner()
 
@@ -208,9 +214,16 @@ final class AppStore {
               let site = site(id: proposals[index].siteID) else { return }
         proposals[index].status = alreadyHasAccount ? .approvedHasAccount : .approvedSignup
         accountStates[site.id] = .joining
+        // Brief 04 email choice: a Hygge address the user chose in
+        // the profile hub is used for new site signups (Hygge then
+        // finishes email verification itself); otherwise the
+        // signup confirms the user's own email from their profile.
         var task = alreadyHasAccount
             ? AgentTaskFactory.profileTask(profile: profile, site: site)
-            : AgentTaskFactory.signupTask(profile: profile, site: site)
+            : (hyggeEmailAddress.map {
+                AgentTaskFactory.signupTask(profile: profile, site: site,
+                                            emailChoice: .hygge, signupEmail: $0.address)
+            } ?? AgentTaskFactory.signupTask(profile: profile, site: site))
         attachCredential(&task)
         attachSkill(&task)
         tasks.append(task)
@@ -378,6 +391,32 @@ final class AppStore {
         }
     }
 
+    func refreshHyggeEmail() async {
+        if let address = try? await backend.hyggeEmailAddress() {
+            hyggeEmailAddress = address
+        }
+        if let filed = try? await backend.filedEmail() {
+            filedEmailSummaries = filed
+        }
+    }
+
+    /// The moment the user chooses a Hygge address: allocated once
+    /// by the backend, then shown only to them here for forwarding.
+    func chooseHyggeEmailAddress() async {
+        if let address = try? await backend.allocateHyggeEmailAddress() {
+            hyggeEmailAddress = address
+            lastMessage = "Your Hygge email address is ready. Hygge can now handle signup mail for you."
+            save()
+        }
+    }
+
+    /// Own-email path: the user confirms their own email for a site
+    /// and a suggested site password. The password goes once to the
+    /// safe store via the normal save-login path — nowhere else.
+    func saveOwnEmailLogin(domain: String, email: String, secret: String) async -> Bool {
+        await addCredential(domain: domain, username: HyggeAuth.normalizeEmail(email), secret: secret)
+    }
+
     /// Forgets one trusted sign-in. The saved login is kept, so the
     /// next visit simply signs in with it again.
     func deleteSessionProfile(domain: String) async {
@@ -423,7 +462,10 @@ final class AppStore {
     }
 
     func draftSignup(site: TargetSite) {
-        var task = AgentTaskFactory.signupTask(profile: profile, site: site)
+        var task = hyggeEmailAddress.map {
+            AgentTaskFactory.signupTask(profile: profile, site: site,
+                                        emailChoice: .hygge, signupEmail: $0.address)
+        } ?? AgentTaskFactory.signupTask(profile: profile, site: site)
         attachCredential(&task)
         tasks.append(task)
         save()

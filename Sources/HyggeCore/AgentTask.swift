@@ -175,11 +175,24 @@ public enum AgentTaskFactory {
     }
 
     public static func signupTask(profile: EarningsProfile, site: TargetSite) -> AgentTask {
-        AgentTask(
+        signupTask(profile: profile, site: site, emailChoice: .own, signupEmail: profile.email)
+    }
+
+    /// Brief 04: the email a site signup uses is the user's choice
+    /// — their own confirmed email, or their Hygge address (then
+    /// Hygge finishes email verification from its inbox and the
+    /// mission must not stop to ask the user to open email).
+    public static func signupTask(profile: EarningsProfile, site: TargetSite,
+                                  emailChoice: SiteSignupEmailChoice,
+                                  signupEmail: String) -> AgentTask {
+        let verificationNote = emailChoice == .hygge
+            ? "Email verification for this signup lands in the Hygge inbox and is handled from there — do not ask the user to open email."
+            : "Stop for the user at email verification."
+        return AgentTask(
             kind: .signup, siteID: site.id, targetURLString: site.startURLString,
-            goal: "Get the user set up on \(site.name). First figure out how this site works: is there a login that already works with the vault credential (existing account), or is a new signup needed? Work out what information the signup requires. Never invent personal data — if a required value is not in the approved draft, stop and ask the user for exactly what is missing. Stop for the user at email verification, CAPTCHA/bot checks, ID or background checks.",
+            goal: "Get the user set up on \(site.name). First figure out how this site works: is there a login that already works with the vault credential (existing account), or is a new signup needed? Work out what information the signup requires. Never invent personal data — if a required value is not in the approved draft, stop and ask the user for exactly what is missing. \(verificationNote) Stop for the user at CAPTCHA/bot checks, ID or background checks.",
             title: "Sign up for \(site.name)",
-            draftedPayload: ["displayName": profile.displayName, "email": profile.email])
+            draftedPayload: emailChoice.draftedPayload(signupEmail: signupEmail, displayName: profile.displayName))
     }
 
     public static func customTask(site: TargetSite, goal: String, kind: AgentTaskKind = .discover) -> AgentTask {
