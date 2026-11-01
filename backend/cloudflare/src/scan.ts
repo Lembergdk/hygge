@@ -1183,16 +1183,10 @@ export async function runScheduledTick(
       say(`${site.name}: web check finished (web_accessible=${rec.webAccessible})`);
     }
     withdrawIfIneligible(site, rec);
-    const eligibility = eligibilityOf(rec, site.domain);
-    if (eligibility === "unknownAllowed") {
-      rec = consumeUnknownCycle(rec);
-      if (!(await trySave(rec))) {
-        say(`${site.name}: web check allowance could not be recorded; not scanned`);
-        return { eligibility: "unknownBlocked", record: rec, probed };
-      }
-      say(`${site.name}: web check still unknown; this is its one allowed look before a check must pass`);
-    }
-    return { eligibility, record: rec, probed };
+    // The one unknown cycle is consumed by the tick only at the
+    // point a scan actually runs (see below): a probe that spends
+    // the day's cap must not also burn the allowance.
+    return { eligibility: eligibilityOf(rec, site.domain), record: rec, probed };
   };
 
   // Cap from the approved mix; runs already recorded today count.
@@ -1282,6 +1276,18 @@ export async function runScheduledTick(
       summary.skipped.push({ siteId: site.id, siteName: site.name, reason: "dailyCap", detail: `daily cap of ${cap} mission(s) reached (web check included)` });
       continue;
     }
+    let accessRecord = access.record;
+    if (access.eligibility === "unknownAllowed") {
+      accessRecord = consumeUnknownCycle(access.record);
+      try {
+        await deps.saveSiteAccess?.(accessRecord);
+      } catch {
+        say(`${site.name}: web check allowance could not be recorded; not scanned`);
+        summary.skipped.push({ siteId: site.id, siteName: site.name, reason: "webAccessUnknown", detail: "skipped: web check has not passed yet" });
+        continue;
+      }
+      say(`${site.name}: web check still unknown; this is its one allowed look before a check must pass`);
+    }
 
     // Expired trusted sign-ins do not change the tier: the mission
     // probes the restored session and falls back to the saved login
@@ -1301,7 +1307,7 @@ export async function runScheduledTick(
       // Re-probe trigger: strike once, then let a fresh probe decide
       // (the one retry). A confirming probe or a second strike
       // disqualifies and withdraws any open suggestions.
-      let rec = applyAppWallStrike(access.record, nowIso);
+      let rec = applyAppWallStrike(accessRecord, nowIso);
       if (rec.webAccessible !== "false" && deps.runProbeMission) {
         try {
           rec = applyProbeOutcome(rec, await deps.runProbeMission({ site, profile }), nowIso);

@@ -290,6 +290,7 @@ function harness(opts: {
   probe?: () => ProbeOutcome;
   mission?: () => ScanMissionOutcome;
   catalogError?: "read" | "save";
+  noCredential?: boolean;
 } = {}) {
   const state = new StateStore(new MemoryStateDb());
   const scans = new ScanStore(new MemoryScanDb());
@@ -299,7 +300,7 @@ function harness(opts: {
   let seq = 0;
   const deps: ScanDeps = {
     state, scans,
-    credentialIdForDomain: (d) => (d === "rover.com" ? "cred-rover" : null),
+    credentialIdForDomain: (d) => (!opts.noCredential && d === "rover.com" ? "cred-rover" : null),
     sessionHealthForDomain: () => null,
     runDiscoverMission: async (input) => {
       calls.push(input.site.id);
@@ -414,6 +415,22 @@ test("catalog read failure fails closed: no probe, no scan, allowance never re-a
   const second = await runScheduledTick(h.deps, { slot: 1, now: D("2026-11-10T13:00:00.000Z") });
   assert.equal(h.calls.length, 0, "still blocked next slot");
   assert.equal(second.skipped[0].reason, "webAccessUnknown");
+});
+
+test("a probe that spends the daily cap does not burn the one unknown cycle", async () => {
+  // Single public site: cap is 1 mission/day and the probe counts.
+  const h = harness({ noCredential: true, probe: () => ({ status: "failed", evidence: "unreachable" }) });
+  seedUser(h.state);
+  const day1 = await runScheduledTick(h.deps, { slot: 0, now: NOW });
+  assert.equal(h.probeCalls.length, 1);
+  assert.equal(h.calls.length, 0, "the probe was today's one mission");
+  assert.equal(day1.skipped[0].reason, "dailyCap");
+  assert.equal(h.catalog.get("rover.com")?.unknownCyclesUsed, 0, "cycle not consumed without a scan");
+  const day2 = await runScheduledTick(h.deps, { slot: 0, now: D("2026-11-11T07:00:00.000Z") });
+  assert.equal(h.probeCalls.length, 1, "no reprobe the next day");
+  assert.equal(h.calls.length, 1, "the one allowed look happens on a fresh cap");
+  assert.equal(day2.surfacedIds.length, 1);
+  assert.equal(h.catalog.get("rover.com")?.unknownCyclesUsed, 1, "consumed by the scan that ran");
 });
 
 test("catalog write failure after a passing probe still blocks the scan", async () => {
