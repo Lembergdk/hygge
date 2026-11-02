@@ -34,6 +34,9 @@
     "HYGGE_LLM_MODEL_FAST": "muse-spark-1.3",
     "HYGGE_LLM_MODEL_STRONG": "muse-wonder-1.0",
     "HYGGE_APPLE_BUNDLE_ID": "app.usehygge",
+    // Magic-link sign-in: links point at this origin; mail goes
+    // out only from login@usehygge.app via the binding below.
+    "HYGGE_MAGIC_BASE_URL": "https://api-staging.usehygge.app",
     // Brief 04 receive-only email domain. Email Routing (MX +
     // catch-all to this worker) is a dashboard step — see
     // docs/email-usehygge-cc.md. No send binding exists.
@@ -50,5 +53,8 @@
   "r2_buckets": [
     { "binding": "BROWSER_PROFILES", "bucket_name": "hygge-browser-profiles-staging" }
   ],
-  "browser": { "binding": "BROWSER" }
+  "browser": { "binding": "BROWSER" },
+  "send_email": [
+    { "name": "EMAIL", "allowed_sender_addresses": ["login@usehygge.app"] }
+  ]
 }

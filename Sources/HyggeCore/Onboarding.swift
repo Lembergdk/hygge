@@ -178,7 +178,7 @@ public struct ChatEntry: Codable, Identifiable, Equatable, Sendable {
 // MARK: - First run: one question per message, inside the same thread
 
 public enum OnboardingStep: String, Codable, CaseIterable, Sendable {
-    case welcome, enjoyWork, lowestRate, `where`, when, summary, done
+    case welcome, enjoyWork, lowestRate, `where`, when, summary, signIn, done
 
     public var prompt: String {
         switch self {
@@ -188,9 +188,16 @@ public enum OnboardingStep: String, Codable, CaseIterable, Sendable {
         case .where: return "Roughly where are you? It keeps local work close to home."
         case .when: return "And when are you usually free? It stops me double-booking you."
         case .summary: return "That's all I need to start. I'll look overnight and tell you in the morning — sooner if something needs you."
+        // Sign-in is the final question, in the same conversation.
+        // This exact wording is the one fixed local line.
+        case .signIn: return "How do you want to sign in?"
         case .done: return "You're set up!"
         }
     }
+
+    /// The backend script has no signIn objective (the question is
+    /// fixed and local), so generated turns use `summary` wording.
+    public var backendStep: OnboardingStep { self == .signIn ? .summary : self }
 }
 
 /// Facts the onboarding LLM extracted from free text (any step, any order).
@@ -293,6 +300,9 @@ public struct OnboardingConversation: Equatable, Sendable {
             advance(); return true
         case .summary:
             advance(); return true
+        case .signIn:
+            // Completed by a verified sign-in, never by typed text.
+            return false
         case .done:
             return true
         }

@@ -1,9 +1,23 @@
 /// Shared environment bindings + the one rule that matters most:
 /// the user id comes from a verified credential, never the request.
 
+/// Cloudflare Email Sending binding (magic-link auth mail only).
+/// Structural on purpose: auth.ts fakes this exact shape in tests,
+/// and the wrangler configs pin the one allowed sender address.
+export interface MagicEmailBinding {
+  send(message: {
+    to: string;
+    from: string;
+    subject: string;
+    text: string;
+    html: string;
+  }): Promise<unknown>;
+}
+
 export interface Env {
   USER_SANDBOX: DurableObjectNamespace;
   DB: D1Database;
+  EMAIL?: MagicEmailBinding; // send_email binding (login@usehygge.app only)
   BROWSER_PROFILES?: R2Bucket; // browser-profile fallback; optional until production bucket exists
   BROWSER: Fetcher;
   HYGGE_ENV: string;
@@ -15,6 +29,7 @@ export interface Env {
   HYGGE_MASTER_KEY?: string; // base64, 32 bytes
   HYGGE_DEV_TOKENS?: string; // staging only: JSON map token -> userId
   HYGGE_APPLE_BUNDLE_ID?: string;
+  HYGGE_MAGIC_BASE_URL?: string; // public API origin magic links point at
   HYGGE_EMAIL_DOMAIN?: string; // receive-only @usehygge.cc domain (Brief 04)
   // Brief 07 APNs (see push.ts): HYGGE_APNS_KEY_P8 is a wrangler
   // secret only; key/team ids may be vars or secrets. APNs host is

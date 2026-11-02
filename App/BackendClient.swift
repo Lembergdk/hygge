@@ -256,10 +256,16 @@ struct BackendClient {
         return (200...299).contains(http.statusCode)
     }
 
+    /// Before sign-in (it is the last onboarding step) the scripted
+    /// conversation runs on the anonymous preview routes, which keep
+    /// no server-side user state; after sign-in the same calls go to
+    /// the user's own conversation as before.
+    private var onboardingPathPrefix: String { hasSessionToken ? "onboarding" : "onboarding/preview" }
+
     func onboardingMessage(step: OnboardingStep, transcript: [TranscriptLine],
                            profile: EarningsProfile) async throws -> OnboardingAssistantReply {
-        try await post("onboarding/message",
-                       body: OnboardingBody(step: step.rawValue, transcript: transcript, profile: profile, contextSummary: ""))
+        try await post("\(onboardingPathPrefix)/message",
+                       body: OnboardingBody(step: step.backendStep.rawValue, transcript: transcript, profile: profile, contextSummary: ""))
     }
 
     private struct StreamEvent: Decodable {
@@ -274,8 +280,8 @@ struct BackendClient {
     func onboardingStream(step: OnboardingStep, transcript: [TranscriptLine],
                           profile: EarningsProfile,
                           onDelta: @escaping @MainActor (String) -> Void) async throws -> OnboardingAssistantReply {
-        try await stream(path: "onboarding/stream",
-                         body: OnboardingBody(step: step.rawValue, transcript: transcript, profile: profile, contextSummary: ""),
+        try await stream(path: "\(onboardingPathPrefix)/stream",
+                         body: OnboardingBody(step: step.backendStep.rawValue, transcript: transcript, profile: profile, contextSummary: ""),
                          onDelta: onDelta)
     }
 
@@ -441,7 +447,10 @@ struct BackendClient {
     /// Reachability + token validity, for the settings screen and chat banner.
     func testConnection() async throws -> Health {
         let health = try await health()
-        struct TasksProbe: Decodable { var tasks: [String]? }
+        // Before sign-in there is nothing to validate yet, so
+        // reachability alone decides (the onboarding banner must not
+        // read "offline" just because no account exists yet).
+        guard hasSessionToken else { return health }
         // /tasks requires the bearer token when one is configured server-side.
         struct AnyTaskList: Decodable { struct Item: Decodable { var id: String }; var tasks: [Item] }
         let _: AnyTaskList = try await get("tasks")
@@ -460,8 +469,16 @@ struct BackendClient {
 
     private struct MethodsResponse: Decodable { var methods: [LinkedLoginMethod] }
     private struct AppleBody: Encodable { var identityToken: String; var nonce: String?; var displayName: String? }
-    private struct EmailBody: Encodable { var email: String; var password: String; var displayName: String? }
-    private struct ChangePasswordBody: Encodable { var currentPassword: String; var newPassword: String }
+    private struct EmailRequestBody: Encodable { var email: String }
+    private struct MagicConsumeBody: Encodable { var token: String }
+    private struct MagicConsumeResponse: Decodable {
+        var token: String?
+        var expiresAt: String?
+        var userId: String?
+        var isNewUser: Bool?
+        var methods: [LinkedLoginMethod]?
+    }
+    private struct MagicRequestAck: Decodable { var ok: Bool; var message: String? }
 
     /// Sign-up/sign-in with Apple: the identity token is verified by
     /// the backend, which returns the app session kept in Keychain.
@@ -474,22 +491,31 @@ struct BackendClient {
         return session
     }
 
+    /// Asks for a sign-in link by email. The answer is the same
+    /// whether or not the address has an account, so the returned
+    /// sentence is all the UI ever learns. While signed in, the
+    /// link later attaches this email to the current account.
     @discardableResult
-    func emailSignUp(email: String, password: String) async throws -> AuthSessionResponse {
-        let session: AuthSessionResponse = try await authRequest(
-            "auth/email/signup", method: "POST",
-            body: EmailBody(email: HyggeAuth.normalizeEmail(email), password: password, displayName: nil))
-        setSessionToken(session.token)
-        return session
+    func requestMagicLink(email: String) async throws -> String {
+        let ack: MagicRequestAck = try await authRequest(
+            "auth/email/request", method: "POST",
+            body: EmailRequestBody(email: HyggeAuth.normalizeEmail(email)))
+        return ack.message ?? "If that email can sign in, a sign-in link is on its way."
     }
 
+    /// Consumes a tapped magic link. Signed out: a session comes
+    /// back and lands in the Keychain. Signed in (link mode): the
+    /// refreshed method list comes back instead.
     @discardableResult
-    func emailSignIn(email: String, password: String) async throws -> AuthSessionResponse {
-        let session: AuthSessionResponse = try await authRequest(
-            "auth/email/signin", method: "POST",
-            body: EmailBody(email: HyggeAuth.normalizeEmail(email), password: password, displayName: nil))
-        setSessionToken(session.token)
-        return session
+    func consumeMagicLink(token: String) async throws -> [LinkedLoginMethod]? {
+        let response: MagicConsumeResponse = try await authRequest(
+            "auth/email/consume", method: "POST",
+            body: MagicConsumeBody(token: token))
+        if let sessionToken = response.token {
+            setSessionToken(sessionToken)
+            return nil
+        }
+        return response.methods ?? []
     }
 
     func fetchLoginMethods() async throws -> [LinkedLoginMethod] {
@@ -506,25 +532,11 @@ struct BackendClient {
     }
 
     @discardableResult
-    func linkEmail(email: String, password: String) async throws -> [LinkedLoginMethod] {
-        let response: MethodsResponse = try await authRequest(
-            "auth/methods/link/email", method: "POST",
-            body: EmailBody(email: HyggeAuth.normalizeEmail(email), password: password, displayName: nil))
-        return response.methods
-    }
-
-    @discardableResult
     func unlinkLoginMethod(id: String) async throws -> [LinkedLoginMethod] {
         let response: MethodsResponse = try await authRequest("auth/methods/\(id)", method: "DELETE", body: Optional<String>.none)
         return response.methods
     }
 
-    func changePassword(current: String, new: String) async throws {
-        let session: AuthSessionResponse = try await authRequest(
-            "auth/password/change", method: "POST",
-            body: ChangePasswordBody(currentPassword: current, newPassword: new))
-        setSessionToken(session.token)
-    }
 
     /// Revokes the session, then forgets it on this device either way.
     func signOut() async {

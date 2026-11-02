@@ -12,6 +12,18 @@
 	<string>$(HYGGE_STAGING_TOKEN)</string>
 	<key>HYGGE_REQUIRE_CLOUD</key>
 	<string>$(HYGGE_REQUIRE_CLOUD)</string>
+	<!-- Magic-link landing page hands off via hygge://auth/magic. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>app.usehygge.magic-link</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>hygge</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

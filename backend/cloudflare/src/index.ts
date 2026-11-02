@@ -1,6 +1,8 @@
 import type { Env } from "./env.ts";
 import { json, sandboxFor } from "./env.ts";
-import { handleAuthRequest, resolveRequestUserId } from "./auth.ts";
+import { appleAppSiteAssociation, handleAuthRequest, resolveRequestUserId } from "./auth.ts";
+import { LLMClient } from "./llm.ts";
+import { onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { runDateOf, slotForCron, sweepOrder } from "./scan.ts";
 import { handleEmailAddressRequest, handleEmailMessage } from "./email.ts";
 import { d1PushDb, handleDeviceTokenRequest } from "./push.ts";
@@ -93,8 +95,70 @@ async function sweepScheduledScans(env: Env, cron: string, scheduledTime: number
   );
 }
 
+/// Pre-account onboarding (sign-in is the LAST onboarding step, so
+/// the conversation must run before any account exists). These two
+/// routes are deliberately the only unauthenticated user-shaped
+/// surface: they run the scripted onboarding objectives only, read
+/// and write NO server-side user state, and cap input sizes. Abuse
+/// note: the exposure is bounded LLM spend on a fixed script; the
+/// per-IP hourly cap below plus the script allowlist keep it that
+/// way. Everything else still requires a session.
+const PREVIEW_STEPS = new Set(["welcome", "enjoyWork", "lowestRate", "where", "whereWhen", "when", "summary", "done"]);
+const PREVIEW_MAX_PER_HOUR = 30;
+const previewHits = new Map<string, number[]>();
+
+function previewAllowed(request: Request): boolean {
+  const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  const hits = (previewHits.get(ip) ?? []).filter((t) => t > cutoff);
+  hits.push(Date.now());
+  previewHits.set(ip, hits);
+  return hits.length <= PREVIEW_MAX_PER_HOUR;
+}
+
+async function handleOnboardingPreview(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  if (!previewAllowed(request)) return json({ error: "too_many_requests" }, 429);
+  const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const step = typeof body.step === "string" ? body.step : "";
+  if (!PREVIEW_STEPS.has(step)) return json({ error: "not found" }, 404);
+  const transcript = Array.isArray(body.transcript) ? body.transcript.slice(0, 40) : [];
+  const profile = typeof body.profile === "object" && body.profile ? body.profile : {};
+  const client = new LLMClient({
+    apiKey: env.HYGGE_LLM_API_KEY,
+    baseUrl: env.HYGGE_LLM_BASE_URL,
+    modelFast: env.HYGGE_LLM_MODEL_FAST,
+    modelStrong: env.HYGGE_LLM_MODEL_STRONG,
+  });
+  const url = new URL(request.url);
+  if (url.pathname.endsWith("/message")) {
+    return json(await onboardingMessage({ client, step, transcript, profile, contextSummary: "" }));
+  }
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+  const emit = (event: unknown) => {
+    void writer.write(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+  };
+  ctx.waitUntil(
+    (async () => {
+      try {
+        await onboardingMessageStream({ client, step, transcript, profile, contextSummary: "" }, emit);
+      } finally {
+        await writer.close().catch(() => {});
+      }
+    })(),
+  );
+  return new Response(readable, {
+    headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+  });
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
@@ -111,10 +175,25 @@ export default {
       });
     }
 
+    // Universal links: magic-link taps on this host open the app.
+    if (url.pathname === "/.well-known/apple-app-site-association") {
+      return new Response(JSON.stringify(appleAppSiteAssociation()), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
     // Identity exchange + login-method management (Brief 00). Sign-in
     // routes are public; method routes require a session inside.
     if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) {
       return handleAuthRequest(request, env);
+    }
+
+    // Pre-account onboarding conversation (see handleOnboardingPreview).
+    if (
+      request.method === "POST" &&
+      (url.pathname === "/onboarding/preview/stream" || url.pathname === "/onboarding/preview/message")
+    ) {
+      return handleOnboardingPreview(request, env, ctx);
     }
 
     const isUserRoute = USER_ROUTES.some(

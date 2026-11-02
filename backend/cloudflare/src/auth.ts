@@ -1,30 +1,24 @@
-/// Identity (Brief 00): Apple sign-in (server-verified), email/password,
-/// explicit method linking, and server-issued sessions.
+/// Identity: Apple sign-in (server-verified), email magic links,
+/// explicit method linking, and server-issued sessions. Email and
+/// password sign-in was replaced fully by magic links — there is no
+/// Hygge-account password anywhere in this file.
 ///
 /// Invariants: one durable user id with N methods; linking happens only
 /// while signed in; a private-relay address is opaque contact data and
-/// never matches or merges accounts; passwords and session tokens are
-/// never stored, returned, or logged in plaintext (this file logs
-/// nothing). Hygge-account passwords never enter the site vault.
-///
-/// Password hashing: the brief prefers Argon2id, but Cloudflare Workers
-/// WebCrypto has no Argon2id/bcrypt. We use versioned PBKDF2-SHA256
-/// (format below) so verification stays workers-native; switching to an
-/// Argon2id WASM hasher is a follow-up decision, not silently faked.
-import type { Env } from "./env.ts";
+/// never matches or merges accounts; magic-link tokens and session
+/// tokens exist only as SHA-256 hashes at rest, and raw tokens and raw
+/// emails never reach a log line.
+import type { Env, MagicEmailBinding } from "./env.ts";
 import { json, userIdFromRequest } from "./env.ts";
 
-export const PASSWORD_MIN_LENGTH = 10;
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, then sign in again
-export const RATE_LIMIT_MAX_FAILURES = 5;
-export const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
-// Workers WebCrypto caps PBKDF2 at 100_000 iterations (verified live on
-// staging: 210_000 throws NotSupportedError). The versioned hash format lets
-// this rise, or move to Argon2id WASM, without a migration.
-export const PBKDF2_ITERATIONS = 100_000;
+export const MAGIC_LINK_TTL_MS = 15 * 60 * 1000; // 15 minutes
+export const MAGIC_LINK_MAX_SENDS_PER_HOUR = 5;
+export const MAGIC_LINK_FROM = "Hygge <login@usehygge.app>";
 const APPLE_ISSUER = "https://appleid.apple.com";
 const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
-const INVALID_CREDENTIALS = "That email and password don't match. Check both and try again.";
+const MAGIC_REQUEST_OK = "If that email can sign in, a sign-in link is on its way. It works for 15 minutes.";
+const MAGIC_LINK_PROBLEM = "That sign-in link doesn't work anymore. Ask for a new one and try again.";
 
 export class AuthProblem extends Error {
   status: number;
@@ -38,7 +32,7 @@ export class AuthProblem extends Error {
   }
 }
 
-const invalidCredentials = () => new AuthProblem(401, "invalid_credentials", INVALID_CREDENTIALS);
+const magicLinkProblem = () => new AuthProblem(401, "invalid_magic_link", MAGIC_LINK_PROBLEM);
 
 // ---- encoding helpers -------------------------------------------------
 
@@ -55,10 +49,6 @@ function b64urlDecode(text: string): Uint8Array<ArrayBuffer> {
   const raw = atob(padded);
   return Uint8Array.from(raw, (c) => c.charCodeAt(0));
 }
-function b64Decode(text: string): Uint8Array<ArrayBuffer> {
-  const raw = atob(text);
-  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
-}
 function utf8(text: string): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(text);
 }
@@ -66,14 +56,8 @@ async function sha256Hex(text: string): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", utf8(text)));
   return [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-  return diff === 0;
-}
 
-// ---- email / password policy ------------------------------------------
+// ---- email policy ------------------------------------------------------
 
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -86,57 +70,6 @@ export function isPlausibleEmail(email: string): boolean {
 export function isPrivateRelayEmail(email: string | null | undefined): boolean {
   return !!email && normalizeEmail(email).endsWith("@privaterelay.appleid.com");
 }
-
-export function assertPasswordPolicy(password: string): void {
-  if (typeof password !== "string" || password.length < PASSWORD_MIN_LENGTH) {
-    throw new AuthProblem(
-      400,
-      "password_too_short",
-      `Use at least ${PASSWORD_MIN_LENGTH} characters for your password.`,
-    );
-  }
-}
-
-// ---- password hashing (PBKDF2-SHA256, versioned) -----------------------
-
-export interface HashOptions {
-  iterations?: number;
-}
-
-export async function hashPassword(password: string, opts: HashOptions = {}): Promise<string> {
-  const iterations = opts.iterations ?? PBKDF2_ITERATIONS;
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const bits = await derive(password, salt, iterations);
-  return `pbkdf2-sha256$${iterations}$${b64(salt)}$${b64(bits)}`;
-}
-
-async function derive(password: string, salt: Uint8Array<ArrayBuffer>, iterations: number): Promise<Uint8Array<ArrayBuffer>> {
-  const key = await crypto.subtle.importKey("raw", utf8(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
-    key,
-    256,
-  );
-  return new Uint8Array(bits);
-}
-
-export async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  const parts = stored.split("$");
-  if (parts.length !== 4 || parts[0] !== "pbkdf2-sha256") return false;
-  const iterations = Number(parts[1]);
-  if (!Number.isInteger(iterations) || iterations < 1) return false;
-  try {
-    const expected = b64Decode(parts[3]);
-    const actual = await derive(password, b64Decode(parts[2]), iterations);
-    return timingSafeEqual(actual, expected);
-  } catch {
-    return false;
-  }
-}
-
-/// Well-formed hash of no real password, so unknown-email sign-ins do
-/// the same work as wrong-password ones.
-const DUMMY_HASH = `pbkdf2-sha256$${PBKDF2_ITERATIONS}$${b64(new Uint8Array(16))}$${b64(new Uint8Array(32))}`;
 
 // ---- Apple identity-token verification ---------------------------------
 
@@ -245,6 +178,15 @@ export interface AuthSessionRow {
   revokedAt: string | null;
 }
 
+export interface MagicLinkRow {
+  id: string;
+  email: string;
+  tokenHash: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  createdAt: string;
+}
+
 export interface AuthDb {
   createUser(user: { id: string; contactEmail: string | null; displayName: string | null }): Promise<void>;
   findAppleMethod(appleSub: string): Promise<LinkedMethodRow | null>;
@@ -253,13 +195,19 @@ export interface AuthDb {
   listMethods(userId: string): Promise<LinkedMethodRow[]>;
   addMethod(row: LinkedMethodRow): Promise<void>;
   deleteMethod(id: string): Promise<void>;
-  updateMethodPassword(id: string, passwordHash: string): Promise<void>;
+  /// A clicked magic link proves inbox control: the email method
+  /// becomes verified and any legacy password hash is dropped.
+  markEmailVerifiedAndClearPassword(id: string): Promise<void>;
   createSession(row: AuthSessionRow): Promise<void>;
   findSessionByHash(tokenHash: string): Promise<AuthSessionRow | null>;
   revokeSessionByHash(tokenHash: string, revokedAt: string): Promise<void>;
   revokeAllSessions(userId: string, revokedAt: string): Promise<void>;
-  recordAttempt(email: string, success: boolean, at: string): Promise<void>;
-  countRecentFailures(email: string, since: string): Promise<number>;
+  createMagicLink(row: MagicLinkRow): Promise<void>;
+  findMagicLinkByHash(tokenHash: string): Promise<MagicLinkRow | null>;
+  invalidateMagicLinks(email: string, at: string): Promise<void>;
+  countMagicLinksSince(email: string, since: string): Promise<number>;
+  /// Atomic single-use: true exactly once per token.
+  consumeMagicLink(tokenHash: string, at: string): Promise<boolean>;
 }
 
 type D1Row = Record<string, unknown>;
@@ -317,8 +265,11 @@ export function d1AuthDb(db: D1Database): AuthDb {
     async deleteMethod(id) {
       await db.prepare("DELETE FROM linked_methods WHERE id = ?1").bind(id).run();
     },
-    async updateMethodPassword(id, passwordHash) {
-      await db.prepare("UPDATE linked_methods SET password_hash = ?2 WHERE id = ?1").bind(id, passwordHash).run();
+    async markEmailVerifiedAndClearPassword(id) {
+      await db
+        .prepare("UPDATE linked_methods SET email_verified = 1, password_hash = NULL WHERE id = ?1")
+        .bind(id)
+        .run();
     },
     async createSession(row) {
       await db
@@ -347,16 +298,46 @@ export function d1AuthDb(db: D1Database): AuthDb {
         .bind(userId, revokedAt)
         .run();
     },
-    async recordAttempt(email, success, at) {
-      await db.prepare("INSERT INTO auth_attempts (email, success, created_at) VALUES (?1,?2,?3)").bind(email, success ? 1 : 0, at).run();
+    async createMagicLink(row) {
+      await db
+        .prepare(
+          "INSERT INTO magic_link_tokens (id, email, token_hash, expires_at, consumed_at, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+        )
+        .bind(row.id, row.email, row.tokenHash, row.expiresAt, row.consumedAt, row.createdAt)
+        .run();
     },
-    async countRecentFailures(email, since) {
+    async findMagicLinkByHash(tokenHash) {
+      const r = await one("SELECT * FROM magic_link_tokens WHERE token_hash = ?1", tokenHash);
+      if (!r) return null;
+      return {
+        id: String(r.id),
+        email: String(r.email),
+        tokenHash: String(r.token_hash),
+        expiresAt: String(r.expires_at),
+        consumedAt: r.consumed_at ? String(r.consumed_at) : null,
+        createdAt: String(r.created_at),
+      };
+    },
+    async invalidateMagicLinks(email, at) {
+      await db
+        .prepare("UPDATE magic_link_tokens SET consumed_at = ?2 WHERE email = ?1 AND consumed_at IS NULL")
+        .bind(email, at)
+        .run();
+    },
+    async countMagicLinksSince(email, since) {
       const r = await one(
-        "SELECT COUNT(*) AS n FROM auth_attempts WHERE email = ?1 AND success = 0 AND created_at >= ?2",
+        "SELECT COUNT(*) AS n FROM magic_link_tokens WHERE email = ?1 AND created_at >= ?2",
         email,
         since,
       );
       return Number(r?.n ?? 0);
+    },
+    async consumeMagicLink(tokenHash, at) {
+      const result = await db
+        .prepare("UPDATE magic_link_tokens SET consumed_at = ?2 WHERE token_hash = ?1 AND consumed_at IS NULL")
+        .bind(tokenHash, at)
+        .run();
+      return (result.meta?.changes ?? 0) === 1;
     },
   };
 }
@@ -465,21 +446,136 @@ export async function appleSignIn(
   return authenticated(db, userId, true);
 }
 
-export async function emailSignUp(
+// ---- magic links --------------------------------------------------------
+
+export type MagicEmailSender = (message: {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+}) => Promise<void>;
+
+export interface RequestMagicLinkOptions {
+  nowMs?: number;
+  baseUrl?: string;
+  send?: MagicEmailSender;
+}
+
+/// The whole message: one calm link, no other user data. The raw token
+/// exists only here and in the recipient's inbox.
+export function magicLinkMessage(email: string, link: string) {
+  const text = [
+    "Here is your Hygge sign-in link:",
+    "",
+    link,
+    "",
+    "It works for 15 minutes, and only once.",
+    "If you did not ask for this, you can ignore this email.",
+  ].join("\n");
+  const html = [
+    "<p>Here is your Hygge sign-in link:</p>",
+    `<p><a href="${link}">Sign in to Hygge</a></p>`,
+    "<p>It works for 15 minutes, and only once.<br>",
+    "If you did not ask for this, you can ignore this email.</p>",
+  ].join("\n");
+  return { to: email, from: MAGIC_LINK_FROM, subject: "Your Hygge sign-in link", text, html };
+}
+
+/// Always resolves: the HTTP response is identical for known, unknown,
+/// malformed, and rate-limited addresses, so nothing can be enumerated.
+/// Send failures are logged without the token or the raw email.
+export async function requestMagicLink(
   db: AuthDb,
   rawEmail: string,
-  password: string,
-  input: { displayName?: string | null; hash?: HashOptions } = {},
-): Promise<AuthenticatedResult> {
+  opts: RequestMagicLinkOptions = {},
+): Promise<void> {
+  const nowMs = opts.nowMs ?? Date.now();
   const email = normalizeEmail(rawEmail ?? "");
-  if (!isPlausibleEmail(email)) throw new AuthProblem(400, "invalid_email", "That email address doesn't look right.");
-  assertPasswordPolicy(password);
-  if (await db.findEmailMethod(email)) {
-    throw new AuthProblem(409, "email_in_use", "That email already has an account. Sign in instead.");
+  if (!isPlausibleEmail(email)) return;
+  const since = new Date(nowMs - 60 * 60 * 1000).toISOString();
+  if ((await db.countMagicLinksSince(email, since)) >= MAGIC_LINK_MAX_SENDS_PER_HOUR) return;
+  const now = new Date(nowMs).toISOString();
+  await db.invalidateMagicLinks(email, now);
+  const token = b64url(crypto.getRandomValues(new Uint8Array(32)));
+  await db.createMagicLink({
+    id: crypto.randomUUID(),
+    email,
+    tokenHash: await sha256Hex(token),
+    expiresAt: new Date(nowMs + MAGIC_LINK_TTL_MS).toISOString(),
+    consumedAt: null,
+    createdAt: now,
+  });
+  if (!opts.send || !opts.baseUrl) return;
+  const link = `${opts.baseUrl.replace(/\/$/, "")}/auth/magic?token=${encodeURIComponent(token)}`;
+  try {
+    await opts.send(magicLinkMessage(email, link));
+  } catch (e) {
+    console.error("magic link send failed:", e instanceof Error ? e.name : "unknown error");
+  }
+}
+
+export type ConsumeMagicLinkResult =
+  | { kind: "session"; result: AuthenticatedResult }
+  | { kind: "linked"; userId: string; methods: PublicMethod[] };
+
+/// One generic problem covers unknown, expired, and already-used links.
+/// With a live session the link attaches its email to that account
+/// (link mode); without one it finds or creates the account for the
+/// email, marks it verified, drops any legacy password hash, and
+/// issues the standard session.
+export async function consumeMagicLink(
+  db: AuthDb,
+  rawToken: string,
+  input: { nowMs?: number; sessionUserId?: string | null } = {},
+): Promise<ConsumeMagicLinkResult> {
+  const nowMs = input.nowMs ?? Date.now();
+  const token = (rawToken ?? "").trim();
+  if (!token) throw magicLinkProblem();
+  const tokenHash = await sha256Hex(token);
+  const row = await db.findMagicLinkByHash(tokenHash);
+  if (!row || row.consumedAt || Date.parse(row.expiresAt) <= nowMs) throw magicLinkProblem();
+  const email = row.email;
+
+  if (input.sessionUserId) {
+    const owner = await db.findEmailMethod(email);
+    if (owner && owner.userId !== input.sessionUserId) {
+      throw new AuthProblem(409, "already_linked", "That email is already linked to a different account.");
+    }
+    if (!(await db.consumeMagicLink(tokenHash, new Date(nowMs).toISOString()))) throw magicLinkProblem();
+    if (owner) {
+      await db.markEmailVerifiedAndClearPassword(owner.id);
+    } else {
+      try {
+        await db.addMethod({
+          id: crypto.randomUUID(),
+          userId: input.sessionUserId,
+          method: "email",
+          appleSub: null,
+          appleEmail: null,
+          email,
+          passwordHash: null,
+          emailVerified: true,
+        });
+      } catch {
+        throw new AuthProblem(409, "already_linked", "That email is already linked to a different account.");
+      }
+    }
+    return {
+      kind: "linked",
+      userId: input.sessionUserId,
+      methods: (await db.listMethods(input.sessionUserId)).map(publicMethod),
+    };
+  }
+
+  if (!(await db.consumeMagicLink(tokenHash, new Date(nowMs).toISOString()))) throw magicLinkProblem();
+  const existing = await db.findEmailMethod(email);
+  if (existing) {
+    await db.markEmailVerifiedAndClearPassword(existing.id);
+    return { kind: "session", result: await authenticated(db, existing.userId, false) };
   }
   const userId = crypto.randomUUID();
-  const passwordHash = await hashPassword(password, input.hash);
-  await db.createUser({ id: userId, contactEmail: email, displayName: input.displayName ?? null });
+  await db.createUser({ id: userId, contactEmail: email, displayName: null });
   try {
     await db.addMethod({
       id: crypto.randomUUID(),
@@ -488,39 +584,53 @@ export async function emailSignUp(
       appleSub: null,
       appleEmail: null,
       email,
-      passwordHash,
-      // No verification sender exists yet (brief open question); stay
-      // unverified rather than claiming otherwise.
-      emailVerified: false,
+      passwordHash: null,
+      emailVerified: true,
     });
   } catch {
-    throw new AuthProblem(409, "email_in_use", "That email already has an account. Sign in instead.");
+    // Lost a race with a concurrent first sign-in for the same email.
+    const raced = await db.findEmailMethod(email);
+    if (raced) {
+      await db.markEmailVerifiedAndClearPassword(raced.id);
+      return { kind: "session", result: await authenticated(db, raced.userId, false) };
+    }
+    throw new AuthProblem(409, "already_linked", "That sign-in method is already linked to an account.");
   }
-  return authenticated(db, userId, true);
+  return { kind: "session", result: await authenticated(db, userId, true) };
 }
 
-/// Unknown email and wrong password return the identical problem, and
-/// both paths run a password verification.
-export async function emailSignIn(
-  db: AuthDb,
-  rawEmail: string,
-  password: string,
-  input: { nowMs?: number } = {},
-): Promise<AuthenticatedResult> {
-  const nowMs = input.nowMs ?? Date.now();
-  const email = normalizeEmail(rawEmail ?? "");
-  const since = new Date(nowMs - RATE_LIMIT_WINDOW_MS).toISOString();
-  if ((await db.countRecentFailures(email, since)) >= RATE_LIMIT_MAX_FAILURES) {
-    throw new AuthProblem(429, "too_many_attempts", "Too many tries just now. Wait a few minutes and try again.");
-  }
-  const row = isPlausibleEmail(email) ? await db.findEmailMethod(email) : null;
-  const ok = await verifyPassword(password ?? "", row?.passwordHash ?? DUMMY_HASH);
-  if (!row || !ok) {
-    await db.recordAttempt(email, false, new Date(nowMs).toISOString());
-    throw invalidCredentials();
-  }
-  await db.recordAttempt(email, true, new Date(nowMs).toISOString());
-  return authenticated(db, row.userId, false);
+/// Mail scanners prefetch links, so the landing page never consumes:
+/// it only offers the app link, which the app POSTs to consume.
+export function magicLandingHtml(rawToken: string): string {
+  const appLink = `hygge://auth/magic?token=${encodeURIComponent(rawToken ?? "")}`;
+  return [
+    "<!doctype html>",
+    '<html lang="en"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<meta name="referrer" content="no-referrer">',
+    "<title>Sign in to Hygge</title></head>",
+    "<body style=\"font-family:system-ui,sans-serif;text-align:center;padding:48px 24px\">",
+    "<h1>Almost there</h1>",
+    "<p>Tap below to finish signing in to Hygge on this phone.</p>",
+    `<p><a href="${appLink}" style="display:inline-block;padding:14px 28px;border-radius:999px;background:#2b211c;color:#fff;text-decoration:none">Open Hygge</a></p>`,
+    "<p>The link works for 15 minutes, and only once.</p>",
+    "</body></html>",
+  ].join("\n");
+}
+
+/// Universal-link association for the worker host. The team id and
+/// bundle id are public identifiers, not secrets.
+export function appleAppSiteAssociation() {
+  return {
+    applinks: {
+      details: [
+        {
+          appIDs: ["3KA38L8A4F.app.usehygge"],
+          components: [{ "/": "/auth/magic*", comment: "Magic-link sign-in" }],
+        },
+      ],
+    },
+  };
 }
 
 /// Explicit linking only, while signed in. An already-linked method is
@@ -554,44 +664,6 @@ export async function linkApple(db: AuthDb, userId: string, claims: AppleClaims)
   return (await db.listMethods(userId)).map(publicMethod);
 }
 
-export async function linkEmail(
-  db: AuthDb,
-  userId: string,
-  rawEmail: string,
-  password: string,
-  input: { hash?: HashOptions } = {},
-): Promise<PublicMethod[]> {
-  const email = normalizeEmail(rawEmail ?? "");
-  if (!isPlausibleEmail(email)) throw new AuthProblem(400, "invalid_email", "That email address doesn't look right.");
-  assertPasswordPolicy(password);
-  const existing = await db.findEmailMethod(email);
-  if (existing) {
-    throw new AuthProblem(
-      409,
-      "already_linked",
-      existing.userId === userId
-        ? "That email is already linked here."
-        : "That email is already linked to a different account.",
-    );
-  }
-  const row: LinkedMethodRow = {
-    id: crypto.randomUUID(),
-    userId,
-    method: "email",
-    appleSub: null,
-    appleEmail: null,
-    email,
-    passwordHash: await hashPassword(password, input.hash),
-    emailVerified: false,
-  };
-  try {
-    await db.addMethod(row);
-  } catch {
-    throw new AuthProblem(409, "already_linked", "That email is already linked to a different account.");
-  }
-  return (await db.listMethods(userId)).map(publicMethod);
-}
-
 /// Unlinking requires another method to remain: an account is never
 /// orphaned by removing its last way in.
 export async function unlinkMethod(db: AuthDb, userId: string, methodId: string): Promise<PublicMethod[]> {
@@ -603,26 +675,6 @@ export async function unlinkMethod(db: AuthDb, userId: string, methodId: string)
   }
   await db.deleteMethod(methodId);
   return (await db.listMethods(userId)).map(publicMethod);
-}
-
-/// Password change revokes every existing session, then issues a fresh
-/// one for this device.
-export async function changePassword(
-  db: AuthDb,
-  userId: string,
-  currentPassword: string,
-  newPassword: string,
-  input: { hash?: HashOptions; nowMs?: number } = {},
-): Promise<IssuedSession> {
-  const methods = await db.listMethods(userId);
-  const emailMethod = methods.find((m) => m.method === "email" && m.passwordHash);
-  if (!emailMethod?.passwordHash) throw new AuthProblem(400, "no_password_method", "This account has no email password to change.");
-  if (!(await verifyPassword(currentPassword ?? "", emailMethod.passwordHash))) throw invalidCredentials();
-  assertPasswordPolicy(newPassword);
-  await db.updateMethodPassword(emailMethod.id, await hashPassword(newPassword, input.hash));
-  const nowMs = input.nowMs ?? Date.now();
-  await db.revokeAllSessions(userId, new Date(nowMs).toISOString());
-  return issueSession(db, userId, nowMs);
 }
 
 // ---- request resolution + HTTP routes ------------------------------------
@@ -656,7 +708,18 @@ async function requireUser(request: Request, env: Env, db: AuthDb): Promise<stri
   return userId;
 }
 
-export async function handleAuthRequest(request: Request, env: Env, db: AuthDb = d1AuthDb(env.DB)): Promise<Response> {
+export interface AuthHandlerOptions {
+  /// Injectable so tests never send real mail; defaults to env.EMAIL.
+  sendMagicEmail?: MagicEmailSender;
+  nowMs?: number;
+}
+
+export async function handleAuthRequest(
+  request: Request,
+  env: Env,
+  db: AuthDb = d1AuthDb(env.DB),
+  opts: AuthHandlerOptions = {},
+): Promise<Response> {
   const url = new URL(request.url);
   const parts = url.pathname.split("/").filter(Boolean);
   try {
@@ -673,14 +736,33 @@ export async function handleAuthRequest(request: Request, env: Env, db: AuthDb =
       const result = await appleSignIn(db, claims, { displayName: str(body.displayName) || null });
       return json(sessionBody(result), result.isNewUser ? 201 : 200);
     }
-    if (request.method === "POST" && parts.join("/") === "auth/email/signup") {
-      const result = await emailSignUp(db, str(body.email), str(body.password), {
-        displayName: str(body.displayName) || null,
+    if (request.method === "POST" && parts.join("/") === "auth/email/request") {
+      // One generic answer, always — see requestMagicLink.
+      const bindingSend: MagicEmailSender | undefined = env.EMAIL
+        ? async (m) => { await (env.EMAIL as MagicEmailBinding).send(m); }
+        : undefined;
+      await requestMagicLink(db, str(body.email), {
+        nowMs: opts.nowMs,
+        baseUrl: env.HYGGE_MAGIC_BASE_URL,
+        send: opts.sendMagicEmail ?? bindingSend,
       });
-      return json(sessionBody(result), 201);
+      return json({ ok: true, message: MAGIC_REQUEST_OK });
     }
-    if (request.method === "POST" && parts.join("/") === "auth/email/signin") {
-      return json(sessionBody(await emailSignIn(db, str(body.email), str(body.password))));
+    if (request.method === "GET" && parts.join("/") === "auth/magic") {
+      // Landing only: never consumes, so mail prefetchers are harmless.
+      return new Response(magicLandingHtml(url.searchParams.get("token") ?? ""), {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer",
+        },
+      });
+    }
+    if (request.method === "POST" && parts.join("/") === "auth/email/consume") {
+      const sessionUserId = await resolveRequestUserId(request, env, db);
+      const outcome = await consumeMagicLink(db, str(body.token), { nowMs: opts.nowMs, sessionUserId });
+      if (outcome.kind === "linked") return json({ methods: outcome.methods });
+      return json(sessionBody(outcome.result), outcome.result.isNewUser ? 201 : 200);
     }
     if (request.method === "POST" && parts.join("/") === "auth/signout") {
       await revokeSession(db, bearerToken(request));
@@ -698,18 +780,9 @@ export async function handleAuthRequest(request: Request, env: Env, db: AuthDb =
       });
       return json({ methods: await linkApple(db, userId, claims) });
     }
-    if (request.method === "POST" && parts.join("/") === "auth/methods/link/email") {
-      const userId = await requireUser(request, env, db);
-      return json({ methods: await linkEmail(db, userId, str(body.email), str(body.password)) });
-    }
     if (request.method === "DELETE" && parts[0] === "auth" && parts[1] === "methods" && parts[2]) {
       const userId = await requireUser(request, env, db);
       return json({ methods: await unlinkMethod(db, userId, parts[2]) });
-    }
-    if (request.method === "POST" && parts.join("/") === "auth/password/change") {
-      const userId = await requireUser(request, env, db);
-      const session = await changePassword(db, userId, str(body.currentPassword), str(body.newPassword));
-      return json({ token: session.token, expiresAt: session.expiresAt, userId });
     }
     return json({ error: "not_found", message: "That auth route doesn't exist." }, 404);
   } catch (e) {
