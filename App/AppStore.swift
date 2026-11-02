@@ -99,6 +99,13 @@ final class AppStore {
     var lastSyncError: String?
     @ObservationIgnored private var pushTask: Task<Void, Never>?
     static let backendFirstKey = "hyggeBackendFirstV1"
+    /// Shared with ContentView's @AppStorage: the 3-screen intro
+    /// shows once per account on this device. Sign-out clears it
+    /// with the rest of the per-user traces, so whoever picks the
+    /// app up next gets the full first-run flow (intro, onboarding
+    /// chat, sign-in last) — its "I already have an account" path
+    /// still leads straight to the sign-in message.
+    static let introCarouselSeenKey = "hasSeenIntroCarousel"
     /// A pending "save this login" ask (Brief 03). Set the moment the
     /// user confirms they already have a profile on a site and no
     /// login is saved yet; the joining work waits for the sheet.
@@ -422,6 +429,7 @@ final class AppStore {
         pushTask = nil
         isBackendFirst = false
         UserDefaults.standard.removeObject(forKey: Self.backendFirstKey)
+        UserDefaults.standard.removeObject(forKey: Self.introCarouselSeenKey)
         hasRealServerFeedItem = false
         lastSyncError = nil
         pendingCredentialSave = nil

@@ -505,6 +505,10 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: true, isSignedIn: true, authRequired: true), .home)
         // "I already have an account": the sign-in message alone.
         XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: false, authRequired: true, wantsSignIn: true), .signIn)
+        // Sign-out resets the carousel flag (per-user trace), so the
+        // intro leads again even though sign-in was asked for — the
+        // carousel's own sign-in path is one tap from there.
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: false, hasOnboarded: false, isSignedIn: false, authRequired: true, wantsSignIn: true), .carousel)
         // Signed-out onboarded user returns via the sign-in message.
         XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: true, isSignedIn: false, authRequired: true), .signIn)
         // Debug builds without required cloud keep the legacy flow.

@@ -6,7 +6,7 @@ import SwiftUI
 /// no tab bar anywhere in Hygge.
 struct ContentView: View {
     @Environment(AppStore.self) private var store
-    @AppStorage("hasSeenIntroCarousel") private var hasSeenCarousel = false
+    @AppStorage(AppStore.introCarouselSeenKey) private var hasSeenCarousel = false
 
     var body: some View {
         switch AuthGate.resolve(hasSeenCarousel: hasSeenCarousel,
