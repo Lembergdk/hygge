@@ -32,7 +32,8 @@ import {
 } from "./scan.ts";
 import { ensureLearningProfile, rankSiteProposals } from "./learning.ts";
 import {
-  applyProbeOutcome, consumeUnknownCycle, eligibilityOf, reprobeDue,
+  applyProbeOutcome, consumeUnknownCycle, eligibilityOf, extractProbeChecks,
+  parseProbeJudgeReply, probeJudgePrompt, reprobeDue, snapshotEvidence,
   unknownAccessRecord, withdrawProposalsForSite, type Eligibility, type ProbeOutcome, type SiteAccessRecord,
 } from "./web-access.ts";
 
@@ -921,30 +922,84 @@ export class UserSandbox extends DurableObject<Env> {
       log: [`Web check on ${site.name}: looking only — nothing will be sent or submitted.`],
     };
     this.saveTask(task);
+    // Direct homepage snapshot first: judge evidence must include
+    // what the page actually offers, not only the agent's step
+    // intentions (missions can loop or pause before extracting).
+    let homepageEvidence = "";
+    try {
+      const snap = await browser.createSession(site.startURLString);
+      const parts = [snapshotEvidence(snap)];
+      // One generic step deeper: follow a signup/join element so
+      // the judge can see whether a real form exists. Label-based
+      // and site-agnostic; anything found is evidence, and a failed
+      // click simply leaves the homepage snapshot as the evidence.
+      const signupEl = snap.elements.find(
+        (e) => e.kind === "click" && /sign up|join|register|create account|get started|become a/i.test(e.label));
+      if (signupEl) {
+        try {
+          await browser.act(snap.sessionID, { action: "click", target: signupEl.label });
+          await new Promise((r) => setTimeout(r, 1500));
+          const after = await browser.snapshot(snap.sessionID);
+          if (after) parts.push(snapshotEvidence(after));
+        } catch { /* homepage evidence only */ }
+      }
+      homepageEvidence = parts.filter(Boolean).join("\n");
+      await browser.closeSession(snap.sessionID).catch(() => {});
+    } catch { /* mission evidence only */ }
     const done = await this.runTask(task, browser);
     const items: string[] = Array.isArray(done.extracted_items) ? done.extracted_items : [];
-    const text = [...(done.log ?? []), ...items,
-      ...(done.browser_trace ?? []).map((t: any) => String(t.summary ?? ""))].join("\n");
-    const appWall = /continue in (the )?app|open in the app|download (our|the) app|only in (the|our) app|app[- ]only|use our app to/i.test(text);
-    let checks: ProbeOutcome["checks"] = null;
-    for (const item of items) {
+    let finalEvidence = "";
+    if (done.session_id && browser.hasSession(done.session_id)) {
       try {
-        const obj = JSON.parse(String(item));
-        if (obj && typeof obj === "object" && "signupReachable" in obj) {
-          checks = {
-            signupReachable: obj.signupReachable === true,
-            signupFormPresent: obj.signupFormPresent === true,
-            profileEditReachable: obj.profileEditReachable === true,
-            applyStartable: obj.applyStartable === true,
-          };
-        }
-      } catch { /* free-text extraction: checks stay undecided */ }
+        finalEvidence = snapshotEvidence(await browser.snapshot(done.session_id));
+      } catch { /* session gone: mission evidence only */ }
     }
+    const text = [homepageEvidence, finalEvidence, ...(done.log ?? []), ...items,
+      ...(done.browser_trace ?? []).map((t: any) => String(t.summary ?? ""))].filter(Boolean).join("\n");
+    let appWall = /continue in (the )?app|open in the app|download (our|the) app|only in (the|our) app|app[- ]only|use our app to/i.test(text);
+    let checks: ProbeOutcome["checks"] = extractProbeChecks(text);
+    if (!checks && !appWall && text.trim()) {
+      // The exploring mission rarely emits the checks JSON itself
+      // (live probes stayed undecided 3/3 that way), so a judge
+      // reads the collected evidence and answers the four checks.
+      // A thin or failed visit yields "undecided", never a guess.
+      try {
+        const client = new LLMClient(this.llmConfig());
+        if (client.configured) {
+          const reply = await client.complete({
+            model: client.cfg.modelFast,
+            system: "Reply with ONLY a JSON object, no prose.",
+            user: probeJudgePrompt(site.name, text),
+          });
+          const verdict = parseProbeJudgeReply(String(reply));
+          if (verdict) {
+            checks = verdict.checks;
+            appWall = appWall || verdict.appWall;
+            done.log.push(`Web check judging: signup=${checks.signupReachable} form=${checks.signupFormPresent} profile=${checks.profileEditReachable} apply=${checks.applyStartable} appWall=${appWall}`);
+          } else {
+            done.log.push("Web check judging: evidence too thin to decide");
+          }
+          this.saveTask(done);
+        }
+      } catch {
+        done.log.push("Web check judging: judge unavailable");
+        this.saveTask(done);
+      }
+    }
+    const missionStatus = done.status === "succeeded" ? "succeeded" : done.status === "needsHuman" ? "needs_human" : "failed";
     return {
-      status: done.status === "succeeded" ? "succeeded" : done.status === "needsHuman" ? "needs_human" : "failed",
+      // A judge verdict IS the probe result: a mission that looped
+      // after gathering enough evidence must not void it, and a
+      // CAPTCHA on the signup page does not make a site app-only —
+      // the checks ask what the web offers (a person can finish
+      // the check during the real signup), not what the agent can
+      // complete unattended. Thin evidence still judges undecided.
+      status: checks ? "succeeded" : missionStatus,
       appWall, checks,
+      // With checks decided, let applyProbeOutcome phrase the
+      // evidence (it names exactly which checks failed).
       evidence: appWall ? "A key step can only be done in the site's phone app."
-        : checks ? "Checked signup, profile editing, and starting an application on the web."
+        : checks ? null
         : "The web check could not finish, so nothing was decided yet.",
     };
   }

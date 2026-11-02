@@ -83,6 +83,12 @@ test("checkpoint detection: CAPTCHA/2FA/ID pause, ordinary pages do not", () => 
   assert.ok(detectCheckpoint(snapOf("s", ["Verify your identity with a photo ID"])));
   assert.equal(detectCheckpoint(snapOf("s", ["Search field", "First listing"])), null);
   assert.equal(detectCheckpoint(snapOf("s", ["Verify your email to continue"])), null);
+  // Marketing copy about vetted workers is not a checkpoint (this
+  // fired on Rover's homepage and stalled live probes):
+  assert.equal(detectCheckpoint(snapOf("s", ["Background Check", "All sitters pass a background check", "Sign Up"])), null);
+  // But a background check demanded of the visitor still pauses:
+  assert.ok(detectCheckpoint(snapOf("s", ["Complete your background check"])));
+  assert.ok(detectCheckpoint(snapOf("s", ["Background check required"])));
 });
 
 test("probe: password field means the trusted sign-in expired", () => {
