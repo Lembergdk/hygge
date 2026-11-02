@@ -989,9 +989,12 @@ export class UserSandbox extends DurableObject<Env> {
     const missionStatus = done.status === "succeeded" ? "succeeded" : done.status === "needsHuman" ? "needs_human" : "failed";
     return {
       // A judge verdict IS the probe result: a mission that looped
-      // after gathering enough evidence must not void it. A
-      // human-only check still decides nothing.
-      status: checks && missionStatus !== "needs_human" ? "succeeded" : missionStatus,
+      // after gathering enough evidence must not void it, and a
+      // CAPTCHA on the signup page does not make a site app-only —
+      // the checks ask what the web offers (a person can finish
+      // the check during the real signup), not what the agent can
+      // complete unattended. Thin evidence still judges undecided.
+      status: checks ? "succeeded" : missionStatus,
       appWall, checks,
       // With checks decided, let applyProbeOutcome phrase the
       // evidence (it names exactly which checks failed).
