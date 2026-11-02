@@ -16,22 +16,39 @@ export interface LLMConfig {
   agentId?: string;
   tracePayloads?: boolean;
   /// Cloudflare AI Gateway: when baseUrl routes through a gateway,
-  /// this scoped Run token authenticates at the gateway (the
-  /// provider key above still goes through as Authorization).
+  /// this scoped Run token authenticates at the gateway and the
+  /// provider key stays in the gateway's stored keys (BYOK), so
+  /// no provider Authorization is sent. Without it, requests go
+  /// direct with apiKey as Authorization.
   gatewayToken?: string;
   /// Whether the gateway may store raw request/response bodies in
   /// its logs. Undefined is treated as false (metadata only).
   gatewayCollectPayload?: boolean;
 }
 
-/// Headers for one chat-completions request. Gateway headers are
-/// only sent when a gateway token is configured, so a direct
-/// provider baseUrl keeps working unchanged.
-export function llmRequestHeaders(cfg: LLMConfig): Record<string, string> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${cfg.apiKey}`,
-  };
+/// Meta Model API list prices in USD per token (Standard mode;
+/// spark $1.25/$0.15 cached/$4.25 and wonder $4/$0.20 cached/$20
+/// per 1M in/out). The gateway has no built-in pricing for the
+/// custom provider, so these go out as cf-aig-custom-cost and
+/// gateway logs/analytics price each request from its token
+/// usage. Meta publishes no cache-write rate, so cache writes
+/// price at the input rate (the gateway default when only a
+/// read rate is given).
+export const MODEL_PRICES_USD_PER_TOKEN: Record<string, { input: number; output: number; cacheRead: number }> = {
+  "muse-spark-1.3": { input: 0.00000125, output: 0.00000425, cacheRead: 0.00000015 },
+  "muse-wonder-1.0": { input: 0.000004, output: 0.00002, cacheRead: 0.0000002 },
+};
+
+/// Headers for one chat-completions request. With a gateway
+/// token, the gateway injects its stored provider key — it only
+/// does so when Authorization is absent, so the provider key
+/// must not be sent. Without a gateway token this is a direct
+/// provider call with apiKey as Authorization.
+export function llmRequestHeaders(cfg: LLMConfig, model: string): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (!cfg.gatewayToken) {
+    headers.Authorization = `Bearer ${cfg.apiKey}`;
+  }
   if (cfg.gatewayToken) {
     headers["cf-aig-authorization"] = `Bearer ${cfg.gatewayToken}`;
     headers["cf-aig-collect-log-payload"] = cfg.gatewayCollectPayload ? "true" : "false";
@@ -39,6 +56,14 @@ export function llmRequestHeaders(cfg: LLMConfig): Record<string, string> {
       agent: cfg.agentName ?? "hygge-browser-agent",
       agent_id: cfg.agentId ?? "hygge-dev",
     });
+    const price = MODEL_PRICES_USD_PER_TOKEN[model];
+    if (price) {
+      headers["cf-aig-custom-cost"] = JSON.stringify({
+        per_token_in: price.input,
+        per_token_out: price.output,
+        per_cache_read_token: price.cacheRead,
+      });
+    }
   }
   return headers;
 }
@@ -108,7 +133,7 @@ export class LLMClient {
       this.payloadAttrs(span, system, user);
       const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
-        headers: llmRequestHeaders(this.cfg),
+        headers: llmRequestHeaders(this.cfg, model),
         body: JSON.stringify({
           model,
           messages: [
@@ -138,7 +163,7 @@ export class LLMClient {
     this.payloadAttrs(span, system, user);
     const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
-      headers: llmRequestHeaders(this.cfg),
+      headers: llmRequestHeaders(this.cfg, model),
       body: JSON.stringify({
         model,
         stream: true,
