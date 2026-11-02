@@ -31,6 +31,13 @@ struct HomeFeedView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
                     header
+                    if store.dismissedProposalID != nil {
+                        HStack {
+                            Text("Site dismissed").foregroundStyle(HyggeTheme.secondary)
+                            Spacer()
+                            Button("Undo") { store.undoSiteDismissal() }.foregroundStyle(HyggeTheme.sageDeep)
+                        }
+                    }
                     if store.notificationPrimerVisible {
                         notificationPrimer
                     }
@@ -38,6 +45,7 @@ struct HomeFeedView: View {
                         pausedCard
                     } else {
                         consentZone
+                        setupActivity
                         highlightedWork
                         pinnedZone
                     }
@@ -67,6 +75,13 @@ struct HomeFeedView: View {
             }
             .padding(.trailing, 18).padding(.bottom, 14)
         }
+        .task(id: store.tasks.contains(where: { $0.status == .running })) {
+            // Reconcile a run whose response was interrupted, without starting it again.
+            while store.tasks.contains(where: { $0.status == .running }) && !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                if store.activeRunCount == 0 { _ = await store.pullFromServer() }
+            }
+        }
         .confirmationDialog(store.isPaused ? "Resume Hygge?" : "Pause Hygge?",
                             isPresented: $showPauseConfirm, titleVisibility: .visible) {
             Button(store.isPaused ? "Resume" : "Pause everything", role: store.isPaused ? .none : .destructive) {
@@ -82,23 +97,24 @@ struct HomeFeedView: View {
         .sheet(item: $moneyApplication) { application in
             MoneyConfirmationView(application: application)
         }
-        .sheet(item: $editingTask) { task in
+        .sheet(item: $editingTask, onDismiss: {
+            if store.conversationTaskID != nil { showConversation = true }
+        }) { task in
             NavigationStack { TaskDetailView(taskID: task.id) }
         }
-        // "I already have a profile" asks for the login right away;
-        // the joining work starts when the sheet closes.
-        .sheet(item: Binding(get: { store.pendingCredentialSave },
-                             set: { store.pendingCredentialSave = $0 })) { request in
-            CredentialSaveSheet(siteName: request.siteName, domain: request.domain) { saved in
-                store.finishCredentialSave(request, saved: saved)
-            }
-            .presentationDragIndicator(.visible)
-        }
-        // A tapped "Hygge needs you" push opens that exact task.
-        .onChange(of: store.pendingTaskOpenID) { _, taskID in
-            guard let taskID, let task = store.tasks.first(where: { $0.id == taskID }) else { return }
+        // Process interruptions always open the conversation, including pushes.
+        .onChange(of: store.pendingTaskOpenID, initial: true) { _, taskID in
+            guard let taskID else { return }
+            store.surfaceTaskHelp(taskID: taskID)
+            store.conversationTaskID = taskID
             store.pendingTaskOpenID = nil
-            editingTask = task
+            showConversation = true
+        }
+        .onChange(of: store.conversationTaskID) { _, taskID in
+            if taskID != nil {
+                if editingTask != nil { editingTask = nil }
+                else { showConversation = true }
+            }
         }
         .sheet(item: Binding(get: { reviewQueue.first },
                              set: { if $0 == nil, !reviewQueue.isEmpty { reviewQueue.removeFirst() } })) { task in
@@ -276,6 +292,20 @@ struct HomeFeedView: View {
         }
     }
 
+    private var setupActivity: some View {
+        ForEach(store.tasks.filter { $0.isSiteSetup && ($0.status == .running || $0.status == .approved) }) { task in
+            HStack(spacing: 12) {
+                AnimatedFlame(animation: .laptop, size: 40)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(store.siteName(id: task.siteID)).font(.headline)
+                    Text(task.connectsExistingAccount ? "Connecting your account…" : "Setting things up…")
+                        .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                }
+                Spacer()
+            }.padding(16).hyggeCard(radius: 22)
+        }
+    }
+
     // MARK: Pinned needs-you
 
     private var pinnedZone: some View {
@@ -308,8 +338,24 @@ struct HomeFeedView: View {
 
     private var needsYouCards: [NeedsYouCard] {
         var cards: [NeedsYouCard] = []
-        for task in store.tasks where task.status == .needsHuman {
-            cards.append(NeedsYouCard(id: "task-\(task.id)") { taskCard(task) })
+        for task in store.chatHelpTasks {
+            cards.append(NeedsYouCard(id: "chat-\(task.id)") {
+                Button {
+                    store.surfaceTaskHelp(taskID: task.id)
+                    store.conversationTaskID = task.id
+                    showConversation = true
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(store.siteName(id: task.siteID)).font(.headline)
+                            Text("Needs your help in chat").font(.subheadline)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                    }.foregroundStyle(HyggeTheme.ink).padding(16).hyggeCard(radius: 22)
+                }.buttonStyle(.plain)
+            })
         }
         let awaiting = store.tasks.filter { $0.status == .awaitingApproval }
         for batch in TaskBatching.groups(awaiting) {

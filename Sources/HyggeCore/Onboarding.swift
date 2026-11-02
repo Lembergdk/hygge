@@ -80,7 +80,7 @@ public enum SiteAccountState: String, Codable, Sendable {
         case .unknown: return "Not joined yet"
         case .proposed: return "Suggested"
         case .joining: return "Joining…"
-        case .needsVerification: return "Needs a check by you"
+        case .needsVerification: return "Needs your help"
         case .hasAccount: return "Account ready"
         case .profileLive, .watching: return "Watching for work"
         case .paused: return "Paused"
@@ -164,11 +164,15 @@ public enum TimeSaved {
 
 public struct ChatEntry: Codable, Identifiable, Equatable, Sendable {
     public var id: UUID
+    public var taskID: UUID?
+    public var helpID: UUID?
     public var fromAgent: Bool
     public var text: String
     public var createdAt: Date
-    public init(id: UUID = UUID(), fromAgent: Bool, text: String, createdAt: Date = Date()) {
+    public init(id: UUID = UUID(), fromAgent: Bool, text: String, createdAt: Date = Date(), taskID: UUID? = nil, helpID: UUID? = nil) {
         self.id = id
+        self.taskID = taskID
+        self.helpID = helpID
         self.fromAgent = fromAgent
         self.text = text
         self.createdAt = createdAt

@@ -123,6 +123,8 @@ struct BackendClient {
     }
 
     struct BackendTaskResult: Decodable {
+        var id: String?
+        var help: TaskHelp?
         var status: String
         var memory_id: String?
         /// The kept-open browser session when the task paused for a
@@ -157,16 +159,53 @@ struct BackendClient {
         var drafted_payload: [String: String]
         var credential_id: String?
         var resume_session_id: String?
+        var interaction_version = 1
+        var mobile_task: AgentTask
     }
 
     func runTask(task: AgentTask) async throws -> BackendTaskResult {
+        do { return try await submitTask(task) }
+        catch {
+            // A timeout or stale reply is not proof of failed execution. Read
+            // the original task before offering any retry or repeating a write.
+            if let current = try? await setupTasks().first(where: { $0.id == task.id }),
+               current.backendTaskID != nil {
+                return BackendTaskResult(id: current.backendTaskID, help: current.help,
+                    status: current.status.rawValue, memory_id: current.memoryID?.uuidString,
+                    session_id: current.browserSessionID, extracted_items: nil,
+                    information_requests: current.informationRequests,
+                    browser_trace: current.browserTrace, log: current.log)
+            }
+            throw error
+        }
+    }
+
+    private func submitTask(_ task: AgentTask) async throws -> BackendTaskResult {
+        if let backendID = task.backendTaskID, let reply = task.pendingReply {
+            return try await post("tasks/\(backendID)/continue", body: reply)
+        }
         let body = CreateTaskBody(
             kind: task.kind.rawValue, target_url: task.targetURLString, goal: task.goal,
             title: task.title, drafted_payload: task.draftedPayload,
             credential_id: task.credentialRefID?.uuidString.lowercased(),
-            resume_session_id: task.browserSessionID)
-        let created: CreatedTask = try await post("tasks", body: body)
-        return try await post("tasks/\(created.id)/approve", body: [String: String]())
+            resume_session_id: task.browserSessionID, mobile_task: task)
+        let created: BackendTaskResult = try await post("tasks", body: body)
+        guard let id = created.id else { throw AuthClientError.unavailable }
+        // Creation is idempotent: after an uncertain response read the original
+        // task instead of repeating side effects or claiming nothing was sent.
+        if created.status != "awaiting_approval" { return created }
+        return try await post("tasks/\(id)/approve", body: [String: String]())
+    }
+
+    func setupTasks() async throws -> [AgentTask] {
+        struct Row: Decodable { var mobile_task: AgentTask? }
+        struct Response: Decodable { var tasks: [Row] }
+        let response: Response = try await get("tasks")
+        return response.tasks.compactMap(\.mobile_task)
+    }
+
+    func rejectTask(id: String) async throws {
+        let _: BackendTaskResult = try await post("tasks/\(id)/reject", body: [String: String]())
     }
 
     func createSession(url: String) async throws -> BrowserSessionSnapshot {
@@ -705,7 +744,7 @@ struct BackendClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
-        request.timeoutInterval = 20
+        request.timeoutInterval = path.hasPrefix("tasks/") ? 180 : 20
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {

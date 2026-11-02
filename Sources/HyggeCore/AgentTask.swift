@@ -56,6 +56,9 @@ public struct AgentTask: Codable, Identifiable, Equatable, Sendable {
     public var browserSessionID: String?
     public var browserTrace: [BrowserTraceEvent]
     public var informationRequests: [String]
+    public var help: TaskHelp?
+    public var pendingReply: TaskReply?
+    public var backendTaskID: String?
     public var status: AgentTaskStatus
     public var log: [String]
     public var createdAt: Date
@@ -174,6 +177,14 @@ public enum AgentTaskFactory {
                              "skills": profile.skills.joined(separator: ", ")])
     }
 
+    public static func connectTask(profile: EarningsProfile, site: TargetSite) -> AgentTask {
+        AgentTask(kind: .signup, siteID: site.id, targetURLString: site.startURLString,
+                  goal: "Connect the user's existing account on \(site.name). Restore a trusted sign-in or sign in with the saved credential. Verify that the account is signed in. Never create another account, publish or change their profile, apply, or send messages. Ask for a secure login only if needed. Handle safe reversible setup choices yourself.",
+                  title: "Connect \(site.name)",
+                  draftedPayload: ["setupMode": "connect", "displayName": profile.displayName,
+                                   "email": profile.email, "location": profile.locationLabel])
+    }
+
     public static func signupTask(profile: EarningsProfile, site: TargetSite) -> AgentTask {
         signupTask(profile: profile, site: site, emailChoice: .own, signupEmail: profile.email)
     }
@@ -190,9 +201,11 @@ public enum AgentTaskFactory {
             : "Stop for the user at email verification."
         return AgentTask(
             kind: .signup, siteID: site.id, targetURLString: site.startURLString,
-            goal: "Get the user set up on \(site.name). First figure out how this site works: is there a login that already works with the vault credential (existing account), or is a new signup needed? Work out what information the signup requires. Never invent personal data — if a required value is not in the approved draft, stop and ask the user for exactly what is missing. \(verificationNote) Stop for the user at CAPTCHA/bot checks, ID or background checks.",
+            goal: "Get the user set up on \(site.name). First figure out how this site works: is there a login that already works with the vault credential (existing account), or is a new signup needed? Work out what information the signup requires. Handle safe reversible setup choices autonomously. Use known profile values; never invent personal facts. Ask only when necessary and suggest grounded answers. Do not publish a public profile or make commitments without specific approval. \(verificationNote) Stop for the user at CAPTCHA/bot checks, ID or background checks.",
             title: "Sign up for \(site.name)",
-            draftedPayload: emailChoice.draftedPayload(signupEmail: signupEmail, displayName: profile.displayName))
+            draftedPayload: emailChoice.draftedPayload(signupEmail: signupEmail, displayName: profile.displayName)
+                .merging(["location": profile.locationLabel, "headline": profile.headline,
+                          "skills": profile.skills.joined(separator: ", "), "hourlyRate": String(profile.hourlyRateFloor)]) { original, _ in original })
     }
 
     public static func customTask(site: TargetSite, goal: String, kind: AgentTaskKind = .discover) -> AgentTask {
