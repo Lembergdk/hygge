@@ -17,6 +17,9 @@ struct LoginView: View {
                     Button("Sign up") {
                         store.wantsSignIn = false
                         store.wantsOnboarding = true
+                        // Back to the very first onboarding page,
+                        // even if the carousel ran earlier today.
+                        store.introDone = false
                     }
                     .font(.body)
                     .foregroundStyle(HyggeTheme.secondary)
@@ -25,9 +28,9 @@ struct LoginView: View {
                 }
                 .padding(.top, 14)
                 .padding(.leading, 22)
-                FlameMark(size: 72)
-                    .padding(.top, 40)
-                    .padding(.bottom, 36)
+                AnimatedFlame(size: 132)
+                    .padding(.top, 28)
+                    .padding(.bottom, 30)
                 SignInCard(localProfile: nil) {}
                     .padding(.horizontal, 22)
                 Spacer()

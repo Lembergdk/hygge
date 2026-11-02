@@ -224,6 +224,9 @@ final class AppStore {
     var wantsSignIn = false
     /// Session-only: "Sign up" tapped on the log in page.
     var wantsOnboarding = false
+    /// Session-only: the carousel was finished this launch.
+    /// "Sign up" resets it so onboarding starts at page one.
+    var introDone = false
 
     func refreshAuthState() {
         isSignedIn = backend.hasSessionToken

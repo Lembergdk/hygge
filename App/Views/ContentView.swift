@@ -8,11 +8,9 @@ import SwiftUI
 /// bar anywhere in Hygge.
 struct ContentView: View {
     @Environment(AppStore.self) private var store
-    /// This launch only: the carousel was finished or passed.
-    @State private var introDone = false
 
     var body: some View {
-        switch AuthGate.resolve(introDone: introDone,
+        switch AuthGate.resolve(introDone: store.introDone,
                                 hasOnboarded: store.hasOnboarded,
                                 isSignedIn: store.isSignedIn,
                                 authRequired: BackendClient.requireCloud,
@@ -21,8 +19,13 @@ struct ContentView: View {
                                 wantsOnboarding: store.wantsOnboarding) {
         case .carousel:
             IntroCarouselView { destination in
-                if destination == .signIn { store.wantsSignIn = true }
-                introDone = true
+                // The latest tap is the intent: clear the opposite
+                // flag so a stale Sign up can never swallow Log in.
+                if destination == .signIn {
+                    store.wantsOnboarding = false
+                    store.wantsSignIn = true
+                }
+                store.introDone = true
             }
         case .signIn:
             // The minimal log in page (carousel "Log in", or a
