@@ -51,6 +51,15 @@ struct ProfileHubView: View {
         }
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(28)
+        .onAppear { store.isShowingProfile = true }
+        .onDisappear {
+            store.isShowingProfile = false
+            if store.passwordFlow?.phase != .confirming { store.passwordFlow = nil }
+        }
+        .sheet(isPresented: Binding(get: { store.passwordFlow != nil && !store.isShowingLogins },
+                                    set: { if !$0 { store.passwordFlow = nil } })) {
+            PasswordConfirmationView().presentationDragIndicator(.visible)
+        }
     }
 
     private var profileHeader: some View {

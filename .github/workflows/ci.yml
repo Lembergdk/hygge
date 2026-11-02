@@ -60,6 +60,8 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
+      - name: Ensure password confirmation table
+        run: npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --file migrations/0007_password_confirmations.sql
       - name: Deploy staging
         run: npx wrangler deploy -c wrangler.staging.jsonc
       - name: Health check
@@ -81,6 +83,8 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
+      - name: Ensure password confirmation table
+        run: npx wrangler d1 execute hygge-production -c wrangler.production.jsonc --remote --file migrations/0007_password_confirmations.sql
       - name: Deploy production
         run: npx wrangler deploy -c wrangler.production.jsonc
       - name: Health check

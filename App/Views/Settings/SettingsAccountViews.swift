@@ -1,10 +1,34 @@
 import SwiftUI
 
 struct SettingsLoginsView: View {
+    @Environment(AppStore.self) private var store
     var body: some View {
-        SettingsPage(title: "Your logins") {
-            SettingsIntro(title: "Your ways back into Hygge.", artwork: "SettingsLogins")
-            LoginMethodsContent()
+        Group {
+            if store.passwordFlow != nil {
+                PasswordConfirmationView()
+            } else {
+                SettingsPage(title: "Your logins") {
+                    SettingsIntro(title: "Your ways back into Hygge.", artwork: "SettingsLogins")
+                    LoginMethodsContent()
+                }
+            }
+        }
+        .onAppear { store.isShowingLogins = true }
+        .navigationBarBackButtonHidden(store.passwordFlow != nil)
+        .onDisappear {
+            store.isShowingLogins = false
+            if store.passwordFlow?.phase != .confirming { store.passwordFlow = nil }
+        }
+        .task {
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--settings-preview") {
+                switch UserDefaults.standard.string(forKey: "passwordPreviewState") {
+                case "waiting": store.passwordFlow = PasswordConfirmationState(phase: .waiting, email: "m@example.com")
+                case "saved": store.passwordFlow = PasswordConfirmationState(phase: .saved)
+                default: break
+                }
+            }
+            #endif
         }
     }
 }

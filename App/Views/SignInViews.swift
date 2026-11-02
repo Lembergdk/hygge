@@ -123,6 +123,10 @@ struct SignInCard: View {
                     .foregroundStyle(HyggeTheme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if store.magicLinkError != nil && store.backend.hasSessionToken {
+                Button("Load my account") { Task { await store.finishSignIn(localProfile: localProfile) } }
+                    .disabled(store.isCompletingSignIn)
+            }
             if let message {
                 Text(message)
                     .font(.caption)
@@ -181,15 +185,9 @@ struct SignInCard: View {
         isWorking = true
         defer { isWorking = false }
         do {
-            let linked = try await store.backend.consumeMagicLink(token: token)
-            if linked != nil {
-                // Signed-in link mode: the email now opens this account.
-                message = "Email sign-in added. Either way in opens this same account."
-                store.magicLinkError = nil
-            } else {
-                await store.finishSignIn(localProfile: localProfile)
-                onSignedIn()
-            }
+            try await store.backend.consumeMagicLink(token: token)
+            await store.finishSignIn(localProfile: localProfile)
+            onSignedIn()
         } catch {
             store.magicLinkError = AuthCopy.message(for: error)
             message = nil

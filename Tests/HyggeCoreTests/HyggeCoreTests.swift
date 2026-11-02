@@ -529,6 +529,27 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertTrue(OnboardingStep.firstMessage.contains("enjoy"))
     }
 
+    func testReturningAccountRoutesHomeWithoutLocalOnboardingCache() {
+        for introDone in [false, true] {
+            for onboarded in [false, true] {
+                XCTAssertEqual(AuthGate.resolve(introDone: introDone, hasOnboarded: onboarded,
+                    isSignedIn: true, authRequired: true, isExistingAccount: true), .home)
+            }
+        }
+        XCTAssertEqual(AuthGate.resolve(introDone: true, hasOnboarded: false,
+            isSignedIn: true, authRequired: true, isExistingAccount: false), .onboarding)
+        XCTAssertEqual(AuthGate.resolve(introDone: false, hasOnboarded: false,
+            isSignedIn: false, authRequired: true, hasSignedInBefore: true, isExistingAccount: true), .signIn)
+    }
+
+    func testPasswordConfirmationLinkPurposeAndHostValidation() {
+        XCTAssertTrue(MagicLink.isPasswordConfirmation(URL(string: "https://api.usehygge.app/auth/magic?token=abc&action=password")!))
+        XCTAssertTrue(MagicLink.isPasswordConfirmation(URL(string: "hygge://auth/magic?token=abc&action=password")!))
+        XCTAssertFalse(MagicLink.isPasswordConfirmation(URL(string: "https://untrusted.example/auth/magic?token=abc&action=password")!))
+        XCTAssertFalse(MagicLink.isPasswordConfirmation(URL(string: "hygge://auth/magic?token=abc")!))
+        XCTAssertFalse(MagicLink.isPasswordConfirmation(URL(string: "hygge://auth/magic?action=password")!))
+    }
+
     func testSignInCompletionDecisions() {
         // Onboarded server account: adopt it, never import local over it.
         XCTAssertEqual(SignInCompletion.decide(serverHasState: true, serverHasOnboarded: true, localProfileComplete: true), .adoptServerState)

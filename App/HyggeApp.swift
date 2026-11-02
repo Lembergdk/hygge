@@ -30,6 +30,7 @@ struct HyggeApp: App {
                             #if DEBUG
                             guard !ProcessInfo.processInfo.arguments.contains("--settings-preview") else { return }
                             #endif
+                            guard !store.isCompletingSignIn else { return }
                             await store.pullFromServer()
                             await store.refreshPushState()
                         }

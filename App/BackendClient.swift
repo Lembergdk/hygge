@@ -96,6 +96,9 @@ struct BackendClient {
     var sessionUserID: String? { UserDefaults.standard.string(forKey: Self.sessionUserIDKey) }
     var previousSessionUserID: String? { UserDefaults.standard.string(forKey: Self.previousSessionUserIDKey) }
 
+    // Server identity, independent of the local profile/onboarding cache.
+    var sessionIsNewUser: Bool { UserDefaults.standard.bool(forKey: "auth.sessionIsNewUser") }
+
     func setSessionToken(_ token: String, userID: String? = nil) {
         if let userID {
             if let current = sessionUserID {
@@ -112,6 +115,7 @@ struct BackendClient {
             UserDefaults.standard.set(current, forKey: Self.previousSessionUserIDKey)
         }
         UserDefaults.standard.removeObject(forKey: Self.sessionUserIDKey)
+        UserDefaults.standard.removeObject(forKey: "auth.sessionIsNewUser")
         KeychainTokenStore.clear()
         UserDefaults.standard.removeObject(forKey: SessionTokenStorage.legacyUserDefaultsKey)
     }
@@ -560,6 +564,7 @@ struct BackendClient {
             "auth/apple", method: "POST",
             body: AppleBody(identityToken: identityToken, nonce: nonce, displayName: displayName))
         setSessionToken(session.token, userID: session.userId)
+        UserDefaults.standard.set(session.isNewUser ?? false, forKey: "auth.sessionIsNewUser")
         return session
     }
 
@@ -585,6 +590,7 @@ struct BackendClient {
             body: MagicConsumeBody(token: token))
         if let sessionToken = response.token {
             setSessionToken(sessionToken, userID: response.userId)
+            UserDefaults.standard.set(response.isNewUser ?? false, forKey: "auth.sessionIsNewUser")
             return response.linked == true ? response.methods ?? [] : nil
         }
         return response.methods ?? []
@@ -594,6 +600,30 @@ struct BackendClient {
         let session: AuthSessionResponse = try await authRequest("auth/email/password", method: "POST",
             body: ["email": HyggeAuth.normalizeEmail(email), "password": password])
         setSessionToken(session.token, userID: session.userId)
+        UserDefaults.standard.set(session.isNewUser ?? false, forKey: "auth.sessionIsNewUser")
+    }
+
+    struct PasswordConfirmationReceipt: Decodable {
+        var id: String
+        var email: String
+        var expiresAt: String
+    }
+
+    func requestPasswordConfirmation(methodID: String, password: String) async throws -> PasswordConfirmationReceipt {
+        try await authRequest("auth/methods/password/request", method: "POST",
+            body: ["methodId": methodID, "password": password])
+    }
+
+    func confirmPassword(token: String) async throws {
+        let session: AuthSessionResponse = try await authRequest("auth/methods/password/confirm", method: "POST",
+            body: ["token": token])
+        setSessionToken(session.token, userID: session.userId)
+        UserDefaults.standard.set(false, forKey: "auth.sessionIsNewUser")
+    }
+
+    func cancelPasswordConfirmation(id: String) async throws {
+        struct Ack: Decodable { var ok: Bool }
+        let _: Ack = try await authRequest("auth/methods/password/cancel", method: "POST", body: ["id": id])
     }
 
     func setEmailPassword(methodID: String, password: String) async throws -> [LinkedLoginMethod] {
