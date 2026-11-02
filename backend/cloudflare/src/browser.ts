@@ -137,8 +137,10 @@ export class BrowserRunBrowser {
       s.humanControlled = value === "true";
     } else if (action === "click" && target) {
       const safe = target.replaceAll('"', "'");
-      const exact = await page.$$(`xpath///a[normalize-space(text())="${safe}"] | //button[normalize-space(text())="${safe}"]`);
-      const el = exact[0] ?? (await page.$$(`xpath///a[contains(normalize-space(text()), "${safe}")] | //button[contains(normalize-space(text()), "${safe}")]`))[0];
+      // normalize-space(.) covers labels split across nested spans;
+      // text() equality missed them (live: Rover's Sign Up button).
+      const exact = await page.$$(`xpath///a[normalize-space(.)="${safe}"] | //button[normalize-space(.)="${safe}"]`);
+      const el = exact[0] ?? (await page.$$(`xpath///a[contains(normalize-space(.), "${safe}")] | //button[contains(normalize-space(.), "${safe}")]`))[0];
       if (!el) throw new Error(`element not found: ${target}`);
       await (el as { click(): Promise<void> }).click();
     } else if (action === "type" && target) {
