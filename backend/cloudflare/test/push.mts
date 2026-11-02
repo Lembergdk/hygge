@@ -182,21 +182,26 @@ test("register / update / list / unregister round-trip, own tokens only", async 
   assert.equal((await db.listTokens("user-1")).length, 1);
   assert.equal((await db.listTokens("user-1"))[0].updatedAt, "2026-11-03T07:00:00.000Z");
 
-  // Isolation: user-2 sees none of user-1's tokens, and deleting the
+  // Isolation: there is no list endpoint at all, and deleting the
   // same token string as user-2 leaves user-1's row standing.
-  const otherList = await (await handleDeviceTokenRequest(tokenRequest("GET", "/device-tokens"), "user-2", db)).json() as { tokens: unknown[] };
-  assert.equal(otherList.tokens.length, 0);
+  assert.equal((await handleDeviceTokenRequest(tokenRequest("GET", "/device-tokens"), "user-2", db)).status, 405);
   const foreignDelete = await (await handleDeviceTokenRequest(
-    tokenRequest("DELETE", `/device-tokens/${TOKEN_A}`), "user-2", db)).json() as { removed: boolean };
+    tokenRequest("DELETE", "/device-tokens", { token: TOKEN_A }), "user-2", db)).json() as { removed: boolean };
   assert.equal(foreignDelete.removed, false);
   assert.equal((await db.listTokens("user-1")).length, 1);
+  assert.equal((await db.listTokens("user-1"))[0].token, TOKEN_A);
 
-  const mine = await (await handleDeviceTokenRequest(tokenRequest("GET", "/device-tokens"), "user-1", db)).json() as { tokens: { token: string }[] };
-  assert.equal(mine.tokens[0].token, TOKEN_A);
   const removed = await (await handleDeviceTokenRequest(
     tokenRequest("DELETE", "/device-tokens", { token: TOKEN_A }), "user-1", db)).json() as { removed: boolean };
   assert.equal(removed.removed, true);
   assert.equal((await db.listTokens("user-1")).length, 0);
+
+  // A device follows whoever signs in on it: registering the same
+  // physical token under user-2 reassigns it away from user-1.
+  await handleDeviceTokenRequest(tokenRequest("POST", "/device-tokens", { token: TOKEN_B }), "user-1", db);
+  await handleDeviceTokenRequest(tokenRequest("POST", "/device-tokens", { token: TOKEN_B }), "user-2", db);
+  assert.equal((await db.listTokens("user-1")).length, 0);
+  assert.deepEqual((await db.listTokens("user-2")).map((t) => t.token), [TOKEN_B]);
 });
 
 test("registration rejects malformed tokens and platforms", async () => {
@@ -257,7 +262,7 @@ test("410 deletes the token; a later event then attempts nothing for it", async 
   const first = await notifyUser(db, testConfig(pem), "user-1", needsHumanEvent("task-9"), { fetchFn, jwtCache: cache });
   assert.deepEqual(first, { outcome: "failed", attempted: 1, delivered: 0, removedTokens: 1 });
   assert.equal((await db.listTokens("user-1")).length, 0);
-  assert.deepEqual(db.log.map((r) => r.apnsStatus), ["410:Unregistered"]);
+  assert.deepEqual(db.log.map((r) => r.apnsStatus), ["410:Unregistered", "event_failed"]);
   const second = await notifyUser(db, testConfig(pem), "user-1", needsHumanEvent("task-10"), { fetchFn, jwtCache: cache });
   assert.equal(second.outcome, "no_tokens");
   assert.equal(calls.length, 1); // never sent to the dead token again
@@ -274,7 +279,7 @@ test("BadDeviceToken deletes; other errors keep the token, counted once, no retr
   assert.deepEqual(result, { outcome: "failed", attempted: 2, delivered: 0, removedTokens: 1 });
   assert.equal(calls.length, 2); // exactly one attempt per token
   assert.deepEqual((await db.listTokens("user-1")).map((t) => t.token), [TOKEN_B]);
-  assert.deepEqual(db.log.map((r) => r.apnsStatus).sort(), ["400:BadDeviceToken", "500:InternalServerError"]);
+  assert.deepEqual(db.log.map((r) => r.apnsStatus).sort(), ["400:BadDeviceToken", "500:InternalServerError", "event_failed"]);
 });
 
 test("a network error is counted, the token kept, and nothing pretends success", async () => {
@@ -283,7 +288,7 @@ test("a network error is counted, the token kept, and nothing pretends success",
   const fetchFn: PushFetch = async () => { throw new Error("unreachable"); };
   const result = await notifyUser(db, testConfig(pem), "user-1", needsHumanEvent("task-9"), { fetchFn, jwtCache: new ApnsJwtCache() });
   assert.deepEqual(result, { outcome: "failed", attempted: 1, delivered: 0, removedTokens: 0 });
-  assert.deepEqual(db.log.map((r) => r.apnsStatus), ["network_error"]);
+  assert.deepEqual(db.log.map((r) => r.apnsStatus), ["network_error", "event_failed"]);
   assert.equal((await db.listTokens("user-1")).length, 1);
 });
 
@@ -311,13 +316,39 @@ test("paused user and missing token each send nothing and log no attempt", async
 test("repeated failures suppress further sends instead of storming", async () => {
   const { pem } = await testKey();
   const db = await seededDb();
-  for (let i = 0; i < 5; i++) await db.logAttempt("user-1", "needs_you", "500:InternalServerError");
-  assert.equal(consecutiveFailures(await db.recentLog("user-1", 10)), 5);
+  for (let i = 0; i < 5; i++) await db.logAttempt("user-1", "needs_you", "event_failed");
+  assert.equal(consecutiveFailures(await db.recentLog("user-1", 50)), 5);
   const { fetchFn, calls } = fakeFetch(okResponse);
   const result = await notifyUser(db, testConfig(pem), "user-1", needsHumanEvent("t"), { fetchFn, jwtCache: new ApnsJwtCache() });
   assert.equal(result.outcome, "suppressed");
   assert.equal(calls.length, 0);
   assert.equal(db.log.at(-1)?.apnsStatus, "suppressed");
+
+  // Recovery: registering a fresh device token lifts suppression.
+  await handleDeviceTokenRequest(tokenRequest("POST", "/device-tokens", { token: TOKEN_B }), "user-1", db);
+  assert.equal(consecutiveFailures(await db.recentLog("user-1", 50)), 0);
+  const recovered = await notifyUser(db, testConfig(pem), "user-1", needsHumanEvent("t2"), { fetchFn, jwtCache: new ApnsJwtCache() });
+  assert.equal(recovered.outcome, "sent");
+  assert.ok(calls.length > 0);
+});
+
+test("suppression counts failed events, not fan-out attempts", async () => {
+  const { pem } = await testKey();
+  const db = new MemoryPushDb();
+  for (let i = 0; i < 6; i++) {
+    await db.upsertToken("user-1", String.fromCharCode(97 + i).repeat(64), "ios", AT);
+  }
+  const failing = fakeFetch(() => errResponse(500, "InternalServerError"));
+  const first = await notifyUser(db, testConfig(pem), "user-1",
+    { kind: "new_work", refKind: "feed", refId: "i" }, { fetchFn: failing.fetchFn, jwtCache: new ApnsJwtCache() });
+  assert.equal(first.attempted, 6);
+  assert.equal(first.delivered, 0);
+  assert.equal(consecutiveFailures(await db.recentLog("user-1", 50)), 1,
+    "six failed attempts in one event count once");
+  const ok = fakeFetch(okResponse);
+  const second = await notifyUser(db, testConfig(pem), "user-1",
+    { kind: "new_work", refKind: "feed", refId: "i2" }, { fetchFn: ok.fetchFn, jwtCache: new ApnsJwtCache() });
+  assert.equal(second.outcome, "sent");
 });
 
 test("every attempt lands in push_log, success and failure alike", async () => {

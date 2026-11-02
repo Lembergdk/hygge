@@ -266,10 +266,12 @@ final class AppStore {
             case .authorized:
                 await backend.registerDeviceToken(token)
             case .denied:
-                // Permission was taken away: stop sends to this phone
-                // and keep no record of the token here either.
-                await backend.unregisterDeviceToken(token)
-                UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+                // Permission was taken away: stop sends to this phone.
+                // The local copy is dropped only once the server row
+                // is gone, so a failed unregister retries next launch.
+                if await backend.unregisterDeviceToken(token) {
+                    UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+                }
             case .notDetermined:
                 break
             }
@@ -304,8 +306,10 @@ final class AppStore {
         // Brief 07: this phone stops getting this account's pushes.
         // Unregister while the session still works, then forget the
         // token here too. The next account gets its own one primer.
-        if let token = UserDefaults.standard.string(forKey: Self.pushTokenKey) {
-            await backend.unregisterDeviceToken(token)
+        if let token = UserDefaults.standard.string(forKey: Self.pushTokenKey),
+           await backend.unregisterDeviceToken(token) {
+            // Only forget it locally once the server row is gone;
+            // otherwise the next sign-in re-registers (reassigns) it.
             UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
         }
         UserDefaults.standard.removeObject(forKey: Self.pushPrimerResolvedKey)

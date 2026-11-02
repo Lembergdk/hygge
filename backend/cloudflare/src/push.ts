@@ -134,6 +134,13 @@ export const MAX_TOKENS_PER_SEND = 10;
 export function d1PushDb(db: D1Database): PushDb {
   return {
     async upsertToken(userId, token, platform, updatedAt) {
+      // A physical device belongs to whoever is signed in on it now:
+      // registering a token reassigns it, so a previous account on
+      // this phone stops receiving pushes here.
+      await db
+        .prepare("DELETE FROM device_tokens WHERE token = ?2 AND user_id <> ?1")
+        .bind(userId, token)
+        .run();
       await db
         .prepare(
           `INSERT INTO device_tokens (user_id, token, platform, updated_at)
@@ -195,6 +202,9 @@ export class MemoryPushDb implements PushDb {
   tokens = new Map<string, DeviceTokenRow & { userId: string }>();
   log: (PushLogRow & { userId: string })[] = [];
   async upsertToken(userId: string, token: string, platform: string, updatedAt: string) {
+    for (const [key, row] of this.tokens) {
+      if (row.token === token && row.userId !== userId) this.tokens.delete(key);
+    }
     this.tokens.set(`${userId}\n${token}`, { userId, token, platform, updatedAt });
   }
   async listTokens(userId: string) {
@@ -369,20 +379,22 @@ export async function sendToToken(
   return { ok: response.ok, status: response.status, reason };
 }
 
-/// After this many consecutive failed attempts a user's sends pause
-/// (logged once as `suppressed`) until a send succeeds again via a
-/// fresh token registration cycle — never a retry storm.
+/// After this many consecutive failed EVENTS a user's sends pause
+/// (logged as `suppressed`) — never a retry storm. Failure is
+/// counted once per event via the `event_failed` summary row
+/// notifyUser writes, NOT per token attempt: one bad event fanning
+/// out to many stale tokens must not suppress the next event.
+/// Suppression lifts on the next success or when a fresh device
+/// token registers (a `registered` row), which is the usual way
+/// back from a broken setup.
 export const MAX_CONSECUTIVE_FAILURES = 5;
-
-const NON_FAILURE_STATUSES = new Set(["ok", "unconfigured", "suppressed"]);
 
 export function consecutiveFailures(recent: PushLogRow[]): number {
   let count = 0;
   for (const row of recent) {
     const status = row.apnsStatus ?? "";
-    if (status === "ok") break;
-    if (NON_FAILURE_STATUSES.has(status)) continue;
-    count += 1;
+    if (status === "ok" || status === "registered") break;
+    if (status === "event_failed") count += 1;
   }
   return count;
 }
@@ -419,7 +431,7 @@ export async function notifyUser(
     console.log(`push ${event.kind}: APNs not configured; skipped ${tokens.length} token(s)`);
     return { outcome: "unconfigured", ...zero };
   }
-  const recent = await db.recentLog(userId, MAX_CONSECUTIVE_FAILURES + 5).catch(() => [] as PushLogRow[]);
+  const recent = await db.recentLog(userId, 50).catch(() => [] as PushLogRow[]);
   if (consecutiveFailures(recent) >= MAX_CONSECUTIVE_FAILURES) {
     await db.logAttempt(userId, event.kind, "suppressed").catch(() => {});
     return { outcome: "suppressed", ...zero };
@@ -459,6 +471,11 @@ export async function notifyUser(
     }
   }
   const attempted = tokens.length;
+  if (attempted > 0 && delivered === 0) {
+    // One summary row per failed event: this is what suppression
+    // counts, so fan-out size cannot inflate the failure streak.
+    await db.logAttempt(userId, event.kind, "event_failed").catch(() => {});
+  }
   const outcome: NotifyOutcome = delivered === attempted ? "sent" : delivered > 0 ? "partial" : "failed";
   return { outcome, attempted, delivered, removedTokens };
 }
@@ -478,26 +495,26 @@ export async function handleDeviceTokenRequest(
   const url = new URL(request.url);
   const parts = url.pathname.split("/").filter(Boolean); // ["device-tokens", token?]
 
-  if (request.method === "GET" && parts.length === 1) {
-    return json({ tokens: await db.listTokens(userId) });
-  }
-
   if (request.method === "POST" && parts.length === 1) {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const token = normalizeDeviceToken(body.token);
     if (!token) return json({ error: "token required" }, 400);
     const platform = typeof body.platform === "string" && body.platform ? body.platform : "ios";
     if (platform !== "ios") return json({ error: "unsupported platform" }, 400);
+    const isNewToken = !(await db.listTokens(userId)).some((t) => t.token === token);
     await db.upsertToken(userId, token, platform, now.toISOString());
+    // A fresh token is the way back from failure suppression: the
+    // marker row (status only, never the token) resets the streak.
+    // Routine foreground re-registration of the same token does not
+    // write a row.
+    if (isNewToken) await db.logAttempt(userId, "registration", "registered").catch(() => {});
     return json({ registered: true, platform }, 201);
   }
 
-  if (request.method === "DELETE") {
-    let token = parts[1] ? normalizeDeviceToken(decodeURIComponent(parts[1])) : null;
-    if (!token) {
-      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-      token = normalizeDeviceToken(body.token);
-    }
+  if (request.method === "DELETE" && parts.length === 1) {
+    // Body only: device tokens never travel in URL paths (logs).
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const token = normalizeDeviceToken(body.token);
     if (!token) return json({ error: "token required" }, 400);
     return json({ removed: await db.deleteToken(userId, token) });
   }

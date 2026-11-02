@@ -235,7 +235,16 @@ struct BackendClient {
 
     @discardableResult
     func unregisterDeviceToken(_ token: String) async -> Bool {
-        await delete(path: "device-tokens/\(token.lowercased())")
+        // Body-only: device tokens never travel in URL paths (logs).
+        var request = URLRequest(url: baseURL.appendingPathComponent("device-tokens"))
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        request.httpBody = try? JSONEncoder().encode(
+            DeviceTokenBody(token: token.lowercased(), platform: "ios"))
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return false }
+        return (200...299).contains(http.statusCode)
     }
 
     private func delete(path: String) async -> Bool {

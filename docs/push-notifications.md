@@ -80,9 +80,12 @@ The only shape `buildPushPayload` (backend `src/push.ts`) can emit:
    local copy.
 5. **APNs says the token is dead → delete immediately** (below).
 
-`GET /device-tokens` lists the caller's own tokens only;
-`DELETE /device-tokens/<token>` (or a JSON body) removes one of the
-caller's. There is no parameter anywhere that names another user.
+There is deliberately no list endpoint, and `DELETE /device-tokens`
+takes the token in the JSON body only (never in a URL path, where
+it would land in logs). Registering a token that currently belongs
+to another account reassigns it — a physical phone belongs to
+whoever is signed in on it now. There is no parameter anywhere
+that names another user.
 
 ## Failure behavior (silent-failure matrix)
 
@@ -99,14 +102,18 @@ the task/tick is saved, inside swallowed-error wrappers.
 | Other APNs error (429/500…) | 1, no retry | `<status>:<reason>` | yes | nothing this time |
 | Network error reaching APNs | 1 attempt | `network_error` | yes | nothing this time |
 | Bad/missing local key material | 0 | `key_error` | yes | nothing |
-| 5 consecutive failed attempts | 0 (suppressed) | `suppressed` | yes | nothing until a send succeeds again |
+| 5 consecutive failed events | 0 (suppressed) | `suppressed` | yes | nothing until a send succeeds or a fresh token registers |
 | APNs not configured (no key yet) | 0 | `unconfigured` (once per event) | yes | nothing — logged no-op, never a fake success |
 | User paused | 0 | — (not an attempt) | yes | nothing, by their choice |
 | No registered token / denied | 0 | — (not an attempt) | n/a | nothing |
 
-Suppression keeps a broken setup from becoming a retry storm: it
-lifts automatically when a later attempt succeeds (a fresh token
-registration is the usual path back).
+Suppression keeps a broken setup from becoming a retry storm.
+Failures count per *event* (one `event_failed` summary row each),
+not per token attempt, so one event fanning out to many stale
+tokens counts once. Suppression lifts when a send later succeeds
+or when a fresh device token registers (a status-only `registered`
+marker row; routine re-registration of the same token writes no
+row).
 
 ## Sender
 
@@ -174,6 +181,11 @@ live push has ever been sent.
    token row in staging D1, then trigger a `needsHuman` task and a
    scan batch and confirm delivery + `push_log` `ok` rows. This is
    the brief's end-to-end acceptance item and needs a real device
-   (the simulator cannot receive remote pushes reliably).
+   (the simulator cannot receive remote pushes reliably). Warning:
+   a TestFlight (Release) build pointed at staging registers
+   *production* tokens with the staging backend, which sends
+   sandbox — those pushes silently never arrive. Push proofs use a
+   Debug device build against staging, or TestFlight against
+   production after production secrets are set.
 5. **Final title copy sign-off** at review, if different titles are
    wanted.
