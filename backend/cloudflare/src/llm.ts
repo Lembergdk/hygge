@@ -15,6 +15,32 @@ export interface LLMConfig {
   agentName?: string;
   agentId?: string;
   tracePayloads?: boolean;
+  /// Cloudflare AI Gateway: when baseUrl routes through a gateway,
+  /// this scoped Run token authenticates at the gateway (the
+  /// provider key above still goes through as Authorization).
+  gatewayToken?: string;
+  /// Whether the gateway may store raw request/response bodies in
+  /// its logs. Undefined is treated as false (metadata only).
+  gatewayCollectPayload?: boolean;
+}
+
+/// Headers for one chat-completions request. Gateway headers are
+/// only sent when a gateway token is configured, so a direct
+/// provider baseUrl keeps working unchanged.
+export function llmRequestHeaders(cfg: LLMConfig): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${cfg.apiKey}`,
+  };
+  if (cfg.gatewayToken) {
+    headers["cf-aig-authorization"] = `Bearer ${cfg.gatewayToken}`;
+    headers["cf-aig-collect-log-payload"] = cfg.gatewayCollectPayload ? "true" : "false";
+    headers["cf-aig-metadata"] = JSON.stringify({
+      agent: cfg.agentName ?? "hygge-browser-agent",
+      agent_id: cfg.agentId ?? "hygge-dev",
+    });
+  }
+  return headers;
 }
 
 const HIGH_STAKES = new Set(["signup", "apply", "bookCalendar"]);
@@ -82,7 +108,7 @@ export class LLMClient {
       this.payloadAttrs(span, system, user);
       const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.cfg.apiKey}` },
+        headers: llmRequestHeaders(this.cfg),
         body: JSON.stringify({
           model,
           messages: [
@@ -112,7 +138,7 @@ export class LLMClient {
     this.payloadAttrs(span, system, user);
     const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.cfg.apiKey}` },
+      headers: llmRequestHeaders(this.cfg),
       body: JSON.stringify({
         model,
         stream: true,

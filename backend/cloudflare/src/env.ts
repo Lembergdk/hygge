@@ -26,6 +26,12 @@ export interface Env {
   HYGGE_LLM_MODEL_STRONG: string;
   // Secrets (set via `wrangler secret put`, never in config):
   HYGGE_LLM_API_KEY?: string;
+  /// AI Gateway Run token (cf-aig-authorization) for the gateway in
+  /// HYGGE_LLM_BASE_URL; absent = direct provider calls.
+  HYGGE_AIG_TOKEN?: string;
+  /// "1" lets the gateway store raw prompt/response bodies in its
+  /// logs (staging only, mirroring HYGGE_TRACE_PAYLOADS).
+  HYGGE_AIG_COLLECT_PAYLOAD?: string;
   /// Agent tracing: "1" records prompt/reply payloads on spans
   /// (staging only; production keeps metadata + usage).
   HYGGE_TRACE_PAYLOADS?: string;
