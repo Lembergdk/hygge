@@ -26,6 +26,9 @@ export interface Env {
   HYGGE_LLM_MODEL_STRONG: string;
   // Secrets (set via `wrangler secret put`, never in config):
   HYGGE_LLM_API_KEY?: string;
+  /// Agent tracing: "1" records prompt/reply payloads on spans
+  /// (staging only; production keeps metadata + usage).
+  HYGGE_TRACE_PAYLOADS?: string;
   HYGGE_MASTER_KEY?: string; // base64, 32 bytes
   HYGGE_DEV_TOKENS?: string; // staging only: JSON map token -> userId
   HYGGE_APPLE_BUNDLE_ID?: string;

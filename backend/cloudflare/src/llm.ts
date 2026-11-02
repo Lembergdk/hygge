@@ -1,3 +1,5 @@
+import { withSpan, clip, agentAttrs } from "./tracing.ts";
+
 /// Model routing + client for the mission-loop agent.
 /// muse-spark-1.3 for routine per-step decisions; muse-wonder-1.0
 /// for escalation (failures, loops, high-stakes final submits,
@@ -8,6 +10,11 @@ export interface LLMConfig {
   baseUrl: string;
   modelFast: string;
   modelStrong: string;
+  /// Agent-tracing identity + payload gate (staging records
+  /// prompts/replies; production keeps metadata + usage only).
+  agentName?: string;
+  agentId?: string;
+  tracePayloads?: boolean;
 }
 
 const HIGH_STAKES = new Set(["signup", "apply", "bookCalendar"]);
@@ -51,27 +58,58 @@ export class LLMClient {
     return Boolean(this.cfg.apiKey);
   }
 
-  async complete({ model, system, user }: { model: string; system: string; user: string }): Promise<string> {
-    const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.cfg.apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-      }),
+  private chatAttrs(model: string, conversationId?: string) {
+    return {
+      "gen_ai.operation.name": "chat",
+      "gen_ai.request.model": model,
+      "gen_ai.system": "meta",
+      ...agentAttrs(this.cfg.agentName ?? "hygge-browser-agent", this.cfg.agentId ?? "hygge-dev", conversationId),
+    };
+  }
+
+  private payloadAttrs(span: { setAttribute(k: string, v: string): void },
+                       system: string, user: string, output?: string) {
+    if (!this.cfg.tracePayloads) return;
+    span.setAttribute("gen_ai.system_instructions", clip(system));
+    span.setAttribute("gen_ai.input.messages", clip(JSON.stringify([{ role: "user", content: user }])));
+    if (output !== undefined) {
+      span.setAttribute("gen_ai.output.messages", clip(JSON.stringify([{ role: "assistant", content: output }])));
+    }
+  }
+
+  async complete({ model, system, user, conversationId }: { model: string; system: string; user: string; conversationId?: string }): Promise<string> {
+    return withSpan(`chat ${model}`, this.chatAttrs(model, conversationId), async (span) => {
+      this.payloadAttrs(span, system, user);
+      const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.cfg.apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+        }),
+      });
+      if (!res.ok) throw new Error(`LLM ${model} returned ${res.status}`);
+      const data = (await res.json()) as {
+        choices?: { message?: { content?: string } }[];
+        usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+      };
+      if (data.usage?.prompt_tokens !== undefined) span.setAttribute("gen_ai.usage.input_tokens", data.usage.prompt_tokens);
+      if (data.usage?.completion_tokens !== undefined) span.setAttribute("gen_ai.usage.output_tokens", data.usage.completion_tokens);
+      const text = data.choices?.[0]?.message?.content ?? "";
+      this.payloadAttrs(span, system, user, text);
+      return text;
     });
-    if (!res.ok) throw new Error(`LLM ${model} returned ${res.status}`);
-    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    return data.choices?.[0]?.message?.content ?? "";
   }
 
   async completeStream(
-    { model, system, user }: { model: string; system: string; user: string },
+    { model, system, user, conversationId }: { model: string; system: string; user: string; conversationId?: string },
     onDelta: (delta: string) => void,
   ): Promise<string> {
+    return withSpan(`chat ${model}`, this.chatAttrs(model, conversationId), async (span) => {
+    this.payloadAttrs(span, system, user);
     const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.cfg.apiKey}` },
@@ -102,7 +140,12 @@ export class LLMClient {
         const data = trimmed.slice(5).trim();
         if (data === "[DONE]") continue;
         try {
-          const chunk = JSON.parse(data) as { choices?: { delta?: { content?: string } }[] };
+          const chunk = JSON.parse(data) as {
+            choices?: { delta?: { content?: string } }[];
+            usage?: { prompt_tokens?: number; completion_tokens?: number };
+          };
+          if (chunk.usage?.prompt_tokens !== undefined) span.setAttribute("gen_ai.usage.input_tokens", chunk.usage.prompt_tokens);
+          if (chunk.usage?.completion_tokens !== undefined) span.setAttribute("gen_ai.usage.output_tokens", chunk.usage.completion_tokens);
           const delta = chunk.choices?.[0]?.delta?.content ?? "";
           if (delta) {
             full += delta;
@@ -113,7 +156,9 @@ export class LLMClient {
         }
       }
     }
+    this.payloadAttrs(span, system, user, full);
     return full;
+    });
   }
 }
 

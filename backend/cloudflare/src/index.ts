@@ -132,6 +132,9 @@ async function handleOnboardingPreview(
     baseUrl: env.HYGGE_LLM_BASE_URL,
     modelFast: env.HYGGE_LLM_MODEL_FAST,
     modelStrong: env.HYGGE_LLM_MODEL_STRONG,
+    agentName: "hygge-onboarding",
+    agentId: `hygge-${env.HYGGE_ENV}`,
+    tracePayloads: env.HYGGE_TRACE_PAYLOADS === "1",
   });
   const url = new URL(request.url);
   if (url.pathname.endsWith("/message")) {
