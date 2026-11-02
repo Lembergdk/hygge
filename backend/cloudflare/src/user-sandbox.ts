@@ -971,8 +971,12 @@ export class UserSandbox extends DurableObject<Env> {
         this.saveTask(done);
       }
     }
+    const missionStatus = done.status === "succeeded" ? "succeeded" : done.status === "needsHuman" ? "needs_human" : "failed";
     return {
-      status: done.status === "succeeded" ? "succeeded" : done.status === "needsHuman" ? "needs_human" : "failed",
+      // A judge verdict IS the probe result: a mission that looped
+      // after gathering enough evidence must not void it. A
+      // human-only check still decides nothing.
+      status: checks && missionStatus !== "needs_human" ? "succeeded" : missionStatus,
       appWall, checks,
       evidence: appWall ? "A key step can only be done in the site's phone app."
         : checks ? "Checked signup, profile editing, and starting an application on the web."
