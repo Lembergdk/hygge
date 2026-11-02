@@ -112,12 +112,15 @@ test("sweepOrder rotates deterministically and loses nobody", () => {
 
 test("extractProfile reads the ProfileState singleton incl. server pause flag", () => {
   const { profile, isPaused } = extractProfile({
-    profile: { skills: ["Dog walking"], interests: ["petCare"], hourlyRateFloor: 30, locationLabel: "Leeds" },
+    profile: { skills: ["Dog walking"], interests: ["petCare"], customInterests: ["Pottery workshops"], hourlyRateFloor: 30, locationLabel: "Leeds" },
     isPaused: true,
   });
   assert.equal(isPaused, true);
   assert.equal(profile.hourlyRateFloor, 30);
   assert.deepEqual(profile.interests, ["petcare"]);
+  assert.deepEqual(profile.customInterests, ["Pottery workshops"]);
+  assert.deepEqual(profile.skills, ["Dog walking"]);
+  assert.deepEqual(extractProfile({ interests: ["creative"] }).profile.customInterests, []);
 });
 
 test("parseListings: plain, pipe, and JSON extracted items", () => {

@@ -62,6 +62,8 @@ export type ScanTier = "logged" | "public";
 
 export interface ScanProfile {
   interests: string[];
+  /// Free-form preferences inform searches; they are not category IDs or skills.
+  customInterests?: string[];
   skills: string[];
   locationLabel: string;
   hourlyRateFloor: number;
@@ -262,6 +264,7 @@ export function extractProfile(payload: unknown): { profile: ScanProfile; isPaus
     isPaused: row.isPaused === true || row.is_paused === true,
     profile: {
       interests: stringArray(source.interests).map((s) => s.toLowerCase()),
+      customInterests: stringArray(source.customInterests),
       skills: stringArray(source.skills),
       locationLabel: String(source.locationLabel ?? source.location ?? ""),
       hourlyRateFloor: Number.isFinite(floor) && floor > 0 ? floor : 0,

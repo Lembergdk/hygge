@@ -42,6 +42,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
 
     private let manager = CLLocationManager()
     private var continuation: CheckedContinuation<String?, Never>?
+    private var timeout: Task<Void, Never>?
 
     override init() {
         super.init()
@@ -53,11 +54,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     /// Never hangs: gives up after 12 seconds so the UI can say so.
     func requestLocality() async -> String? {
         if let localityLabel { return localityLabel }
-        let timeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(12))
-            await MainActor.run { self?.finish(nil) }
-        }
-        defer { timeout.cancel() }
+        guard continuation == nil else { return nil }
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
             // Ask first, locate second: requesting a fix while the
@@ -66,7 +63,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
             // once the user has actually answered.
             switch manager.authorizationStatus {
             case .authorizedAlways, .authorizedWhenInUse:
-                manager.requestLocation()
+                locate()
             case .denied, .restricted:
                 denied = true
                 finish(nil)
@@ -77,11 +74,13 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard continuation != nil else { return }
         guard let location = locations.first else { return finish(nil) }
         CLGeocoder().reverseGeocodeLocation(location) { [weak self] placemarks, _ in
             let label = placemarks?.first.map { [$0.locality, $0.administrativeArea].compactMap { $0 }.joined(separator: ", ") }
-            self?.localityLabel = label
-            self?.finish(label)
+            guard let self, self.continuation != nil else { return }
+            self.localityLabel = label
+            self.finish(label)
         }
     }
 
@@ -95,7 +94,8 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         switch manager.authorizationStatus {
         case .authorizedAlways, .authorizedWhenInUse:
-            if continuation != nil { manager.requestLocation() }
+            denied = false
+            if continuation != nil { locate() }
         case .denied, .restricted:
             denied = true
             finish(nil)
@@ -105,7 +105,20 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     }
 
     private func finish(_ label: String?) {
+        timeout?.cancel()
+        timeout = nil
         continuation?.resume(returning: label)
         continuation = nil
+    }
+
+    private func locate() {
+        // Give the user time to answer the permission prompt before timing the fix.
+        guard timeout == nil else { return }
+        timeout = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(12)) }
+            catch { return }
+            await MainActor.run { self?.finish(nil) }
+        }
+        manager.requestLocation()
     }
 }

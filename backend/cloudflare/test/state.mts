@@ -93,6 +93,14 @@ function sampleSnapshot() {
   };
 }
 
+test("custom interests survive profile import and server readback", () => {
+  const s = store();
+  s.upsert("profile", "profile", { profile: { interests: ["creative"], customInterests: ["Pottery workshops"] } }, T1);
+  const profile = (s.get("profile", "profile")?.data as any).profile;
+  assert.deepEqual(profile.customInterests, ["Pottery workshops"]);
+  assert.deepEqual(profile.interests, ["creative"]);
+});
+
 test("migration import twice produces identical row counts, demo skipped", () => {
   const s = store();
   const first = s.importSnapshot(sampleSnapshot(), T1);

@@ -157,7 +157,7 @@ public enum AgentTaskFactory {
             kind: .discover, siteID: site.id, targetURLString: site.startURLString,
             goal: site.goalTemplate,
             title: "Search \(site.name)",
-            draftedPayload: ["searchTerms": profile.skills.joined(separator: " ")],
+            draftedPayload: ["searchTerms": (profile.skills + profile.customInterests).joined(separator: " ")],
             status: .awaitingApproval)
     }
 

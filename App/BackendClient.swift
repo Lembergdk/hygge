@@ -354,7 +354,7 @@ struct BackendClient {
         let response: SiteProposalsResponse = try await post(
             "site-proposals",
             body: SiteProposalsBody(category: category.rawValue, locationLabel: profile.locationLabel,
-                                    interests: profile.interests.map(\.rawValue)))
+                                    interests: profile.interests.map(\.rawValue) + profile.customInterests))
         return response.proposals
     }
 
