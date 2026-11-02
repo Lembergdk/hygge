@@ -36,7 +36,7 @@ struct CredentialSaveSheet: View {
                 if saved {
                     Section {
                         Label("Login for \(domain) saved safely", systemImage: "checkmark.shield")
-                        LabeledContent("Signed in as") { Text(username) }
+                        LabeledContent("Login saved for") { Text(username) }
                         Button("Done") { finish(true) }
                             .buttonStyle(.borderedProminent)
                     }

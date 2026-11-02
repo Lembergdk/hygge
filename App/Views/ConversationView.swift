@@ -9,6 +9,18 @@ struct ConversationView: View {
     @State private var streamingText: String?
     @State private var isThinking = false
     @State private var pendingAction: ChatAction?
+    @State private var replyTarget: TaskReplyTarget?
+    @State private var credentialRequest: AppStore.CredentialSaveRequest?
+    @State private var browserTask: AgentTask?
+    @FocusState private var composerFocused: Bool
+    @AppStorage("preferredMailAppScheme") private var preferredMailApp = "message://"
+    @State private var mailError: String?
+
+    private struct TaskReplyTarget {
+        var taskID: UUID
+        var helpID: UUID
+        var question: String
+    }
 
     var body: some View {
         NavigationStack {
@@ -19,7 +31,21 @@ struct ConversationView: View {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 13) {
                                 ForEach(store.chatTranscript) { entry in
-                                    bubble(entry).id(entry.id)
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        bubble(entry)
+                                        if let taskID = entry.taskID,
+                                           let task = store.tasks.first(where: { $0.id == taskID }),
+                                           entry.helpID != nil {
+                                            if task.needsChatHelp, let help = task.help, help.id == entry.helpID {
+                                                taskHelpCard(task, help: help)
+                                            } else if task.status == .running || task.status == .approved {
+                                                ProgressView("I’m continuing…").padding(.leading, 33)
+                                            } else {
+                                                Text(task.status == .succeeded ? "Done — this step is finished." : task.status == .rejected ? "Not continued." : "Answered.")
+                                                    .font(.caption).foregroundStyle(HyggeTheme.secondary).padding(.leading, 33)
+                                            }
+                                        }
+                                    }.id(entry.id)
                                 }
                                 if isThinking && streamingText == nil {
                                     HStack(alignment: .bottom, spacing: 7) {
@@ -39,22 +65,65 @@ struct ConversationView: View {
                             .padding(.horizontal, 18).padding(.top, 22)
                         }
                         .scrollDismissesKeyboard(.interactively)
+                        .onAppear {
+                            for task in store.chatHelpTasks { store.surfaceTaskHelp(taskID: task.id) }
+                            if let id = store.conversationTaskID,
+                               let entry = store.chatTranscript.last(where: { $0.taskID == id }) {
+                                proxy.scrollTo(entry.id, anchor: .top)
+                                prepareReply(to: id)
+                            } else { proxy.scrollTo("bottom", anchor: .bottom) }
+                        }
+                        .onChange(of: store.conversationTaskID) { _, id in
+                            if let entry = store.chatTranscript.last(where: { $0.taskID == id }) {
+                                proxy.scrollTo(entry.id, anchor: .top)
+                            }
+                        }
                         .onChange(of: store.chatTranscript.count) { _, _ in
                             withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                            if let id = store.chatTranscript.last?.taskID { prepareReply(to: id) }
                         }
                         .onChange(of: streamingText?.count ?? 0) { _, _ in
                             proxy.scrollTo("bottom", anchor: .bottom)
                         }
                     }
+                    if let target = replyTarget {
+                        HStack {
+                            Text("Replying: \(target.question)").font(.caption).lineLimit(2)
+                            Spacer()
+                            Button("Cancel") { replyTarget = nil }
+                        }.foregroundStyle(HyggeTheme.secondary).padding(.horizontal, 18)
+                    }
                     composer
                 }
             }
+        }
+        .sheet(item: $credentialRequest) { request in
+            CredentialSaveSheet(siteName: request.siteName, domain: request.domain) { saved in
+                store.finishCredentialSave(request, saved: saved)
+            }.presentationDragIndicator(.visible)
+        }
+        .sheet(item: $browserTask) { task in
+            NavigationStack {
+                CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID)
+                    .navigationTitle(store.siteName(id: task.siteID))
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Continue setup") {
+                                browserTask = nil
+                                if let help = task.help {
+                                    Task { await store.replyToTask(taskID: task.id, helpID: help.id) }
+                                }
+                            }
+                        }
+                    }
+            }.presentationDragIndicator(.visible)
         }
     }
 
     private var composer: some View {
         HStack(spacing: 9) {
-            TextField("Message Hygge…", text: $input, axis: .vertical)
+            TextField(replyTarget == nil ? "Message Hygge…" : "Your reply…", text: $input, axis: .vertical)
+                .focused($composerFocused)
                 .lineLimit(1...4)
                 .padding(.horizontal, 16).padding(.vertical, 12)
                 .background(HyggeTheme.card, in: Capsule())
@@ -125,6 +194,18 @@ struct ConversationView: View {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isThinking else { return }
         input = ""
+        if let target = replyTarget {
+            guard store.tasks.first(where: { $0.id == target.taskID })?.help?.id == target.helpID else {
+                input = text
+                replyTarget = nil
+                return
+            }
+            replyTarget = nil
+            isThinking = true
+            await store.replyToTask(taskID: target.taskID, helpID: target.helpID, answers: [target.question: text])
+            isThinking = false
+            return
+        }
         store.appendChat(fromAgent: false, text: text)
         // Explicit commands are structured actions, validated by the app.
         // Safe ones run at once; consequential ones wait for confirmation.
@@ -159,6 +240,69 @@ struct ConversationView: View {
             store.appendChat(fromAgent: true,
                              text: "I'm offline right now, so I can't think that through. Your message is saved here — ask me again when you're back online.")
         }
+    }
+
+    private func prepareReply(to taskID: UUID) {
+        guard let task = store.tasks.first(where: { $0.id == taskID }), task.needsChatHelp,
+              let help = task.help, help.kind == .information, let question = help.questions.first else { return }
+        replyTarget = TaskReplyTarget(taskID: taskID, helpID: help.id, question: question.text)
+    }
+
+    @ViewBuilder
+    private func taskHelpCard(_ task: AgentTask, help: TaskHelp) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if help.kind == .information, let question = help.questions.first {
+                ForEach(question.suggestions, id: \.self) { suggestion in
+                    Button(suggestion) {
+                        Task { await store.replyToTask(taskID: task.id, helpID: help.id,
+                                                      answers: [question.text: suggestion]) }
+                    }.buttonStyle(SettingsActionStyle())
+                }
+                Button(question.suggestions.isEmpty ? "Reply" : "Something else") {
+                    replyTarget = TaskReplyTarget(taskID: task.id, helpID: help.id, question: question.text)
+                    composerFocused = true
+                }.buttonStyle(SettingsActionStyle(filled: false))
+            } else {
+                Button(help.actionLabel) {
+                    switch help.kind {
+                    case .credentials:
+                        credentialRequest = AppStore.CredentialSaveRequest(siteID: task.siteID,
+                            siteName: store.siteName(id: task.siteID), domain: task.domain, taskID: task.id)
+                    case .verification:
+                        if task.kind == .bookCalendar {
+                            Task { await store.replyToTask(taskID: task.id, helpID: help.id) }
+                        } else { browserTask = task }
+                    case .approval:
+                        Task { await store.replyToTask(taskID: task.id, helpID: help.id, approved: true) }
+                    case .recovery:
+                        Task { await store.replyToTask(taskID: task.id, helpID: help.id) }
+                    case .information: break
+                    }
+                }.buttonStyle(SettingsActionStyle())
+                if help.kind == .verification && task.kind == .bookCalendar {
+                    Button("Open settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                    }.buttonStyle(SettingsActionStyle(filled: false))
+                }
+                if help.kind == .verification && help.message.localizedCaseInsensitiveContains("email") {
+                    Button("Open mail") {
+                        if let url = URL(string: preferredMailApp) {
+                            UIApplication.shared.open(url, options: [:]) { opened in
+                                mailError = opened ? nil : "Open your email app and find the confirmation from this site."
+                            }
+                        }
+                    }.buttonStyle(SettingsActionStyle(filled: false))
+                    if let mailError { Text(mailError).font(.footnote) }
+                }
+                if help.kind == .approval {
+                    Button("Don't do this") {
+                        Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id) }
+                    }.buttonStyle(SettingsActionStyle(filled: false))
+                }
+            }
+        }
+        .foregroundStyle(HyggeTheme.ink)
+        .padding(16).hyggeCard(radius: 20).padding(.leading, 33)
     }
 
     private func proposeBeliefs(from patch: EarningsProfilePatch) {

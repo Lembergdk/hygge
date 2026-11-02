@@ -3,7 +3,7 @@ import SwiftUI
 /// Interactive view of a server-side cloud browser session (Cloudflare Browser
 /// Run / Playwright worker via the agent service). You can watch the agent,
 /// tap elements yourself, type, and take over or hand back control. When the
-/// service is unreachable this shows a clearly labelled offline preview.
+/// service is unreachable, show recovery instead of an interactive fake page.
 struct CloudBrowserView: View {
     @Environment(AppStore.self) private var store
     let urlString: String
@@ -11,7 +11,7 @@ struct CloudBrowserView: View {
     /// check) instead of starting a fresh one.
     var existingSessionID: String? = nil
     @State private var snapshot: BrowserSessionSnapshot?
-    @State private var offline = false
+    @State private var failure: String?
     @State private var typeText = ""
     @State private var busy = false
     @State private var countedLiveSession = false
@@ -19,7 +19,13 @@ struct CloudBrowserView: View {
     var body: some View {
         VStack(spacing: 0) {
             statusBanner
-            if let snapshot {
+            if let failure {
+                ContentUnavailableView {
+                    Label("Couldn’t open this step", systemImage: "wifi.exclamationmark")
+                } description: { Text(failure) } actions: {
+                    Button("Try again") { Task { await start() } }
+                }
+            } else if let snapshot {
                 sessionBody(snapshot)
             } else {
                 ProgressView("Opening the page for you…")
@@ -33,13 +39,11 @@ struct CloudBrowserView: View {
     }
 
     private var statusBanner: some View {
-        Text(offline
-             ? "Live view is not available right now — this is a simple preview."
-             : "You are watching Hygge browse. If a login check appears, it pauses here for you.")
+        Text("Finish the site’s check here, then continue setup. Hygge will check the result before carrying on.")
             .font(.footnote)
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background((offline ? Color.orange : Color.green).opacity(0.2))
+            .background(HyggeTheme.sageTint)
     }
 
     private func sessionBody(_ snapshot: BrowserSessionSnapshot) -> some View {
@@ -84,32 +88,35 @@ struct CloudBrowserView: View {
     }
 
     private func start() async {
-        if let existingSessionID,
-           let live = try? await store.backend.sessionSnapshot(sessionID: existingSessionID) {
+        failure = nil
+        if let existingSessionID {
+            guard let live = try? await store.backend.sessionSnapshot(sessionID: existingSessionID) else {
+                failure = "Your saved page couldn't be reached. Try again, or return to chat and continue setup to reopen sign-in."
+                return
+            }
             snapshot = live
-            countedLiveSession = true
-            store.noteBrowserSessionOpened()
-        } else if let live = try? await store.backend.createSession(url: urlString) {
-            snapshot = live
-            countedLiveSession = true
-            store.noteBrowserSessionOpened()
         } else {
-            offline = true
-            snapshot = BrowserSessionSnapshot(
-                sessionID: "offline", currentURLString: urlString, title: "Offline preview",
-                elements: [PageElement(label: "Log in / Sign in", kind: .click),
-                           PageElement(label: "Search field", kind: .type),
-                           PageElement(label: "First listing card", kind: .click)],
-                humanControlled: true)
+            guard let live = try? await store.backend.createSession(url: urlString) else {
+                failure = "The site couldn't open. Your progress is saved; try again when you're connected."
+                return
+            }
+            snapshot = live
+        }
+        if !countedLiveSession {
+            countedLiveSession = true
+            store.noteBrowserSessionOpened()
         }
     }
 
     private func act(action: String, target: String?, value: String?) async {
-        guard let snapshot, !offline else { return }
+        guard let snapshot else { return }
         busy = true
         defer { busy = false }
         if let next = try? await store.backend.act(sessionID: snapshot.sessionID, action: action, target: target, value: value) {
             self.snapshot = next
+            typeText = ""
+        } else {
+            failure = "That action didn’t finish. Reopen this step to check the page before continuing."
         }
     }
 }

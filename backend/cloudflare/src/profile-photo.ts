@@ -96,7 +96,7 @@ export async function handleProfilePhoto(request: Request, store: ProfilePhotoSt
 }
 
 export function profilePhotoAllowedForTask(task: any): boolean {
-  return task?.status === "approved" && task?.scheduled_scan !== true &&
+  return task?.status === "approved" && task?.scheduled_scan !== true && task?.drafted_payload?.setupMode !== "connect" &&
     ["signup", "buildProfile"].includes(task?.kind);
 }
 

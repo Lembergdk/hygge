@@ -2,9 +2,9 @@ import SwiftUI
 
 struct TaskDetailView: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
     let taskID: UUID
     @State private var showBrowser = false
-    @State private var answers: [String: String] = [:]
 
     private var task: AgentTask? { store.tasks.first { $0.id == taskID } }
 
@@ -33,37 +33,18 @@ struct TaskDetailView: View {
                             .frame(minHeight: 90)
                     }
                 }
-                if !task.informationRequests.isEmpty {
-                    Section("The agent needs this from you") {
-                        ForEach(task.informationRequests, id: \.self) { question in
-                            Text(question).font(.callout)
-                            TextField("Your answer", text: Binding(
-                                get: { answers[question] ?? "" },
-                                set: { answers[question] = $0 }))
-                        }
-                        Button("Send answers") {
-                            store.answerInformation(taskID: task.id, answers: answers)
-                        }
-                        .disabled(task.informationRequests.contains { (answers[$0] ?? "").isEmpty })
-                    }
-                }
-                if task.status == .needsHuman && task.informationRequests.isEmpty {
-                    Section("A check only you can finish") {
-                        Text("This paused at a sign-in check (like a code or \"I'm not a robot\"). Open the browser below, finish the check there, then tap Resume — Hygge carries on in the same place and won't ask for your password again.")
-                            .font(.callout)
-                        Button("Open the browser to finish the check") { showBrowser = true }
-                        Button("Resume — I've finished the check") {
-                            Task { await store.approveAndRun(taskID: task.id) }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        Button("Reject", role: .destructive) { store.reject(taskID: task.id) }
-                    }
-                } else if task.status == .awaitingApproval || task.status == .needsHuman {
+                if task.needsChatHelp {
                     Section {
-                        Button("Approve — go ahead") {
-                            Task { await store.approveAndRun(taskID: task.id) }
-                        }
-                        .buttonStyle(.borderedProminent)
+                        Button("Continue in chat") {
+                            store.surfaceTaskHelp(taskID: task.id)
+                            store.conversationTaskID = task.id
+                            dismiss()
+                        }.buttonStyle(.borderedProminent)
+                    }
+                } else if task.status == .awaitingApproval {
+                    Section {
+                        Button("Approve — go ahead") { Task { await store.approveAndRun(taskID: task.id) } }
+                            .buttonStyle(.borderedProminent)
                         Button("Reject", role: .destructive) { store.reject(taskID: task.id) }
                     }
                 }

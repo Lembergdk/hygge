@@ -1,3 +1,4 @@
+import { help, applyHelpReply, mobileTask, canResumeWithInboxCode } from "./task-help.ts";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { json } from "./env.ts";
@@ -290,12 +291,10 @@ export class UserSandbox extends DurableObject<Env> {
     for (const t of tasks) {
       const id = String(t.id ?? "").toLowerCase();
       if (!id) continue;
-      const stored = { ...t, _fromSnapshot: true };
-      this.ctx.storage.sql.exec(
-        "INSERT INTO tasks (id, task) VALUES (?, ?) ON CONFLICT(id) DO NOTHING",
-        id,
-        JSON.stringify(stored),
-      );
+      const existing = this.loadTask(id);
+      if (existing && !existing._fromSnapshot) continue; // live execution owns its state
+      const stored = { ...t, id, _fromSnapshot: true };
+      this.saveTask(stored);
     }
   }
 
@@ -455,6 +454,29 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   private saveTask(task: any) {
+    if (task.help && task.mobile_task) {
+      const now = new Date().toISOString();
+      const store = this.stateStore();
+      if (!store.get("messages", task.help.id)) store.upsert("messages", task.help.id, {
+        id: task.help.id, fromAgent: true, text: `${task.mobile_task.title}: ${task.help.message}${task.help.questions?.[0] ? `\n\n${task.help.questions[0].text}` : ""}`,
+        taskID: task.mobile_task.id, helpID: task.help.id, createdAt: now,
+      });
+    }
+    if (task.mobile_task?.siteID && ["signup", "buildProfile"].includes(task.kind)) {
+      const siteID = task.mobile_task.siteID;
+      const state = task.status === "succeeded" ? (task.kind === "buildProfile" || task.drafted_payload?.setupMode === "connect" ? "watching" : "hasAccount")
+        : ["needsHuman", "failed"].includes(task.status) ? "needsVerification" : null;
+      if (state) this.stateStore().upsert("accountStates", siteID, { siteID, state });
+      if (task.status === "succeeded" && !this.stateStore().get("journalEvents", task.id)) {
+        const connecting = task.drafted_payload?.setupMode === "connect";
+        this.stateStore().upsert("journalEvents", task.id, {
+          id: task.id, occurredAt: new Date().toISOString(), kind: task.kind === "buildProfile" ? "profileLive" : "joinedSite",
+          sentence: task.kind === "buildProfile" ? `Your profile on ${domainOf(task.target_url)} is live.`
+            : connecting ? `Connected your account on ${domainOf(task.target_url)}.` : `Your account on ${domainOf(task.target_url)} is ready.`,
+          detail: "", siteID, applicationID: null, grossAmount: null, currencyCode: "USD", listingsChecked: 0,
+        });
+      }
+    }
     this.ctx.storage.sql.exec(
       "INSERT INTO tasks (id, task) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET task = excluded.task",
       task.id,
@@ -532,7 +554,17 @@ export class UserSandbox extends DurableObject<Env> {
     // Attach verification/code outcomes to the pending signup task.
     const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks ORDER BY created_at")] as Row[];
     const tasks = rows.map((r) => JSON.parse(String(r.task)));
-    for (const task of attachEmailToTasks(tasks, delivery)) this.saveTask(task);
+    const eligible = tasks.filter((t: any) => t.interaction_version !== 1 || t.help?.kind === "verification");
+    for (const task of attachEmailToTasks(eligible, delivery) as any[]) {
+      if (task.status === "succeeded") task.help = null;
+      this.saveTask(task);
+      if (canResumeWithInboxCode(task)) {
+        task.help = null;
+        task.status = "running";
+        this.saveTask(task);
+        this.ctx.waitUntil(this.runInteractiveTask(task, this.browser()));
+      }
+    }
     // Other site mail is filed to the journal (Brief 01 state). The
     // sentence is summary-level only — no body, no code, no link.
     if (delivery.kind === "other") {
@@ -669,8 +701,21 @@ export class UserSandbox extends DurableObject<Env> {
     }
   }
 
+  private async runInteractiveTask(task: any, browser: BrowserRunBrowser) {
+    try { return await this.runTask(task, browser); }
+    catch {
+      task.status = "failed";
+      task.help = help("recovery", "The connection to this site was interrupted. I'll check the current page before continuing.", [], "Check and continue");
+      task.authorized_action = null; // uncertainty must never replay one-shot approval
+      this.saveTask(task);
+      return task;
+    }
+  }
+
   private async runTask(task: any, browser: BrowserRunBrowser) {
     const statusBeforeRun = String(task.status ?? "");
+    // The persisted running state claims the request; the runner receives its approved scope.
+    task.status = "approved";
     const kind = MEMORY_KIND[task.kind] ?? "searchOpportunities";
     const domain = domainOf(task.target_url);
     const rows = [
@@ -684,12 +729,30 @@ export class UserSandbox extends DurableObject<Env> {
     );
 
     const fillCredentialValue = async (valueRef: string, target: string, sessionID: string) => {
-      if (!task.credential_id) throw new Error("agent requested a credential but none is stored for this domain");
+      const page = await browser.snapshot(sessionID);
+      if (!page || domainOf(page.currentURLString) !== domain) throw new Error("credentials may only be entered on the approved site");
+      if (!task.credential_id && task.kind === "signup" && task.drafted_payload?.setupMode !== "connect") {
+        const username = task.drafted_payload?.email;
+        if (!username) throw new Error("signup email is missing");
+        // Reuse a concurrently saved credential; never overwrite an existing login.
+        const existing = [...this.ctx.storage.sql.exec("SELECT id FROM credentials WHERE domain = ? LIMIT 1", domain)] as Row[];
+        if (existing.length) task.credential_id = existing[0].id;
+        else {
+          const bytes = crypto.getRandomValues(new Uint8Array(24));
+          const secret = "Hg9!" + Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+          const blob = await vault.seal(await this.dek(), secret, `${domain}\n${username}`);
+          task.credential_id = crypto.randomUUID();
+          this.ctx.storage.sql.exec("INSERT INTO credentials (id, domain, username, iv, ciphertext) VALUES (?, ?, ?, ?, ?)",
+            task.credential_id, domain, username, blob.iv, blob.ciphertext);
+        }
+      }
+      if (!task.credential_id) throw new Error("a saved login is required");
       const creds = [
         ...this.ctx.storage.sql.exec("SELECT * FROM credentials WHERE id = ?", task.credential_id),
       ] as Row[];
       if (!creds.length) throw new Error("unknown credential");
       const r = creds[0];
+      if (r.domain !== domain) throw new Error("login belongs to a different site");
       const secret = await vault.open(
         await this.dek(),
         { iv: String(r.iv), ciphertext: String(r.ciphertext) },
@@ -758,6 +821,11 @@ export class UserSandbox extends DurableObject<Env> {
       existingSessionID: task.session_id ?? null,
       restoreState,
     });
+    task.help = result.help ?? (result.status === "failed"
+      ? help("recovery", "I couldn't finish this step after trying another route. We can check the site before trying again.", [], "Try again") : null);
+    task.pending_action = result.pendingAction ?? null;
+    task.checkpoint = result.checkpoint ?? null;
+    task.information_requests = result.informationRequests ?? [];
     task.browser_trace = result.trace;
     task.extracted_items = result.extractedItems;
     task.session_id = result.sessionID;
@@ -765,7 +833,7 @@ export class UserSandbox extends DurableObject<Env> {
     task.status = result.status === "needs_human" || result.status === "needs_info" ? "needsHuman" : result.status;
     if (result.informationRequests?.length) {
       task.information_requests = result.informationRequests;
-      task.log.push("The agent needs information only you can provide — answer in the app and re-approve to resume.");
+      task.log.push("The agent needs information only you can provide — reply in chat to continue.");
     }
     await this.recordSkillOutcome(task, domain, outcome, result, activeSkill);
     // Learn trust support from what actually happened, and refresh
@@ -856,6 +924,13 @@ export class UserSandbox extends DurableObject<Env> {
       extracted_items: [] as string[],
       information_requests: [] as string[],
       log: [`Scheduled scan on ${site.name} (${tier === "logged" ? "signed-in look" : "public listings only"}). Reading only — nothing will be sent, booked, or applied for.`],
+    };
+    (task as any).interaction_version = 1;
+    (task as any).mobile_task = {
+      id: task.id, kind: task.kind, siteID: site.siteID, targetURLString: task.target_url,
+      goal: task.goal, title: task.title, draftedPayload: task.drafted_payload,
+      browserTrace: [], informationRequests: [], status: "approved", log: [],
+      createdAt: Date.now() / 1000 - 978307200,
     };
     this.saveTask(task);
     const done = await this.runTask(task, browser);
@@ -1257,6 +1332,7 @@ export class UserSandbox extends DurableObject<Env> {
         if (!domain || !username || !secret) return json({ error: "domain, username, secret required" }, 400);
         const blob = await vault.seal(await this.dek(), String(secret), `${domain}\n${username}`);
         const id = crypto.randomUUID();
+        this.ctx.storage.sql.exec("DELETE FROM credentials WHERE domain = ?", domain);
         this.ctx.storage.sql.exec(
           "INSERT INTO credentials (id, domain, username, iv, ciphertext) VALUES (?, ?, ?, ?, ?)",
           id,
@@ -1410,13 +1486,21 @@ export class UserSandbox extends DurableObject<Env> {
 
       // Tasks (approval gate enforced here)
       if (request.method === "POST" && parts.join("/") === "tasks") {
+        const clientID = typeof body.mobile_task?.id === "string" && /^[0-9a-f-]{36}$/i.test(body.mobile_task.id)
+          ? body.mobile_task.id.toLowerCase() : null;
+        const existing = clientID ? this.loadTask(clientID) : null;
+        // Repeated network requests never create duplicate site accounts/tasks.
+        if (existing && !existing._fromSnapshot) return json({ ...existing, mobile_task: mobileTask(existing) });
         const kind = body.kind ?? "discover";
         const domain = domainOf(body.target_url ?? "");
         const cred = [
           ...this.ctx.storage.sql.exec("SELECT id FROM credentials WHERE domain = ? LIMIT 1", domain),
         ] as Row[];
         const task = {
-          id: crypto.randomUUID(),
+          id: clientID ?? crypto.randomUUID(),
+          interaction_version: body.interaction_version === 1 ? 1 : 0,
+          mobile_task: body.mobile_task ?? null,
+          help: null,
           kind,
           target_url: body.target_url ?? "",
           goal: body.goal ?? "",
@@ -1448,16 +1532,26 @@ export class UserSandbox extends DurableObject<Env> {
       }
       if (request.method === "GET" && parts.join("/") === "tasks") {
         const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks ORDER BY created_at")] as Row[];
-        return json({ tasks: rows.map((r) => JSON.parse(String(r.task))) });
+        return json({ tasks: rows.map((r) => { const t = JSON.parse(String(r.task)); return { ...t, mobile_task: mobileTask(t) }; }) });
       }
       if (request.method === "POST" && parts[0] === "tasks") {
         const task = this.loadTask(parts[1]);
         if (!task) return json({ error: "unknown task" }, 404);
+        if (parts[2] === "continue") {
+          const error = applyHelpReply(task, body);
+          if (error) return json({ error }, 409);
+          if (task.help) { this.saveTask(task); return json(task); }
+          const refs = [...this.ctx.storage.sql.exec("SELECT id FROM credentials WHERE domain = ? LIMIT 1", domainOf(task.target_url))] as Row[];
+          if (refs.length) task.credential_id = refs[0].id;
+          task.status = "running";
+          this.saveTask(task);
+          return json(await this.runInteractiveTask(task, browser));
+        }
         if (parts[2] === "run" && task.requires_approval) {
           return json({ error: "approval required: POST /tasks/{id}/approve" }, 403);
         }
         if (parts[2] === "reject") {
-          if (!["awaiting_approval", "needsHuman"].includes(task.status)) {
+          if (!["awaiting_approval", "needsHuman", "failed"].includes(task.status)) {
             return json({ error: `cannot reject from ${task.status}` }, 409);
           }
           task.status = "rejected";
@@ -1477,11 +1571,12 @@ export class UserSandbox extends DurableObject<Env> {
           if (!["awaiting_approval", "needsHuman"].includes(task.status)) {
             return json({ error: `task is ${task.status}, not awaiting_approval` }, 409);
           }
+          if (task.interaction_version === 1 && task.status === "needsHuman") return json({ error: "Reply to the current request in chat." }, 409);
           const resuming = task.status === "needsHuman";
-          task.status = "approved";
+          task.status = task.interaction_version === 1 ? "running" : "approved";
           task.log.push(resuming ? "Resumed by user after completing the check" : "Approved by user");
           this.saveTask(task);
-          return json(await this.runTask(task, browser));
+          return json(await this.runInteractiveTask(task, browser));
         }
       }
 

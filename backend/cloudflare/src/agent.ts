@@ -1,3 +1,4 @@
+import { help, informationHelp, actionFingerprint, needsActionApproval } from "./task-help.ts";
 // The mission loop — the ONLY way browsing happens.
 //
 //   observe page -> LLM decides ONE action -> execute -> observe -> ...
@@ -33,10 +34,17 @@ export const MAX_STEPS = 25;
 const SYSTEM = [
   "You are browsing the web on behalf of one user to complete a mission.",
   "You see the current page as a list of interactive elements. Reply with ONE",
-  'JSON action: {"action":"navigate|click|type|upload|extract|done|needsHuman",',
+  'JSON action: {"action":"navigate|click|type|upload|extract|askUser|done|needsHuman",',
   '"target":"element label exactly as listed, or a URL","value":"text to type",',
   '"valueRef":"credential.username|credential.secret|emailCode.code|draft.<key>","reason":"short",',
-  '"questions":["for askUser: the exact things you need from the user"]}.',
+  '"effect":"reversible|accountCreation|public|permanent|destructive","preview":"exact proposed content or changes for consequential actions",',
+  '"questions":[{"text":"A necessary question","suggestedRefs":["draft.location"]}]}.',
+  "AUTONOMY: handle safe reversible choices, navigation, preparation, and recovery yourself.",
+  "Use the provided facts before asking. Do not ask users to make routine setup decisions.",
+  "Ask only for unavailable personal facts, human-only checks, or consequential approval.",
+  "When asking, propose grounded answers using suggestedRefs; never invent personal facts.",
+  "Classify the actual effect of EVERY browser action. A save/submit may publish publicly even if its label is only Save.",
+  "Never claim completion without observing evidence on the page. For connecting an existing account, verify signed-in state and never create an account or edit a profile.",
   "Find your own path: there is no script. Memory hints from past visits are",
   "advice only — if the page disagrees, trust the page. Never invent or type",
   "passwords or codes; use valueRef credential.* / emailCode.code and the",
@@ -54,6 +62,7 @@ const SYSTEM = [
   "If a required value is not in the available draft refs, use askUser with",
   "specific questions and stop. Do not repeat an action that",
   "just failed; try a different element or path.",
+  "For a new signup (not setupMode connect), use credential.username and credential.secret even if no credential is stored: the worker generates and saves a strong password privately when needed.",
   "If hasProfilePhoto is true, the user's saved photo is available as profile.photo.",
   "For a profile-photo file input on the approved site, use action upload,",
   "valueRef profile.photo and the exact file input label. The worker attaches",
@@ -79,6 +88,7 @@ export class LLMDecider {
         authoringInstruction: ctx.authoringMode
           ? 'No corroborated skill exists for this site/outcome. When you reply {"action":"done"}, also include "skillDraft":{"summary":"...","steps":["..."],"pitfalls":["..."],"notes":"..."} distilled from this run. Use placeholders (<username>, <rate>) for any user value; NEVER include credentials, tokens, names, emails, addresses, phone numbers, or dates of birth. Steps are advisory guidance, never a script.'
           : null,
+        knownProfileValues: ctx.draft,
         availableDraftRefs: Object.keys(ctx.draft ?? {}).map((k) => `draft.${k}`),
         hasStoredCredential: ctx.hasCredential,
         hasEmailedCode: Boolean(ctx.hasEmailCode),
@@ -117,7 +127,7 @@ export class SimulatedDecider {
     const did = (action: string, sub: string) => ctx.history.some((h: any) => h.action === action && h.target.toLowerCase().includes(sub));
     const out = (d: any) => d.action === "done" && ctx.authoringMode
       ? { ...d, tier, skillDraft: distillSkillDraft({ site: ctx.site ?? "", outcome: outcomeForTaskKind(ctx.taskKind ?? ""), trace: ctx.history }) }
-      : { ...d, tier };
+      : { effect: d.target?.toLowerCase().includes("create account") ? "accountCreation" : "reversible", ...d, tier };
 
     // An emailed code (Brief 04) is typed from the sealed store,
     // never from a literal the decider could invent; the step after
@@ -132,7 +142,7 @@ export class SimulatedDecider {
       return out({ action: "click", target: verifyBtn, reason: "submit the emailed code" });
     }
 
-    if (ctx.taskKind === "signup") {
+    if (ctx.taskKind === "signup" && ctx.draft?.setupMode !== "connect") {
       const onSignupForm = has("create account", "phone number", "date of birth");
       if (!onSignupForm) {
         const join = has("sign up / join", "sign up", "join");
@@ -174,6 +184,8 @@ export class SimulatedDecider {
     if (ctx.hasCredential && loginLink && !passwordField && !did("click", "log in")) {
       return out({ action: "click", target: loginLink, reason: "open login" });
     }
+
+    if (ctx.draft?.setupMode === "connect") return out({ action: "done", target: "", reason: "check connection" });
 
     const extracted = ctx.history.some((h: any) => h.action === "extract" && h.succeeded);
     if (ctx.taskKind === "discover") {
@@ -379,20 +391,28 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
                    summary: `${checkpoint} — paused for you in the browser`, succeeded: false, modelTier: null });
       log.push(`Paused at a ${checkpoint}. The browser session stays open for you to finish it there.`);
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, ...routing() };
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, help: help("verification", `I need you to finish a ${checkpoint} on ${site}. Your place is saved.`, [], "Complete check"), ...routing() };
     }
     const lastKey = trace.length ? `${trace.at(-1).action}|${trace.at(-1).target}|${snapshot.currentURLString}` : "";
     const repeated = (actionKeys.get(lastKey) ?? 0) >= 2;
     let decision: any;
     try {
-      decision = await decider.decide({
+      // Consent is bound to the exact action, draft, and observed page.
+      const authorized = task.authorized_action;
+      if (authorized && authorized.fingerprint === actionFingerprint(authorized.decision, snapshot, task.drafted_payload)) {
+        decision = { ...authorized.decision, consentGranted: true };
+      } else {
+        decision = await decider.decide({
         conversationId: task.id ? String(task.id) : undefined,
         mission: task.goal, taskKind: task.kind, draft: task.drafted_payload,
         hints, hasCredential, hasEmailCode, hasProfilePhoto, snapshot, history: trace,
         skill, skillCandidate, authoringMode, site,
         restoredSession: Boolean(restoreState) || resumedSession, sessionProbe,
         tierContext: { taskKind: task.kind, failures, repeatedAction: repeated, skillCoverage },
-      });
+        });
+        delete decision.consentGranted;
+      }
+      delete task.authorized_action;
     } catch (e: any) {
       failures += 1;
       log.push(`Decider error at step ${step}: ${e.message}; escalating tier and retrying`);
@@ -407,9 +427,13 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
                    summary: "two-factor check — paused for you in the browser", succeeded: false, ...stamp });
       log.push("Paused at a two-factor check. The browser session stays open for you to finish it there.");
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, ...routing() };
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, help: help("verification", `I need you to finish a ${checkpoint} on ${site}. Your place is saved.`, [], "Complete check"), ...routing() };
     }
     if (decision.action === "done") {
+      if (task.drafted_payload?.setupMode === "connect" && probeAuthenticated(snapshot) !== "authenticated") {
+        return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID,
+          help: help("credentials", "I couldn't verify your sign-in. Check your saved login so I can try again.", [], "Update login"), ...routing() };
+      }
       trace.push({ action: "done", target: "", urlString: snapshot.currentURLString,
                    summary: decision.reason || "Mission complete", succeeded: true, ...stamp });
       const skillDraft = authoringMode
@@ -419,23 +443,31 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       return { status: "succeeded", trace, extractedItems, log, sessionID: snap.sessionID, skillDraft, sessionProbe, resumedSession, ...routing() };
     }
     if (decision.action === "askUser") {
-      const questions = Array.isArray(decision.questions) && decision.questions.length
-        ? decision.questions : [decision.reason || "What information do you need?"];
+      const request = informationHelp(decision, task.drafted_payload ?? {});
+      const questions = request.questions.map((q: any) => q.text);
       trace.push({ action: "askUser", target: "", urlString: snapshot.currentURLString,
-                   summary: `Agent needs information: ${questions.join(" ")}`, succeeded: false, ...stamp });
-      return { status: "needs_info", trace, extractedItems, log, sessionID: snap.sessionID, informationRequests: questions, sessionProbe, resumedSession, ...routing() };
+                   summary: "Waiting for a reply in chat", succeeded: false, ...stamp });
+      return { status: "needs_info", trace, extractedItems, log, sessionID: snap.sessionID,
+        informationRequests: questions, help: request, sessionProbe, resumedSession, ...routing() };
     }
+
     if (decision.action === "needsHuman") {
       trace.push({ action: "needsHuman", target: decision.target ?? "", urlString: snapshot.currentURLString,
                    summary: decision.reason || "Human checkpoint", succeeded: false, ...stamp });
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, help: help("verification", decision.reason || "This site needs a check only you can finish.", [], "Complete check"), sessionProbe, resumedSession, ...routing() };
     }
 
     if (emailedCodeStep && decision.valueRef !== "emailCode.code" && decision.action !== "click") {
       trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
                    summary: "two-factor check — paused for you in the browser", succeeded: false, ...stamp });
       log.push("Paused at a two-factor check. The browser session stays open for you to finish it there.");
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, ...routing() };
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, help: help("verification", `I need you to finish a ${checkpoint} on ${site}. Your place is saved.`, [], "Complete check"), ...routing() };
+    }
+    if (needsActionApproval(task, decision) && decision.consentGranted !== true) {
+      const request = help("approval", `${decision.preview || decision.reason || "This step changes something outside Hygge."}\nProposed action: ${decision.action} “${decision.target}”${decision.value ? ` — ${decision.value}` : ""}`, [], "Approve and continue");
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID,
+        help: request, pendingAction: { decision, fingerprint: actionFingerprint(decision, snapshot, task.drafted_payload) },
+        sessionProbe, resumedSession, ...routing() };
     }
     let result: any;
     try {

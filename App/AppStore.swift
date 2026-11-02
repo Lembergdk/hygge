@@ -91,6 +91,9 @@ final class AppStore {
     var credentialRefs: [CredentialRef] = []
     var opportunities: [Opportunity] = []
     var tasks: [AgentTask] = []
+    private var runningTaskIDs: Set<UUID> = []
+    var conversationTaskID: UUID?
+    var dismissedProposalID: UUID?
     var applications: [ApplicationRecord] = []
     var proposals: [ProposedSite] = []
     var accountStates: [String: SiteAccountState] = [:]
@@ -534,7 +537,8 @@ final class AppStore {
 
     func approveProposal(proposalID: UUID, alreadyHasAccount: Bool) {
         guard let index = proposals.firstIndex(where: { $0.id == proposalID }),
-              let site = site(id: proposals[index].siteID) else { return }
+              let site = site(id: proposals[index].siteID),
+              proposals[index].status == .proposed else { return }
         proposals[index].status = alreadyHasAccount ? .approvedHasAccount : .approvedSignup
         recordFeedback(FeedbackEvent(subjectType: .siteProposal,
                                      subjectId: proposalID.uuidString.lowercased(),
@@ -545,7 +549,7 @@ final class AppStore {
         // finishes email verification itself); otherwise the
         // signup confirms the user's own email from their profile.
         var task = alreadyHasAccount
-            ? AgentTaskFactory.profileTask(profile: profile, site: site)
+            ? AgentTaskFactory.connectTask(profile: profile, site: site)
             : (hyggeEmailAddress.map {
                 AgentTaskFactory.signupTask(profile: profile, site: site,
                                             emailChoice: .hygge, signupEmail: $0.address)
@@ -553,13 +557,14 @@ final class AppStore {
         attachCredential(&task)
         attachSkill(&task)
         tasks.append(task)
-        // "I already have a profile" is the moment to ask for the login:
-        // present the save sheet first, then start the joining work with
-        // whatever the user chose (saved login attached, or none).
-        if alreadyHasAccount && credential(forDomain: site.domain) == nil {
-            pendingCredentialSave = CredentialSaveRequest(
-                siteID: site.id, siteName: site.name, domain: site.domain, taskID: task.id)
-            lastMessage = "Save your \(site.name) login and I'll sign in for you from now on — or skip and I'll still take a look."
+        if alreadyHasAccount && credential(forDomain: site.domain) == nil && sessionProfile(forDomain: site.domain)?.hasProfile != true {
+            let request = TaskHelp(kind: .credentials,
+                message: "Connect your \(site.name) login so I can find work there. Add it securely below; don't send your password in chat.",
+                actionLabel: "Connect account")
+            tasks[tasks.count - 1].help = request
+            tasks[tasks.count - 1].status = .needsHuman
+            surfaceTaskHelp(taskID: task.id)
+            conversationTaskID = task.id
             save()
             return
         }
@@ -576,11 +581,11 @@ final class AppStore {
         Task { await approveAndRun(taskID: taskID) }
     }
 
-    /// The save sheet closed (saved or skipped): attach any freshly
-    /// saved login and start the work that was waiting on it.
+    /// Only a successful secure save resumes setup. Dismissing the sheet
+    /// leaves its chat request available for later.
     func finishCredentialSave(_ request: CredentialSaveRequest, saved: Bool) {
         if pendingCredentialSave?.id == request.id { pendingCredentialSave = nil }
-        guard let taskID = request.taskID,
+        guard saved, let taskID = request.taskID,
               let index = tasks.firstIndex(where: { $0.id == taskID }) else { save(); return }
         attachCredential(&tasks[index])
         save()
@@ -588,16 +593,27 @@ final class AppStore {
             lastMessage = "Saved for later — Hygge is paused, so joining \(request.siteName) will wait until you resume."
             return
         }
+        if let request = tasks[index].help {
+            _ = tasks[index].prepareReply(helpID: request.id)
+        }
         Task { await approveAndRun(taskID: taskID) }
     }
 
     func dismissProposal(proposalID: UUID) {
         guard let index = proposals.firstIndex(where: { $0.id == proposalID }) else { return }
         proposals[index].status = .dismissed
+        dismissedProposalID = proposalID
         recordFeedback(FeedbackEvent(subjectType: .siteProposal,
                                      subjectId: proposalID.uuidString.lowercased(),
                                      action: .dismissed,
-                                     category: site(id: proposals[index].siteID)?.category))
+                                     category: nil))
+        save()
+    }
+
+    func undoSiteDismissal() {
+        guard let id = dismissedProposalID, let index = proposals.firstIndex(where: { $0.id == id }), proposals[index].status == .dismissed else { return }
+        proposals[index].status = .proposed
+        dismissedProposalID = nil
         save()
     }
 
@@ -650,18 +666,65 @@ final class AppStore {
     }
 
     func answerInformation(taskID: UUID, answers: [String: String]) {
-        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
-        for (question, answer) in answers where !answer.trimmingCharacters(in: .whitespaces).isEmpty {
-            let key: String
-            if question.lowercased().contains("phone") { key = "phone" }
-            else if question.lowercased().contains("date of birth") { key = "dateOfBirth" }
-            else { key = "answer:" + question }
-            tasks[index].draftedPayload[key] = answer
-        }
-        tasks[index].informationRequests = []
-        try? tasks[index].requestReapproval()
-        save()
+        guard let task = tasks.first(where: { $0.id == taskID }), let help = task.help else { return }
+        Task { await replyToTask(taskID: taskID, helpID: help.id, answers: answers) }
     }
+
+    func surfaceTaskHelp(taskID: UUID) {
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].needsChatHelp else { return }
+        if tasks[index].help == nil {
+            let task = tasks[index]
+            tasks[index].help = TaskHelp(kind: task.status == .failed ? .recovery : task.informationRequests.isEmpty ? .verification : .information,
+                message: task.status == .failed ? "I couldn't finish this step. Let's check where it stopped before continuing."
+                    : task.informationRequests.isEmpty ? "This site needs a check only you can finish. Your place is saved."
+                    : "I need a detail to continue.",
+                questions: task.informationRequests.map { .init(text: $0) },
+                actionLabel: task.status == .failed ? "Check and continue" : "Complete check")
+        }
+        guard let help = tasks[index].help, !chatTranscript.contains(where: { $0.helpID == help.id }) else { return }
+        chatTranscript.append(ChatEntry(id: help.id, fromAgent: true,
+            text: "\(siteName(id: tasks[index].siteID)): \(help.message)" + (help.questions.first.map { "\n\n" + $0.text } ?? ""), taskID: taskID, helpID: help.id))
+    }
+
+    func replyToTask(taskID: UUID, helpID: UUID, answers: [String: String] = [:], approved: Bool = false) async {
+        guard let original = tasks.first(where: { $0.id == taskID }), original.help?.id == helpID else { return }
+        if original.help?.kind == .recovery,
+           let remote = try? await backend.setupTasks(),
+           let current = remote.first(where: { $0.id == taskID }), current.help?.id != helpID {
+            if let index = tasks.firstIndex(where: { $0.id == taskID }) { tasks[index] = current }
+            surfaceTaskHelp(taskID: taskID)
+            if current.status == .succeeded {
+                if current.kind == .signup { accountStates[current.siteID] = current.connectsExistingAccount ? .watching : .hasAccount }
+                if current.kind == .buildProfile { accountStates[current.siteID] = .watching }
+                recordTaskEvent(current)
+                appendChat(fromAgent: true, text: "That step finished successfully. You're all set.")
+            }
+            save()
+            return
+        }
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }),
+              tasks[index].prepareReply(helpID: helpID, answers: answers, approved: approved) else { return }
+        if !answers.isEmpty {
+            appendChat(fromAgent: false, text: answers.keys.sorted().compactMap { answers[$0] }.joined(separator: "\n"))
+        } else if approved {
+            appendChat(fromAgent: false, text: "Approve and continue.")
+        }
+        await approveAndRun(taskID: taskID)
+    }
+
+    func declineTaskHelp(taskID: UUID, helpID: UUID) async {
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].help?.id == helpID else { return }
+        if let id = tasks[index].backendTaskID {
+            do { try await backend.rejectTask(id: id) }
+            catch { appendChat(fromAgent: true, text: "I couldn't save that choice. Please try again."); return }
+        }
+        guard let current = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        tasks[current].status = .rejected
+        tasks[current].help = nil
+        appendChat(fromAgent: true, text: "Okay — I won't continue that step.")
+    }
+
+    var chatHelpTasks: [AgentTask] { tasks.filter { $0.needsChatHelp } }
 
     // MARK: - Sites & credentials
 
@@ -856,6 +919,7 @@ final class AppStore {
     }
 
     private func recordTaskEvent(_ task: AgentTask) {
+        if task.isSiteSetup && activityEvents.contains(where: { $0.id == task.id }) { return }
         let site = siteName(id: task.siteID)
         let listings = opportunities.filter { $0.siteID == task.siteID && !$0.isDemo }.count
         switch task.kind {
@@ -871,12 +935,12 @@ final class AppStore {
                                       detail: task.log.suffix(2).joined(separator: " "),
                                       siteID: task.siteID, listingsChecked: max(survey.listingsRead, listings)))
         case .signup:
-            recordEvent(ActivityEvent(kind: .joinedSite, sentence: "Set you up on \(site).", siteID: task.siteID))
+            recordEvent(ActivityEvent(id: task.id, kind: .joinedSite, sentence: task.connectsExistingAccount ? "Connected your \(site) account." : "Set you up on \(site).", siteID: task.siteID))
             recordFeedbackOnce(FeedbackEvent(subjectType: .signup, subjectId: task.siteID,
                                              action: .signupApproved,
                                              category: self.site(id: task.siteID)?.category))
         case .buildProfile:
-            recordEvent(ActivityEvent(kind: .profileLive, sentence: "Your \(site) profile is live.", siteID: task.siteID))
+            recordEvent(ActivityEvent(id: task.id, kind: .profileLive, sentence: "Your \(site) profile is live.", siteID: task.siteID))
             recordFeedbackOnce(FeedbackEvent(subjectType: .signup, subjectId: task.siteID,
                                              action: .profileConfirmed,
                                              category: self.site(id: task.siteID)?.category))
@@ -911,20 +975,36 @@ final class AppStore {
     @discardableResult
     func approveAndRun(taskID: UUID) async -> AgentTaskStatus? {
         guard !isPaused else { lastMessage = "Hygge is paused. Resume from your profile when you're ready."; return nil }
-        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return nil }
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }), !runningTaskIDs.contains(taskID) else { return nil }
+        let runAccountToken = backend.apiToken
+        runningTaskIDs.insert(taskID)
+        defer { runningTaskIDs.remove(taskID) }
         noteRunStarted()
         defer { noteRunFinished() }
         var finalStatus: AgentTaskStatus?
         do {
-            // A task paused at a human check resumes in its kept-open
-            // session; one still waiting on answers must go through
-            // answerInformation -> requestReapproval first.
-            if tasks[index].status == .needsHuman && tasks[index].informationRequests.isEmpty {
-                try tasks[index].resume()
-            } else {
-                try tasks[index].approve()
-            }
             var task = tasks[index]
+            if let reply = task.pendingReply {
+                // Legacy cached tasks have no stable backend ID yet. Carry their
+                // answers into the first durable task without another approval.
+                if task.backendTaskID == nil {
+                    for (question, answer) in reply.answers {
+                        let key = question.lowercased().contains("phone") ? "phone"
+                            : question.lowercased().contains("date of birth") ? "dateOfBirth" : "answer:" + question
+                        task.draftedPayload[key] = answer
+                    }
+                }
+                task.status = .approved
+            } else if task.status == .needsHuman || task.status == .failed {
+                surfaceTaskHelp(taskID: taskID)
+                conversationTaskID = taskID
+                save()
+                return task.status
+            } else {
+                try task.approve()
+            }
+            tasks[index].status = .running
+            save()
 
             if task.kind == .bookCalendar {
                 task = try localRunner.run(task, repository: &siteMemory)
@@ -932,9 +1012,15 @@ final class AppStore {
                     task.log.append("Added to your calendar.")
                 } else {
                     task.status = .needsHuman
+                    task.help = TaskHelp(kind: .verification,
+                        message: "I couldn't add this to your calendar. Check that calendar access is enabled, then I'll try again.",
+                        actionLabel: "Try calendar again")
                     task.log.append("Calendar permission not granted. Enable it for Hygge, then approve again.")
                 }
             } else if let result = try? await backend.runTask(task: task) {
+                task.backendTaskID = result.id
+                task.help = result.help
+                task.pendingReply = nil
                 task.browserTrace = result.browser_trace
                 // Kept-open session for a human check; nil when done.
                 task.browserSessionID = result.session_id
@@ -955,14 +1041,20 @@ final class AppStore {
                 }
             } else if BackendClient.requireCloud {
                 task.status = .failed
-                task.log.append("I could not reach Hygge just now, so I left this one alone. Nothing was sent.")
+                task.help = nil
+                task.pendingReply = nil
+                task.log.append("The connection was interrupted. Checking the existing task will recover its latest status.")
             } else {
                 task.log.append("Working offline for this one — I could not reach the live helper.")
                 task = try localRunner.run(task, repository: &siteMemory)
             }
 
+            guard backend.apiToken == runAccountToken,
+                  tasks.contains(where: { $0.id == taskID }) else { return nil }
             if task.status == .succeeded {
-                if task.kind == .signup { accountStates[task.siteID] = .hasAccount }
+                task.help = nil
+                task.pendingReply = nil
+                if task.kind == .signup { accountStates[task.siteID] = task.connectsExistingAccount ? .watching : .hasAccount }
                 if task.kind == .buildProfile { accountStates[task.siteID] = .watching }
                 recordTaskEvent(task)
             }
@@ -972,12 +1064,15 @@ final class AppStore {
                 }
                 setStatus(.applied, for: oppID)
             }
-            tasks[index] = task
+            guard let current = tasks.firstIndex(where: { $0.id == taskID }) else { return nil }
+            tasks[current] = task
+            surfaceTaskHelp(taskID: taskID)
             finalStatus = task.status
             if task.status == .needsHuman, task.kind == .signup {
                 accountStates[task.siteID] = .needsVerification
             }
-            lastMessage = task.status == .needsHuman ? "That step needs you — see the task log." : "Task finished: \(task.title)"
+            lastMessage = task.needsChatHelp ? "\(siteName(id: task.siteID)) needs your help in chat."
+                : task.status == .succeeded ? "Finished: \(task.title)" : "Working on \(siteName(id: task.siteID))…"
         } catch {
             lastMessage = "Could not run that task: \(error)"
         }
@@ -1100,7 +1195,7 @@ final class AppStore {
 
     /// Urgent decisions only. Optional site suggestions never inflate this.
     var needsYouCount: Int {
-        tasks.filter { $0.status == .awaitingApproval || $0.status == .needsHuman }.count
+        tasks.filter { $0.status == .awaitingApproval || $0.needsChatHelp }.count
     }
 
     /// Value waiting in pending drafts, for the calm header number.
@@ -1282,9 +1377,8 @@ final class AppStore {
         UserDefaults.standard.set(true, forKey: Self.backendFirstKey)
     }
 
-    /// Foreground/launch pull: server state replaces the cache (local
-    /// demo listings survive until a real item hides them; drafts in
-    /// `tasks` are untouched — live task records keep their own flow).
+    /// Foreground/launch pull: reconcile durable tasks and chat requests;
+    /// calls currently in flight on this device keep their local ownership.
     @discardableResult
     func pullFromServer() async -> Bool {
         guard isBackendFirst, !isSyncing else { return false }
@@ -1295,6 +1389,19 @@ final class AppStore {
         guard let export = try? await backend.exportState() else { return false }
         guard revisionBeforePull == profileEditRevision else { return false }
         applyServerExport(export)
+        if let remoteTasks = try? await backend.setupTasks() {
+            for task in remoteTasks where !runningTaskIDs.contains(task.id) {
+                let previous = tasks.first(where: { $0.id == task.id })?.status
+                if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
+                else { tasks.append(task) }
+                if task.status == .succeeded, previous != .succeeded {
+                    if task.kind == .signup { accountStates[task.siteID] = task.connectsExistingAccount ? .watching : .hasAccount }
+                    if task.kind == .buildProfile { accountStates[task.siteID] = .watching }
+                    if !activityEvents.contains(where: { $0.id == task.id }) { recordTaskEvent(task) }
+                }
+            }
+        }
+        for task in chatHelpTasks { surfaceTaskHelp(taskID: task.id) }
         await syncProfilePhoto()
         if let refs = try? await backend.listCredentialRefs() { credentialRefs = refs }
         if let memory = try? await backend.listSiteMemory(), !memory.memories.isEmpty {
