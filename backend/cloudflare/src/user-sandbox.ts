@@ -36,6 +36,10 @@ import {
   parseProbeJudgeReply, probeJudgePrompt, reprobeDue, snapshotEvidence,
   unknownAccessRecord, withdrawProposalsForSite, type Eligibility, type ProbeOutcome, type SiteAccessRecord,
 } from "./web-access.ts";
+import {
+  apnsConfigFromEnv, d1PushDb, needsHumanEvent, notifyUser, planTickNotifications,
+  shouldNotifyNeedsHuman, type PushEvent,
+} from "./push.ts";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const CONTAINER_IMAGE = "cloudflare/debian-trixie";
@@ -216,6 +220,31 @@ export class UserSandbox extends DurableObject<Env> {
       const reopen = categoriesToReopen(before, this.reopenSnapshot(store));
       if (reopen === "*" || reopen.length) this.scanStore().clearExhaustion(reopen);
     } catch { /* scan bookkeeping must never fail a state write */ }
+  }
+
+  /// Brief 07: deliver this user's push events (at most one per
+  /// caller by construction — see push.ts). Runs after the user's
+  /// own work is saved, honors the server pause flag, and can never
+  /// fail that work: every error is swallowed here and inside
+  /// notifyUser, where attempts are counted in D1 push_log.
+  private schedulePush(events: PushEvent[]) {
+    if (!this.userId || !events.length) return;
+    const userId = this.userId;
+    const deliver = async () => {
+      try {
+        const { isPaused } = extractProfile(this.stateStore().get("profile", PROFILE_ROW_ID)?.data);
+        const db = d1PushDb(this.env.DB);
+        const config = apnsConfigFromEnv(this.env);
+        for (const event of events) {
+          await notifyUser(db, config, userId, event, { isPaused });
+        }
+      } catch { /* push delivery must never fail user work */ }
+    };
+    try {
+      this.ctx.waitUntil(deliver());
+    } catch {
+      void deliver();
+    }
   }
 
   /// A working sign-in on a domain ends any scan login-failure
@@ -634,6 +663,7 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   private async runTask(task: any, browser: BrowserRunBrowser) {
+    const statusBeforeRun = String(task.status ?? "");
     const kind = MEMORY_KIND[task.kind] ?? "searchOpportunities";
     const domain = domainOf(task.target_url);
     const rows = [
@@ -761,6 +791,12 @@ export class UserSandbox extends DurableObject<Env> {
     // Brief 05: a mission that succeeded proves the sign-in works
     // again — end any scheduled-scan login-failure episode here.
     if (result.status === "succeeded") this.healScanEpisodes(domain);
+    // Brief 07: a fresh needsHuman entry (approval, human check, or
+    // information request) is push trigger #1. Scan missions are
+    // excluded — their episodes notify once per tick instead.
+    if (shouldNotifyNeedsHuman(statusBeforeRun, task.status, { scheduledScan: task.scheduled_scan === true })) {
+      this.schedulePush([needsHumanEvent(String(task.id))]);
+    }
     return task;
   }
 
@@ -1323,6 +1359,9 @@ export class UserSandbox extends DurableObject<Env> {
         const now = effectiveTickNow(body.now, request.headers.get("x-hygge-scheduled-sweep") === "1");
         const summary = await this.exclusive(() =>
           runScheduledTick(this.scanDeps(browser), { slot, now }));
+        // Brief 07: push trigger #2 — at most one push per tick
+        // (needs-you episode wins over new work; see push.ts).
+        this.schedulePush(planTickNotifications(summary));
         return json(summary);
       }
       if (request.method === "GET" && parts.join("/") === "scheduled-scan/status") {

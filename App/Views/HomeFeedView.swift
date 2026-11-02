@@ -31,10 +31,14 @@ struct HomeFeedView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
                     header
+                    if store.notificationPrimerVisible {
+                        notificationPrimer
+                    }
                     if store.isPaused {
                         pausedCard
                     } else {
                         consentZone
+                        highlightedWork
                         pinnedZone
                     }
                     journal
@@ -90,6 +94,12 @@ struct HomeFeedView: View {
             }
             .presentationDragIndicator(.visible)
         }
+        // A tapped "Hygge needs you" push opens that exact task.
+        .onChange(of: store.pendingTaskOpenID) { _, taskID in
+            guard let taskID, let task = store.tasks.first(where: { $0.id == taskID }) else { return }
+            store.pendingTaskOpenID = nil
+            editingTask = task
+        }
         .sheet(item: Binding(get: { reviewQueue.first },
                              set: { if $0 == nil, !reviewQueue.isEmpty { reviewQueue.removeFirst() } })) { task in
             NavigationStack {
@@ -101,6 +111,60 @@ struct HomeFeedView: View {
                         }
                     }
             }
+        }
+    }
+
+    /// The one permission ask (Brief 07): it appears only once
+    /// something worth telling the user about exists, and either
+    /// answer retires it for good.
+    private var notificationPrimer: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                FlameMark(size: 30)
+                Text("Want a word when something needs you?")
+                    .font(.system(.headline, design: .rounded, weight: .semibold))
+                    .foregroundStyle(HyggeTheme.ink)
+            }
+            Text("Hygge can let you know when something needs your OK, or when new work turns up while you are away. Nothing else, ever.")
+                .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+            HStack(spacing: 12) {
+                Button("Yes, let me know") { Task { await store.allowNotifications() } }
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 18).padding(.vertical, 11)
+                    .background(HyggeTheme.emberDeep, in: Capsule()).foregroundStyle(.white)
+                Button("Not now") { store.dismissNotificationPrimer() }
+                    .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
+            }
+        }
+        .padding(17).hyggeCard(radius: 24)
+    }
+
+    /// Where a tapped "New work found" push lands: the listing it
+    /// named, lifted to the top until the user acts on it.
+    @ViewBuilder
+    private var highlightedWork: some View {
+        if let id = store.highlightedOpportunityID,
+           let opportunity = store.opportunities.first(where: { $0.id == id && !$0.isDemo }) {
+            VStack(alignment: .leading, spacing: 12) {
+                tagLabel("New work", color: HyggeTheme.sageDeep)
+                HStack(alignment: .top, spacing: 13) {
+                    iconTile(categoryIcon(opportunity.category))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(opportunity.title)
+                            .font(.system(.headline, design: .rounded, weight: .semibold))
+                            .foregroundStyle(HyggeTheme.ink).lineLimit(2)
+                        Text("\(store.siteName(id: opportunity.siteID)) · \(opportunity.payLabel)")
+                            .font(.subheadline).foregroundStyle(HyggeTheme.secondary).lineLimit(2)
+                    }
+                    Spacer(minLength: 0)
+                }
+                approveButton("Draft an application") {
+                    store.draftApplication(for: opportunity)
+                    store.highlightedOpportunityID = nil
+                }
+                quietButton("Leave it in my feed") { store.highlightedOpportunityID = nil }
+            }
+            .padding(20).hyggeCard(radius: 26)
         }
     }
 

@@ -121,6 +121,17 @@ final class AppStore {
     var hyggeEmailAddress: HyggeEmailAddress?
     var filedEmailSummaries: [FiledEmailSummary] = []
 
+    /// Brief 07 push: the one-time Home primer (shown only after the
+    /// first thing worth telling the user about exists), plus where
+    /// a tapped notification should land. The device token itself is
+    /// kept only on this phone (UserDefaults) so sign-out can
+    /// unregister exactly it; it is never part of synced state.
+    var notificationPrimerVisible = false
+    var pendingTaskOpenID: UUID?
+    var highlightedOpportunityID: UUID?
+    static let pushTokenKey = "hyggePushTokenV1"
+    static let pushPrimerResolvedKey = "hyggePushPrimerResolvedV1"
+
     let backend = BackendClient()
     private let localRunner = SimulatedMissionRunner()
 
@@ -135,6 +146,12 @@ final class AppStore {
         isSignedIn = backend.hasSessionToken
         visitMarker = lastVisitAt ?? .distantPast
         lastVisitAt = Date()
+        // A token or a tap that arrives while running is drained
+        // straight away; cold-launch arrivals wait in PushInbox for
+        // the launch refresh in HyggeApp.
+        PushInbox.onArrival = { [weak self] in
+            Task { await self?.refreshPushState() }
+        }
     }
 
     var pendingApprovalCount: Int { tasks.filter { $0.status == .awaitingApproval }.count }
@@ -196,7 +213,111 @@ final class AppStore {
         isSignedIn = backend.hasSessionToken
     }
 
+    // MARK: - Push notifications (Brief 07)
+
+    /// Something exists that would have been worth a push: a card
+    /// waiting for the user, or real work found for them. This is
+    /// the primer's one trigger — never first launch, never
+    /// onboarding.
+    private var hasNotifiableEvent: Bool {
+        needsYouCount > 0 || hasRealServerFeedItem || opportunities.contains { !$0.isDemo }
+    }
+
+    func refreshNotificationPrimer() async {
+        notificationPrimerVisible = NotificationPrimerPolicy.shouldShowPrimer(
+            hasNotifiableEvent: hasNotifiableEvent,
+            primerAlreadyResolved: UserDefaults.standard.bool(forKey: Self.pushPrimerResolvedKey),
+            authorization: await PermissionService.notificationAuthorization(),
+            isSignedIn: isSignedIn)
+    }
+
+    /// The primer's yes (also the profile hub's turn-on button for
+    /// the still-undecided state). The primer is resolved either
+    /// way: Hygge asks once and never nags.
+    func allowNotifications() async {
+        UserDefaults.standard.set(true, forKey: Self.pushPrimerResolvedKey)
+        notificationPrimerVisible = false
+        if await PermissionService.requestNotifications() {
+            await refreshPushState()
+        }
+    }
+
+    func dismissNotificationPrimer() {
+        UserDefaults.standard.set(true, forKey: Self.pushPrimerResolvedKey)
+        notificationPrimerVisible = false
+    }
+
+    /// Drain delegate arrivals, keep registration in step with the
+    /// current permission answer, and refresh the primer. Called at
+    /// launch and on every foregrounding; all of it is idempotent.
+    func refreshPushState() async {
+        if let route = PushInbox.pendingRoute {
+            PushInbox.pendingRoute = nil
+            await handlePushRoute(route)
+        }
+        if let token = PushInbox.pendingTokenHex {
+            PushInbox.pendingTokenHex = nil
+            if DeviceTokenEncoding.isPlausible(token) {
+                UserDefaults.standard.set(token, forKey: Self.pushTokenKey)
+            }
+        }
+        if isSignedIn, let token = UserDefaults.standard.string(forKey: Self.pushTokenKey) {
+            switch await PermissionService.notificationAuthorization() {
+            case .authorized:
+                await backend.registerDeviceToken(token)
+            case .denied:
+                // Permission was taken away: stop sends to this phone.
+                // The local copy is dropped only once the server row
+                // is gone, so a failed unregister retries next launch.
+                if await backend.unregisterDeviceToken(token) {
+                    UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+                }
+            case .notDetermined:
+                break
+            }
+        }
+        await refreshNotificationPrimer()
+    }
+
+    /// A tapped notification lands on fresh state, then on the item
+    /// it named. Home is the only destination: a task opens its
+    /// detail sheet; a feed item is highlighted at the top of the
+    /// pinned zone's home feed (it was pulled just now).
+    func handlePushRoute(_ route: String) async {
+        await pullFromServer()
+        switch PushDeepLink.parse(route: route) {
+        case .task(let id):
+            if tasks.contains(where: { $0.id == id }) {
+                pendingTaskOpenID = id
+            } else {
+                lastMessage = "That one is already sorted. Everything waiting for you is below."
+            }
+        case .feedItem(let id):
+            highlightedOpportunityID = id
+            lastMessage = opportunities.contains { $0.id == id }
+                ? "Here is the new work that just turned up."
+                : "Fresh work is waiting in your feed below."
+        case .home:
+            break
+        }
+    }
+
     func signOut() async {
+        // Brief 07: this phone stops getting this account's pushes.
+        // Unregister while the session still works, then forget the
+        // token here too. The next account gets its own one primer.
+        if let token = UserDefaults.standard.string(forKey: Self.pushTokenKey),
+           await backend.unregisterDeviceToken(token) {
+            // Only forget it locally once the server row is gone;
+            // otherwise the next sign-in re-registers (reassigns) it.
+            UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+        }
+        UserDefaults.standard.removeObject(forKey: Self.pushPrimerResolvedKey)
+        PushInbox.pendingTokenHex = nil
+        PushInbox.pendingRoute = nil
+        notificationPrimerVisible = false
+        pendingTaskOpenID = nil
+        highlightedOpportunityID = nil
         await backend.signOut()
         isSignedIn = false
         // Wipe every per-user local trace: the next account on this
@@ -691,6 +812,9 @@ final class AppStore {
             lastMessage = "Could not run that task: \(error)"
         }
         save()
+        // A run that ends needing the user is the other first-
+        // notifiable-event moment for the primer.
+        await refreshNotificationPrimer()
         return finalStatus
     }
 
@@ -989,6 +1113,9 @@ final class AppStore {
             siteMemory = memory
         }
         writeCache()
+        // A pull can be the moment the first notifiable thing
+        // exists (a scan found work while the app was closed).
+        await refreshNotificationPrimer()
     }
 
     func applyServerExport(_ export: ServerExport) {

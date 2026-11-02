@@ -213,6 +213,40 @@ struct BackendClient {
         return response.messages
     }
 
+    // MARK: - Push notifications (Brief 07)
+    //
+    // The device token is registered for the signed-in user only;
+    // the session in the Authorization header is the identity, the
+    // token itself proves nothing. Registration is idempotent, so a
+    // refresh on every foregrounding is safe. Unregistering happens
+    // on sign-out, before the session goes away.
+
+    private struct DeviceTokenAck: Decodable { var registered: Bool? }
+    private struct DeviceTokenBody: Encodable { var token: String; var platform: String }
+
+    @discardableResult
+    func registerDeviceToken(_ token: String) async -> Bool {
+        guard DeviceTokenEncoding.isPlausible(token) else { return false }
+        let ack: DeviceTokenAck? = try? await post(
+            "device-tokens",
+            body: DeviceTokenBody(token: token.lowercased(), platform: "ios"))
+        return ack?.registered == true
+    }
+
+    @discardableResult
+    func unregisterDeviceToken(_ token: String) async -> Bool {
+        // Body-only: device tokens never travel in URL paths (logs).
+        var request = URLRequest(url: baseURL.appendingPathComponent("device-tokens"))
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        request.httpBody = try? JSONEncoder().encode(
+            DeviceTokenBody(token: token.lowercased(), platform: "ios"))
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return false }
+        return (200...299).contains(http.statusCode)
+    }
+
     private func delete(path: String) async -> Bool {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "DELETE"

@@ -21,6 +21,18 @@ enum PermissionService {
         }
         return granted
     }
+
+    /// The current notification answer, in the primer policy's
+    /// terms. Provisional/ephemeral grants count as allowed; the
+    /// primer itself is only ever for the undecided state.
+    static func notificationAuthorization() async -> NotificationAuthorizationKind {
+        let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        switch status {
+        case .authorized, .provisional, .ephemeral: return .authorized
+        case .denied: return .denied
+        default: return .notDetermined
+        }
+    }
 }
 
 @Observable
