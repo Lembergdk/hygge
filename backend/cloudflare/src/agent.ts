@@ -21,6 +21,7 @@
 // - Loop detection: same action+target+URL 3x -> escalate tier, then stop.
 // - Hard step budget; CAPTCHA/2FA/payment/ID -> needsHuman, never bypassed.
 import { selectTier, parseDecision, type LLMClient } from "./llm.ts";
+import { withSpan, clip, agentAttrs } from "./tracing.ts";
 import type { BrowserRunBrowser, Snapshot } from "./browser.ts";
 import { distillSkillDraft, outcomeForTaskKind, type SharedSkill, type SkillBody } from "./skills.ts";
 import { detectCheckpoint, probeAuthenticated, isRememberMeLabel } from "./session-profile.ts";
@@ -67,7 +68,7 @@ export class LLMDecider {
   async decide(ctx: any): Promise<any> {
     const tier = selectTier(this.client.cfg, ctx.tierContext);
     const text = await this.client.complete({
-      model: tier.model, system: SYSTEM,
+      model: tier.model, system: SYSTEM, conversationId: ctx.conversationId,
       user: JSON.stringify({
         mission: ctx.mission,
         plan: "No predefined steps. Decide from the page in front of you.",
@@ -266,18 +267,43 @@ export function emailCodeAllowedForTask(task: { scheduled_scan?: unknown } | nul
  * Run one mission to completion. Returns { status, trace, extractedItems, log }.
  * Statuses: succeeded | needs_human | failed (budget exhausted / looping).
  */
-export async function runMission({ browser, task, hints = [], hasCredential = false,
-                                   hasEmailCode = false, fillEmailCodeValue = null,
-                                   hasProfilePhoto = false, uploadProfilePhoto = null,
-                                   decider, fillCredentialValue, maxSteps = MAX_STEPS,
-                                   skill = null, skillCandidate = null,
-                                   existingSessionID = null, restoreState = null }: {
+export async function runMission(opts: {
   browser: any; task: any; hints?: string[]; hasCredential?: boolean;
   hasEmailCode?: boolean; fillEmailCodeValue?: any;
   hasProfilePhoto?: boolean; uploadProfilePhoto?: any;
   decider: any; fillCredentialValue?: any; maxSteps?: number;
   skill?: SharedSkill | null; skillCandidate?: { body: SkillBody } | null;
   existingSessionID?: string | null; restoreState?: any;
+  traceAgentId?: string; tracePayloads?: boolean;
+}): Promise<any> {
+  const task: any = opts.task;
+  const agentId = opts.traceAgentId ?? "hygge-dev";
+  return withSpan("invoke_agent hygge-browser-agent", {
+    "gen_ai.operation.name": "invoke_agent",
+    ...agentAttrs("hygge-browser-agent", agentId, task.id ? String(task.id) : null),
+    "hygge.task.kind": String(task.kind ?? ""),
+    "hygge.task.target_url": String(task.target_url ?? ""),
+  }, async (span) => {
+    const result = await runMissionInner(opts);
+    span.setAttribute("hygge.mission.status", String(result?.status ?? ""));
+    return result;
+  });
+}
+
+async function runMissionInner({ browser, task, hints = [], hasCredential = false,
+                                   hasEmailCode = false, fillEmailCodeValue = null,
+                                   hasProfilePhoto = false, uploadProfilePhoto = null,
+                                   decider, fillCredentialValue, maxSteps = MAX_STEPS,
+                                   skill = null, skillCandidate = null,
+                                   existingSessionID = null, restoreState = null,
+                                   tracePayloads = false }: {
+  browser: any; task: any; hints?: string[]; hasCredential?: boolean;
+  hasEmailCode?: boolean; fillEmailCodeValue?: any;
+  hasProfilePhoto?: boolean; uploadProfilePhoto?: any;
+  decider: any; fillCredentialValue?: any; maxSteps?: number;
+  skill?: SharedSkill | null; skillCandidate?: { body: SkillBody } | null;
+  existingSessionID?: string | null; restoreState?: any;
+  tracePayloads?: boolean;
 }): Promise<any> {
   if (!profilePhotoAllowedForTask(task)) {
     hasProfilePhoto = false;
@@ -360,6 +386,7 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
     let decision: any;
     try {
       decision = await decider.decide({
+        conversationId: task.id ? String(task.id) : undefined,
         mission: task.goal, taskKind: task.kind, draft: task.drafted_payload,
         hints, hasCredential, hasEmailCode, hasProfilePhoto, snapshot, history: trace,
         skill, skillCandidate, authoringMode, site,
@@ -412,7 +439,18 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
     }
     let result: any;
     try {
-      result = await execute({ browser, sessionID: snap.sessionID, decision, task, fillCredentialValue, fillEmailCodeValue, uploadProfilePhoto });
+      result = await withSpan(`execute_tool ${decision.action}`, {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.name": String(decision.action),
+        ...(tracePayloads ? {
+          "gen_ai.tool.call.arguments": clip(JSON.stringify({ target: decision.target ?? "", valueRef: decision.valueRef ?? null, reason: decision.reason ?? "" })),
+        } : {}),
+      }, async (toolSpan) => {
+        const r = await execute({ browser, sessionID: snap.sessionID, decision, task, fillCredentialValue, fillEmailCodeValue, uploadProfilePhoto });
+        toolSpan.setAttribute("hygge.tool.succeeded", Boolean(r?.succeeded));
+        if (tracePayloads) toolSpan.setAttribute("gen_ai.tool.call.result", clip(String(r?.summary ?? "")));
+        return r;
+      });
     } catch (e: any) {
       result = { succeeded: false, summary: `Action failed (deviation): ${e.message.slice(0, 140)}` };
     }
