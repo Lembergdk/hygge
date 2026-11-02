@@ -117,7 +117,7 @@ struct SignInCard: View {
                 onSignedIn()
             }
         } catch {
-            store.magicLinkError = "That link has expired. Ask for a new one below."
+            store.magicLinkError = AuthCopy.message(for: error)
             message = nil
         }
     }
@@ -251,7 +251,16 @@ struct LoginMethodsContent: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(HyggeTheme.emberDeep)
         }
-        .task { await load() }
+        .task {
+            await load()
+            // A link tapped before this section appeared (cold
+            // launch straight to Home): consume it now instead of
+            // stranding it until some later, unrelated change.
+            if let token = store.pendingMagicToken {
+                store.pendingMagicToken = nil
+                await consumeLink(token)
+            }
+        }
         .onChange(of: store.pendingMagicToken) { _, token in
             guard let token else { return }
             store.pendingMagicToken = nil
@@ -285,7 +294,7 @@ struct LoginMethodsContent: View {
                 store.magicLinkError = nil
             }
         } catch {
-            store.magicLinkError = "That link has expired. Ask for a new one below."
+            store.magicLinkError = AuthCopy.message(for: error)
         }
     }
 

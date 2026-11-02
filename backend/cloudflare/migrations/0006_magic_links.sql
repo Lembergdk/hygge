@@ -13,3 +13,19 @@ CREATE TABLE IF NOT EXISTS magic_link_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_email_created
   ON magic_link_tokens(email, created_at);
+
+-- Per-requester abuse cap for link requests: one row per plausible
+-- request, keyed by a SHA-256 of the client address (never the raw
+-- address), so one sender cannot mail unlimited inboxes.
+CREATE TABLE IF NOT EXISTS magic_link_requests (
+  id         TEXT PRIMARY KEY,
+  ip_hash    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_magic_link_requests_ip_created
+  ON magic_link_requests(ip_hash, created_at);
+
+-- Password sign-in is gone: no dormant password hashes stay at rest,
+-- and the password-throttle table has no remaining reader.
+UPDATE linked_methods SET password_hash = NULL WHERE password_hash IS NOT NULL;
+DROP TABLE IF EXISTS auth_attempts;

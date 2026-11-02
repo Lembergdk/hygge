@@ -69,9 +69,29 @@ const SYSTEM = [
   "facts they did not state; hourlyRateFloor is a number or null.",
 ].join(" ");
 
+const MAX_TRANSCRIPT_ITEM_CHARS = 1000;
+const MAX_TRANSCRIPT_TOTAL_CHARS = 8000;
+
+/// Bound what any caller — including the unauthenticated preview
+/// routes — can make the model read: each message is clipped, then
+/// the newest messages are kept within one total budget.
+function capTranscriptText(transcript: any[] = []): string {
+  const lines = transcript.map(
+    (m: any) => `${m.fromAgent ? "Agent" : "User"}: ${String(m.text ?? "").slice(0, MAX_TRANSCRIPT_ITEM_CHARS)}`,
+  );
+  const kept: string[] = [];
+  let total = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    total += lines[i].length + 1;
+    if (total > MAX_TRANSCRIPT_TOTAL_CHARS && kept.length > 0) break;
+    kept.unshift(lines[i]);
+  }
+  return kept.join("\n");
+}
+
 export async function onboardingMessage({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "" }: any) {
   const objective = OBJECTIVES[step] ?? OBJECTIVES.welcome;
-  const transcriptText = transcript.map((m: any) => `${m.fromAgent ? "Agent" : "User"}: ${m.text}`).join("\n");
+  const transcriptText = capTranscriptText(transcript);
   if (!client.configured) {
     return { reply: FALLBACK_REPLIES[step] ?? FALLBACK_REPLIES.welcome, extracted: {},
              ...heuristicSuggestions(transcriptText), simulated: true };
@@ -168,7 +188,7 @@ function normalizeParsed(parsed: any, simulated: boolean) {
  */
 export async function onboardingMessageStream({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "" }: any, emit: (e: unknown) => void) {
   const objective = OBJECTIVES[step] ?? OBJECTIVES.welcome;
-  const transcriptText = transcript.map((m: any) => `${m.fromAgent ? "Agent" : "User"}: ${m.text}`).join("\n");
+  const transcriptText = capTranscriptText(transcript);
   const fallback = () => ({ reply: FALLBACK_REPLIES[step] ?? FALLBACK_REPLIES.welcome,
                             extracted: {}, ...heuristicSuggestions(transcriptText), simulated: true });
   const streamOut = async (result: any) => {

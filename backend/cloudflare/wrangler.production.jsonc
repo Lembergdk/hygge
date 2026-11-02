@@ -38,7 +38,8 @@
     "HYGGE_MAGIC_BASE_URL": "https://api.usehygge.app",
     // Brief 04 receive-only email domain. Email Routing (MX +
     // catch-all to this worker) is a dashboard step — see
-    // docs/email-usehygge-cc.md. No send binding exists.
+    // docs/email-usehygge-cc.md. The only send binding is the
+    // magic-link EMAIL sender below (login@usehygge.app).
     "HYGGE_EMAIL_DOMAIN": "usehygge.cc",
     // Brief 07: Release builds hold production APNs tokens. The .p8
     // key is a secret (HYGGE_APNS_KEY_P8) and the key/team ids are

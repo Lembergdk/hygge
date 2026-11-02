@@ -77,12 +77,31 @@ struct BackendClient {
 
     var hasSessionToken: Bool { !apiToken.isEmpty }
 
-    func setSessionToken(_ token: String) {
+    /// Which account the current session belongs to, and which one
+    /// it replaced. Opaque ids only (never the token), so sign-in
+    /// can tell a same-account return from a different account
+    /// arriving on a device that still caches the previous one.
+    private static let sessionUserIDKey = "auth.sessionUserID"
+    private static let previousSessionUserIDKey = "auth.previousSessionUserID"
+    var sessionUserID: String? { UserDefaults.standard.string(forKey: Self.sessionUserIDKey) }
+    var previousSessionUserID: String? { UserDefaults.standard.string(forKey: Self.previousSessionUserIDKey) }
+
+    func setSessionToken(_ token: String, userID: String? = nil) {
+        if let userID {
+            if let current = sessionUserID {
+                UserDefaults.standard.set(current, forKey: Self.previousSessionUserIDKey)
+            }
+            UserDefaults.standard.set(userID, forKey: Self.sessionUserIDKey)
+        }
         _ = KeychainTokenStore.write(token)
         UserDefaults.standard.removeObject(forKey: SessionTokenStorage.legacyUserDefaultsKey)
     }
 
     func clearSessionToken() {
+        if let current = sessionUserID {
+            UserDefaults.standard.set(current, forKey: Self.previousSessionUserIDKey)
+        }
+        UserDefaults.standard.removeObject(forKey: Self.sessionUserIDKey)
         KeychainTokenStore.clear()
         UserDefaults.standard.removeObject(forKey: SessionTokenStorage.legacyUserDefaultsKey)
     }
@@ -487,7 +506,7 @@ struct BackendClient {
         let session: AuthSessionResponse = try await authRequest(
             "auth/apple", method: "POST",
             body: AppleBody(identityToken: identityToken, nonce: nonce, displayName: displayName))
-        setSessionToken(session.token)
+        setSessionToken(session.token, userID: session.userId)
         return session
     }
 
@@ -512,7 +531,7 @@ struct BackendClient {
             "auth/email/consume", method: "POST",
             body: MagicConsumeBody(token: token))
         if let sessionToken = response.token {
-            setSessionToken(sessionToken)
+            setSessionToken(sessionToken, userID: response.userId)
             return nil
         }
         return response.methods ?? []

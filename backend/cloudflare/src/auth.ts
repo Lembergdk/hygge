@@ -14,6 +14,7 @@ import { json, userIdFromRequest } from "./env.ts";
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, then sign in again
 export const MAGIC_LINK_TTL_MS = 15 * 60 * 1000; // 15 minutes
 export const MAGIC_LINK_MAX_SENDS_PER_HOUR = 5;
+export const MAGIC_LINK_MAX_REQUESTS_PER_IP_PER_HOUR = 20;
 export const MAGIC_LINK_FROM = "Hygge <login@usehygge.app>";
 const APPLE_ISSUER = "https://appleid.apple.com";
 const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
@@ -206,6 +207,10 @@ export interface AuthDb {
   findMagicLinkByHash(tokenHash: string): Promise<MagicLinkRow | null>;
   invalidateMagicLinks(email: string, at: string): Promise<void>;
   countMagicLinksSince(email: string, since: string): Promise<number>;
+  /// Per-requester abuse cap: requests are counted by a SHA-256 of
+  /// the client address (the raw address is never stored).
+  countMagicRequestsByIpSince(ipHash: string, since: string): Promise<number>;
+  recordMagicRequest(ipHash: string, at: string): Promise<void>;
   /// Atomic single-use: true exactly once per token.
   consumeMagicLink(tokenHash: string, at: string): Promise<boolean>;
 }
@@ -331,6 +336,20 @@ export function d1AuthDb(db: D1Database): AuthDb {
         since,
       );
       return Number(r?.n ?? 0);
+    },
+    async countMagicRequestsByIpSince(ipHash, since) {
+      const r = await one(
+        "SELECT COUNT(*) AS n FROM magic_link_requests WHERE ip_hash = ?1 AND created_at >= ?2",
+        ipHash,
+        since,
+      );
+      return Number(r?.n ?? 0);
+    },
+    async recordMagicRequest(ipHash, at) {
+      await db
+        .prepare("INSERT INTO magic_link_requests (id, ip_hash, created_at) VALUES (?1,?2,?3)")
+        .bind(crypto.randomUUID(), ipHash, at)
+        .run();
     },
     async consumeMagicLink(tokenHash, at) {
       const result = await db
@@ -460,6 +479,15 @@ export interface RequestMagicLinkOptions {
   nowMs?: number;
   baseUrl?: string;
   send?: MagicEmailSender;
+  /// SHA-256 of the requesting client address, for the per-IP cap.
+  requesterHash?: string | null;
+}
+
+/// The requester key for rate limits: a hash of the client address
+/// Cloudflare saw. The raw address itself is never stored or logged.
+export async function requesterHashFrom(request: Request): Promise<string | null> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return ip ? sha256Hex(ip) : null;
 }
 
 /// The whole message: one calm link, no other user data. The raw token
@@ -494,6 +522,14 @@ export async function requestMagicLink(
   const email = normalizeEmail(rawEmail ?? "");
   if (!isPlausibleEmail(email)) return;
   const since = new Date(nowMs - 60 * 60 * 1000).toISOString();
+  // Per-requester cap first: without it this endpoint could send
+  // five mails an hour to unlimited inboxes from our sender domain.
+  // Every plausible request counts, sent or not; the generic answer
+  // never reveals which cap (if any) stopped a send.
+  if (opts.requesterHash) {
+    if ((await db.countMagicRequestsByIpSince(opts.requesterHash, since)) >= MAGIC_LINK_MAX_REQUESTS_PER_IP_PER_HOUR) return;
+    await db.recordMagicRequest(opts.requesterHash, new Date(nowMs).toISOString());
+  }
   if ((await db.countMagicLinksSince(email, since)) >= MAGIC_LINK_MAX_SENDS_PER_HOUR) return;
   const now = new Date(nowMs).toISOString();
   await db.invalidateMagicLinks(email, now);
@@ -745,6 +781,7 @@ export async function handleAuthRequest(
         nowMs: opts.nowMs,
         baseUrl: env.HYGGE_MAGIC_BASE_URL,
         send: opts.sendMagicEmail ?? bindingSend,
+        requesterHash: await requesterHashFrom(request),
       });
       return json({ ok: true, message: MAGIC_REQUEST_OK });
     }

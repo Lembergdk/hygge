@@ -243,30 +243,63 @@ final class AppStore {
         refreshAuthState()
         wantsSignIn = false
         magicLinkError = nil
-        let localComplete = localProfile?.isComplete ?? profile.isComplete
-        if !isBackendFirst, let counts = try? await backend.stateCounts(), counts.total > 0 {
+        // Identity safety: if the session just issued belongs to a
+        // different account than the one cached on this device, the
+        // local snapshot is the previous account's and nothing from
+        // it may be imported or pushed. Onboarding answers handed
+        // in by this run of the flow are the one exception — they
+        // belong to the person who just answered them.
+        let differentAccount = backend.previousSessionUserID != nil
+            && backend.sessionUserID != nil
+            && backend.previousSessionUserID != backend.sessionUserID
+        if differentAccount {
+            pushTask?.cancel()
+            pushTask = nil
+            isBackendFirst = false
+            UserDefaults.standard.removeObject(forKey: Self.backendFirstKey)
+            hasRealServerFeedItem = false
+            pendingCredentialSave = nil
+            sessionProfileRefs = []
+            resetLocalState()
+            if let url = storeURL { try? FileManager.default.removeItem(at: url) }
+            writeCache()
+        }
+        let answers = localProfile ?? profile
+        let localComplete = answers.isComplete
+        // The account probe is part of finishing: if it cannot run,
+        // stay on the sign-in step with a clear message rather than
+        // completing onboarding from the local cache and pushing it
+        // over an unseen server account.
+        guard let counts = try? await backend.stateCounts() else {
+            magicLinkError = "You're signed in, but your account wouldn't load just now. Try your sign-in again in a moment."
+            return
+        }
+        if counts.total > 0 {
             // The account already lives on the server: adopt first,
-            // decide from its real profile.
+            // decide from its real profile. A failed pull decides
+            // nothing — never fall back to the local copy.
             markBackendFirst(hasReal: counts.hasRealFeedItem)
-            await pullFromServer()
+            guard await pullFromServer() else {
+                magicLinkError = "You're signed in, but your account wouldn't load just now. Try your sign-in again in a moment."
+                return
+            }
             switch SignInCompletion.decide(serverHasState: true,
                                            serverHasOnboarded: hasOnboarded,
                                            localProfileComplete: localComplete) {
             case .adoptServerState:
                 return // straight Home on the account's own state
             case .completeOnboardingAndImport:
-                completeOnboarding(profile: localProfile ?? profile)
+                completeOnboarding(profile: answers)
                 return
             case .continueOnboarding:
                 return
             }
         }
-        // Fresh account (or the count probe could not run): finish
-        // locally when the answers are complete, then run the
-        // one-time import, which itself refuses to overwrite a
-        // server that already has state.
+        // Fresh account: finish locally when the answers are
+        // complete, then run the one-time import, which itself
+        // refuses to overwrite a server that already has state.
         if localComplete {
-            completeOnboarding(profile: localProfile ?? profile)
+            completeOnboarding(profile: answers)
         }
         await syncOnLaunch()
     }
@@ -1164,11 +1197,12 @@ final class AppStore {
     /// Foreground/launch pull: server state replaces the cache (local
     /// demo listings survive until a real item hides them; drafts in
     /// `tasks` are untouched — live task records keep their own flow).
-    func pullFromServer() async {
-        guard isBackendFirst, !isSyncing else { return }
+    @discardableResult
+    func pullFromServer() async -> Bool {
+        guard isBackendFirst, !isSyncing else { return false }
         isSyncing = true
         defer { isSyncing = false }
-        guard let export = try? await backend.exportState() else { return }
+        guard let export = try? await backend.exportState() else { return false }
         applyServerExport(export)
         if let refs = try? await backend.listCredentialRefs() { credentialRefs = refs }
         if let memory = try? await backend.listSiteMemory(), !memory.memories.isEmpty {
@@ -1178,6 +1212,7 @@ final class AppStore {
         // A pull can be the moment the first notifiable thing
         // exists (a scan found work while the app was closed).
         await refreshNotificationPrimer()
+        return true
     }
 
     func applyServerExport(_ export: ServerExport) {

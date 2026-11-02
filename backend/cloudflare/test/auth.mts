@@ -70,6 +70,13 @@ class MemDb {
   async revokeAllSessions(userId: string, revokedAt: string) {
     for (const s of this.sessions.values()) if (s.userId === userId && !s.revokedAt) s.revokedAt = revokedAt;
   }
+  magicRequests: Array<{ ipHash: string; at: string }> = [];
+  async countMagicRequestsByIpSince(ipHash: string, since: string) {
+    return this.magicRequests.filter((r) => r.ipHash === ipHash && r.at >= since).length;
+  }
+  async recordMagicRequest(ipHash: string, at: string) {
+    this.magicRequests.push({ ipHash, at });
+  }
   async createMagicLink(row: MagicLinkRow) {
     this.magic.set(row.tokenHash, row);
   }
@@ -443,4 +450,22 @@ test("http: password routes are gone", async () => {
     const res = await post(path, { email: "sam@example.com", password: "whatever whatever" });
     assert.equal(res.status, 404, path);
   }
+});
+
+test("magic link requests are capped per requester, not just per inbox", async () => {
+  const { MAGIC_LINK_MAX_REQUESTS_PER_IP_PER_HOUR } = await import("../src/auth.ts");
+  const db = new MemDb();
+  const sent: unknown[] = [];
+  const send = async (m: unknown) => { sent.push(m); };
+  const baseUrl = "https://api-staging.usehygge.app";
+  // One requester, many different inboxes: each is under the per-inbox
+  // cap, so only the per-requester cap can stop the flood.
+  for (let i = 0; i < MAGIC_LINK_MAX_REQUESTS_PER_IP_PER_HOUR; i++) {
+    await requestMagicLink(db, `person${i}@example.com`, { send, baseUrl, requesterHash: "ip-a" });
+  }
+  assert.equal(sent.length, MAGIC_LINK_MAX_REQUESTS_PER_IP_PER_HOUR);
+  await requestMagicLink(db, "one-more@example.com", { send, baseUrl, requesterHash: "ip-a" });
+  assert.equal(sent.length, MAGIC_LINK_MAX_REQUESTS_PER_IP_PER_HOUR, "capped requester sends nothing more");
+  await requestMagicLink(db, "one-more@example.com", { send, baseUrl, requesterHash: "ip-b" });
+  assert.equal(sent.length, MAGIC_LINK_MAX_REQUESTS_PER_IP_PER_HOUR + 1, "a different requester is unaffected");
 });
