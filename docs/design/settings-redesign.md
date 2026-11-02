@@ -11,8 +11,12 @@ and a swipe-to-dismiss sheet with no close button or repeated “You” title.
   minimum rate. Valid edits save locally immediately and use the existing
   debounced cloud import. Pending edits survive relaunch and cannot be replaced
   by a stale profile pull; failures expose a retry action.
-- The profile photo is downsampled and stored only in the device's account cache.
-  It is cleared on sign-out/account change and is not synced to other devices.
+- The profile photo is downsampled, saved in private server storage and cached
+  on-device. It syncs across signed-in devices and is available to the browsing
+  agent for approved signup/profile tasks. Sign-out clears the local cache;
+  the account photo remains on the server. Failed uploads stay pending with a
+  retry action. Legacy device-only photos migrate without replacing an existing
+  server photo.
 - Invite: the gift button opens an editable invitation, copy link and native
   share sheet. No message is sent until the user chooses a recipient and sends.
 - Your logins: connected methods and the existing Apple/email linking flows.

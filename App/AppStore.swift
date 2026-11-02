@@ -20,6 +20,8 @@ struct StoreSnapshot: Codable {
     }
     var profile: EarningsProfile
     var profilePhotoData: Data? = nil
+    var profilePhotoNeedsUpload = false
+    var profilePhotoIsLegacy = false
     var pendingProfileEdit: Bool = false
     var hasOnboarded: Bool
     var sites: [TargetSite]
@@ -45,6 +47,8 @@ struct StoreSnapshot: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         profile = try c.decodeIfPresent(EarningsProfile.self, forKey: .profile) ?? EarningsProfile()
         profilePhotoData = try c.decodeIfPresent(Data.self, forKey: .profilePhotoData)
+        profilePhotoNeedsUpload = try c.decodeIfPresent(Bool.self, forKey: .profilePhotoNeedsUpload) ?? (profilePhotoData != nil)
+        profilePhotoIsLegacy = try c.decodeIfPresent(Bool.self, forKey: .profilePhotoIsLegacy) ?? (profilePhotoData != nil)
         pendingProfileEdit = try c.decodeIfPresent(Bool.self, forKey: .pendingProfileEdit) ?? false
         hasOnboarded = try c.decodeIfPresent(Bool.self, forKey: .hasOnboarded) ?? false
         sites = try c.decodeIfPresent([TargetSite].self, forKey: .sites) ?? SeedSites.all
@@ -66,11 +70,19 @@ struct StoreSnapshot: Codable {
     }
 }
 
+@MainActor
 @Observable
 final class AppStore {
     var profile = EarningsProfile()
-    // Photo is device-local, kept in the account cache and removed at sign-out.
+    // Server-owned photo with an offline cache and durable pending upload.
     var profilePhotoData: Data?
+    private(set) var profilePhotoNeedsUpload = false
+    private var profilePhotoIsLegacy = false
+    private(set) var profilePhotoSyncError: String?
+    private(set) var isSyncingProfilePhoto = false
+    private var profilePhotoRevision = 0
+    private var profilePhotoAccountEpoch = 0
+    @ObservationIgnored private var photoSyncTask: Task<Void, Never>?
     private(set) var pendingProfileEdit = false
     private var profileEditRevision = 0
     var hasOnboarded = false
@@ -995,6 +1007,14 @@ final class AppStore {
     private func resetLocalState() {
         profile = EarningsProfile()
         profilePhotoData = nil
+        profilePhotoNeedsUpload = false
+        profilePhotoIsLegacy = false
+        profilePhotoSyncError = nil
+        profilePhotoRevision += 1
+        profilePhotoAccountEpoch += 1
+        photoSyncTask?.cancel()
+        photoSyncTask = nil
+        isSyncingProfilePhoto = false
         pendingProfileEdit = false
         profileEditRevision += 1
         hyggeEmailAddress = nil
@@ -1237,6 +1257,7 @@ final class AppStore {
         guard let export = try? await backend.exportState() else { return false }
         guard revisionBeforePull == profileEditRevision else { return false }
         applyServerExport(export)
+        await syncProfilePhoto()
         if let refs = try? await backend.listCredentialRefs() { credentialRefs = refs }
         if let memory = try? await backend.listSiteMemory(), !memory.memories.isEmpty {
             siteMemory = memory
@@ -1332,7 +1353,77 @@ final class AppStore {
 
     func setProfilePhoto(_ data: Data?) {
         profilePhotoData = data
+        profilePhotoRevision += 1
+        profilePhotoNeedsUpload = true
+        profilePhotoIsLegacy = false
+        profilePhotoSyncError = nil
         writeCache()
+        Task { await syncProfilePhoto() }
+    }
+
+    /// Serialize uploads so rapid photo selections cannot arrive out of order.
+    /// Edits during a fetch/upload are handled by the next loop iteration.
+    func syncProfilePhoto() async {
+        if let photoSyncTask { await photoSyncTask.value; return }
+        guard backend.hasSessionToken else { return }
+        let epoch = profilePhotoAccountEpoch
+        let task = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.performPhotoSync(epoch: epoch)
+            if epoch == self.profilePhotoAccountEpoch { self.photoSyncTask = nil }
+        }
+        photoSyncTask = task
+        await task.value
+    }
+
+    private func performPhotoSync(epoch: Int) async {
+        isSyncingProfilePhoto = true
+        defer { if epoch == profilePhotoAccountEpoch { isSyncingProfilePhoto = false } }
+        let userID = backend.sessionUserID
+        let token = backend.apiToken
+        func stillCurrent() -> Bool {
+            !Task.isCancelled && epoch == profilePhotoAccountEpoch &&
+                backend.sessionUserID == userID && backend.apiToken == token
+        }
+        while stillCurrent() {
+            let revision = profilePhotoRevision
+            do {
+                if profilePhotoNeedsUpload {
+                    if let data = profilePhotoData {
+                        let uploaded = try await backend.uploadProfilePhoto(data, onlyIfMissing: profilePhotoIsLegacy)
+                        guard stillCurrent() else { return }
+                        guard revision == profilePhotoRevision else { continue }
+                        if !uploaded {
+                            let remote = try await backend.fetchProfilePhoto()
+                            guard stillCurrent() else { return }
+                            guard revision == profilePhotoRevision else { continue }
+                            profilePhotoData = remote
+                        }
+                    } else {
+                        try await backend.removeProfilePhoto()
+                        guard stillCurrent() else { return }
+                        guard revision == profilePhotoRevision else { continue }
+                    }
+                    profilePhotoNeedsUpload = false
+                    profilePhotoIsLegacy = false
+                } else {
+                    let remote = try await backend.fetchProfilePhoto()
+                    guard stillCurrent() else { return }
+                    guard revision == profilePhotoRevision else { continue }
+                    profilePhotoData = remote
+                }
+                profilePhotoSyncError = nil
+                writeCache()
+                return
+            } catch {
+                guard stillCurrent() else { return }
+                if revision != profilePhotoRevision { continue }
+                profilePhotoSyncError = profilePhotoNeedsUpload
+                    ? "Your photo is saved on this phone. Upload it when you’re connected so Hygge can use it."
+                    : "Your photo couldn’t be refreshed just now."
+                return
+            }
+        }
     }
 
     func retryProfileSync() async { await pushStateNow() }
@@ -1362,6 +1453,8 @@ final class AppStore {
                                      proposals: proposals, accountStates: accountStates,
                                      chatTranscript: chatTranscript, activityEvents: activityEvents, isPaused: isPaused, lastVisitAt: lastVisitAt, beliefs: beliefs, searchEvidence: searchEvidence, feedbackEvents: feedbackEvents, learningProfile: learningProfile)
         snapshot.profilePhotoData = profilePhotoData
+        snapshot.profilePhotoNeedsUpload = profilePhotoNeedsUpload
+        snapshot.profilePhotoIsLegacy = profilePhotoIsLegacy
         snapshot.pendingProfileEdit = pendingProfileEdit
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -1373,6 +1466,8 @@ final class AppStore {
               let snapshot = try? JSONDecoder().decode(StoreSnapshot.self, from: data) else { return false }
         profile = snapshot.profile
         profilePhotoData = snapshot.profilePhotoData
+        profilePhotoNeedsUpload = snapshot.profilePhotoNeedsUpload
+        profilePhotoIsLegacy = snapshot.profilePhotoIsLegacy
         pendingProfileEdit = snapshot.pendingProfileEdit
         hasOnboarded = snapshot.hasOnboarded
         sites = snapshot.sites

@@ -4,6 +4,7 @@ import { json } from "./env.ts";
 import { LLMClient, type LLMConfig } from "./llm.ts";
 import { onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { BrowserRunBrowser } from "./browser.ts";
+import { handleProfilePhoto, profilePhotoAllowedForTask, type ProfilePhoto, type ProfilePhotoStore } from "./profile-photo.ts";
 import { makeDecider, runMission, distillHints, emailCodeAllowedForTask } from "./agent.ts";
 import * as vault from "./vault.ts";
 import { PROFILE_ROW_ID, STATE_ROUTES, StateStore, createSqliteStateDb, ensureStateSchema, normalizeId } from "./state.ts";
@@ -123,6 +124,7 @@ export class UserSandbox extends DurableObject<Env> {
     }
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS profile_photo (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS credentials (
         id TEXT PRIMARY KEY, domain TEXT NOT NULL, username TEXT NOT NULL,
         iv TEXT NOT NULL, ciphertext TEXT NOT NULL,
@@ -724,6 +726,14 @@ export class UserSandbox extends DurableObject<Env> {
     const trust = this.trustSupport(domain);
     const restoreState = trust === "unsupported" ? null : await this.loadSessionState(domain);
 
+    const photoStore = this.profilePhotoStore();
+    const hasProfilePhoto = profilePhotoAllowedForTask(task) && photoStore.read() !== null;
+    const uploadProfilePhoto = async (target: string, sessionID: string) => {
+      if (!profilePhotoAllowedForTask(task)) throw new Error("profile photo requires an approved profile task");
+      const photo = photoStore.read();
+      if (!photo) throw new Error("profile photo is no longer available");
+      await browser.uploadProfilePhoto(sessionID, target, photo.base64, task.target_url);
+    };
     const decider = makeDecider(new LLMClient(this.llmConfig()));
     const result = await runMission({
       browser,
@@ -733,6 +743,8 @@ export class UserSandbox extends DurableObject<Env> {
       fillCredentialValue,
       fillEmailCodeValue,
       hasEmailCode,
+      hasProfilePhoto,
+      uploadProfilePhoto,
       hasCredential: Boolean(task.credential_id),
       skill: activeSkill,
       skillCandidate,
@@ -1146,11 +1158,25 @@ export class UserSandbox extends DurableObject<Env> {
 
   // ---- routes ---------------------------------------------------
 
+  private profilePhotoStore(): ProfilePhotoStore {
+    const sql = this.ctx.storage.sql;
+    return {
+      read: () => {
+        const rows = [...sql.exec("SELECT value FROM profile_photo WHERE id = 1")];
+        return rows.length ? JSON.parse(String(rows[0].value)) as ProfilePhoto : null;
+      },
+      write: (photo) => { sql.exec("INSERT INTO profile_photo (id, value) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET value = excluded.value", JSON.stringify(photo)); },
+      remove: () => { sql.exec("DELETE FROM profile_photo WHERE id = 1"); },
+    };
+  }
+
   async fetch(request: Request): Promise<Response> {
     this.userId = request.headers.get("x-hygge-user-id") ?? this.userId;
     const url = new URL(request.url);
     const path = url.pathname;
     const parts = path.split("/").filter(Boolean);
+    // Handle the bounded binary body before the generic JSON parser.
+    if (path === "/profile/photo") return handleProfilePhoto(request, this.profilePhotoStore());
     const body = request.method === "GET" || request.method === "DELETE"
       ? {}
       : ((await request.json().catch(() => ({}))) as any);
