@@ -1,8 +1,7 @@
 import Foundation
 
 /// Identity rules shared by the app: one durable account, Apple or
-/// email magic-link methods, interchangeable once explicitly linked.
-/// There is no Hygge-account password. The backend enforces these;
+/// email methods with magic links and optional passwords. The backend enforces these;
 /// the app mirrors them so the UI never offers something the account
 /// cannot do.
 public enum HyggeAuth {
@@ -13,9 +12,16 @@ public enum HyggeAuth {
 
     public static func isPlausibleEmail(_ email: String) -> Bool {
         let value = normalizeEmail(email)
-        guard value.count <= 254, !value.contains(" ") else { return false }
-        let parts = value.split(separator: "@")
-        return parts.count == 2 && !parts[0].isEmpty && parts[1].contains(".") && !parts[1].hasPrefix(".") && !parts[1].hasSuffix(".")
+        guard value.count <= 254 else { return false }
+        return value.range(of: #"^[^\s@]+@[^\s@]+\.[^\s@]+$"#, options: .regularExpression) != nil
+    }
+
+    public static func showsEmailActions(email: String, isFocused: Bool) -> Bool {
+        isFocused || isPlausibleEmail(email)
+    }
+
+    public static func isValidPassword(_ password: String) -> Bool {
+        (15...128).contains(password.unicodeScalars.count)
     }
 
     /// A Sign in with Apple relay address is opaque contact data only:
@@ -78,13 +84,25 @@ public struct LinkedLoginMethod: Codable, Identifiable, Equatable {
     public var method: Kind
     public var email: String?
     public var emailVerified: Bool
+    public var hasPassword: Bool
 
-    public init(id: String, method: Kind, email: String? = nil, emailVerified: Bool = false) {
+    public init(id: String, method: Kind, email: String? = nil, emailVerified: Bool = false, hasPassword: Bool = false) {
         self.id = id
         self.method = method
         self.email = email
         self.emailVerified = emailVerified
+        self.hasPassword = hasPassword
     }
+    private enum CodingKeys: String, CodingKey { case id, method, email, emailVerified, hasPassword }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        method = try c.decode(Kind.self, forKey: .method)
+        email = try c.decodeIfPresent(String.self, forKey: .email)
+        emailVerified = try c.decodeIfPresent(Bool.self, forKey: .emailVerified) ?? false
+        hasPassword = try c.decodeIfPresent(Bool.self, forKey: .hasPassword) ?? false
+    }
+
 }
 
 /// Where launch routing lands. Signed in: home once onboarded,

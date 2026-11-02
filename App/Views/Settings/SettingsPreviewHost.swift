@@ -8,6 +8,7 @@ struct SettingsPreviewHost: View {
     @State private var presented = true
     @AppStorage("settingsPreviewScreen") private var screen = "main"
     var body: some View {
+        if screen == "login" { LoginView() } else {
         ZStack {
             HyggeTheme.paper.ignoresSafeArea()
             Button("Open settings preview") { presented = true }
@@ -33,6 +34,7 @@ struct SettingsPreviewHost: View {
                 FiledEmailSummary(id: "preview", sender: "example@upwork.com", senderDomain: "upwork.com", subject: "New message about a design project", kind: "message", summary: "A client asked about your availability.")
             ]
         }
+    }
     }
     @ViewBuilder private var previewScreen: some View {
         switch screen {

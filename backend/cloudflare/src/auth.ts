@@ -1,15 +1,45 @@
 /// Identity: Apple sign-in (server-verified), email magic links,
-/// explicit method linking, and server-issued sessions. Email and
-/// password sign-in was replaced fully by magic links — there is no
-/// Hygge-account password anywhere in this file.
+/// optional verified-email passwords, explicit linking, and server-issued sessions.
 ///
 /// Invariants: one durable user id with N methods; linking happens only
 /// while signed in; a private-relay address is opaque contact data and
 /// never matches or merges accounts; magic-link tokens and session
 /// tokens exist only as SHA-256 hashes at rest, and raw tokens and raw
 /// emails never reach a log line.
+import { hashPassword, verifyPassword, isValidPassword } from "./passwords.ts";
 import type { Env, MagicEmailBinding } from "./env.ts";
-import { json, userIdFromRequest } from "./env.ts";
+import { json as responseJson, userIdFromRequest } from "./env.ts";
+
+function json(body: unknown, status = 200): Response {
+  const response = responseJson(body, status);
+  response.headers.set("cache-control", "no-store");
+  return response;
+}
+
+// Bound credential requests before parsing or hashing. Never log the body.
+async function authBody(request: Request): Promise<Record<string, unknown>> {
+  if (!request.body) return {};
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > 16384) {
+      await reader.cancel();
+      throw new AuthProblem(413, "request_too_large", "That sign-in request is too large.");
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  try {
+    const value = JSON.parse(new TextDecoder().decode(bytes));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch { return {}; }
+}
 
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, then sign in again
 export const MAGIC_LINK_TTL_MS = 15 * 60 * 1000; // 15 minutes
@@ -196,10 +226,12 @@ export interface AuthDb {
   listMethods(userId: string): Promise<LinkedMethodRow[]>;
   addMethod(row: LinkedMethodRow): Promise<void>;
   deleteMethod(id: string): Promise<void>;
-  /// A clicked magic link proves inbox control: the email method
-  /// becomes verified and any legacy password hash is dropped.
-  markEmailVerifiedAndClearPassword(id: string): Promise<void>;
+  markEmailVerified(id: string): Promise<void>;
+  takePasswordAttempt(key: string, nowMs: number, limit: number): Promise<boolean>;
+  // Atomic compare-and-set + revocation of other sessions.
+  replacePassword(method: LinkedMethodRow, hash: string, sessionHash: string, nowMs: number): Promise<boolean>;
   createSession(row: AuthSessionRow): Promise<void>;
+  createPasswordSession(row: AuthSessionRow, methodId: string, expectedHash: string): Promise<boolean>;
   findSessionByHash(tokenHash: string): Promise<AuthSessionRow | null>;
   revokeSessionByHash(tokenHash: string, revokedAt: string): Promise<void>;
   revokeAllSessions(userId: string, revokedAt: string): Promise<void>;
@@ -270,17 +302,52 @@ export function d1AuthDb(db: D1Database): AuthDb {
     async deleteMethod(id) {
       await db.prepare("DELETE FROM linked_methods WHERE id = ?1").bind(id).run();
     },
-    async markEmailVerifiedAndClearPassword(id) {
+    async markEmailVerified(id) {
       await db
-        .prepare("UPDATE linked_methods SET email_verified = 1, password_hash = NULL WHERE id = ?1")
+        .prepare("UPDATE linked_methods SET email_verified = 1, password_hash = CASE WHEN password_hash LIKE 'scrypt-v1$%' THEN password_hash ELSE NULL END WHERE id = ?1")
         .bind(id)
         .run();
+    },
+    async takePasswordAttempt(key, nowMs, limit) {
+      const namespacedKey = `password:${key}`;
+      const since = new Date(nowMs - 900000).toISOString();
+      // One INSERT ... SELECT is atomic in D1, including concurrent requests.
+      // Reuse the existing abuse ledger with a disjoint key namespace.
+      await db.prepare("DELETE FROM magic_link_requests WHERE ip_hash LIKE 'password:%' AND created_at < ?1")
+        .bind(new Date(nowMs - 86400000).toISOString()).run();
+      const result = await db.prepare(`INSERT INTO magic_link_requests (id, ip_hash, created_at)
+        SELECT ?1, ?2, ?3 WHERE (SELECT COUNT(*) FROM magic_link_requests
+          WHERE ip_hash = ?2 AND created_at >= ?4) < ?5`)
+        .bind(crypto.randomUUID(), namespacedKey, new Date(nowMs).toISOString(), since, limit).run();
+      return result.meta.changes === 1;
+    },
+    async replacePassword(method, hash, sessionHash, nowMs) {
+      const now = new Date(nowMs).toISOString();
+      const freshSince = new Date(nowMs - PASSWORD_REAUTH_MS).toISOString();
+      const results = await db.batch([
+        db.prepare(`UPDATE linked_methods SET password_hash = ?1
+          WHERE id = ?2 AND user_id = ?3 AND method = 'email' AND email_verified = 1
+          AND password_hash IS ?4 AND EXISTS (SELECT 1 FROM auth_sessions
+            WHERE token_hash = ?5 AND user_id = ?3 AND revoked_at IS NULL AND expires_at > ?6 AND created_at >= ?7)`)
+          .bind(hash, method.id, method.userId, method.passwordHash, sessionHash, now, freshSince),
+        db.prepare(`UPDATE auth_sessions SET revoked_at = ?1 WHERE user_id = ?2 AND token_hash != ?3
+          AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM linked_methods WHERE id = ?4 AND password_hash = ?5)`)
+          .bind(now, method.userId, sessionHash, method.id, hash),
+      ]);
+      return results[0].meta.changes === 1;
     },
     async createSession(row) {
       await db
         .prepare("INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at) VALUES (?1,?2,?3,?4,?5)")
         .bind(row.id, row.userId, row.tokenHash, row.createdAt, row.expiresAt)
         .run();
+    },
+    async createPasswordSession(row, methodId, expectedHash) {
+      const result = await db.prepare(`INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at)
+        SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM linked_methods
+          WHERE id = ?6 AND user_id = ?2 AND email_verified = 1 AND password_hash = ?7)`)
+        .bind(row.id, row.userId, row.tokenHash, row.createdAt, row.expiresAt, methodId, expectedHash).run();
+      return result.meta.changes === 1;
     },
     async findSessionByHash(tokenHash) {
       const r = await one("SELECT * FROM auth_sessions WHERE token_hash = ?1", tokenHash);
@@ -369,18 +436,22 @@ export interface IssuedSession {
   userId: string;
 }
 
-export async function issueSession(db: AuthDb, userId: string, nowMs = Date.now()): Promise<IssuedSession> {
+export async function issueSession(db: AuthDb, userId: string, nowMs = Date.now(),
+  passwordMethod?: { id: string; hash: string }): Promise<IssuedSession> {
   const token = b64url(crypto.getRandomValues(new Uint8Array(32)));
   const createdAt = new Date(nowMs).toISOString();
   const expiresAt = new Date(nowMs + SESSION_TTL_MS).toISOString();
-  await db.createSession({
+  const row = {
     id: crypto.randomUUID(),
     userId,
     tokenHash: await sha256Hex(token),
     createdAt,
     expiresAt,
     revokedAt: null,
-  });
+  };
+  if (passwordMethod) {
+    if (!await db.createPasswordSession(row, passwordMethod.id, passwordMethod.hash)) throw passwordProblem();
+  } else { await db.createSession(row); }
   return { token, expiresAt, userId };
 }
 
@@ -404,6 +475,7 @@ export interface PublicMethod {
   method: "apple" | "email";
   email: string | null;
   emailVerified: boolean;
+  hasPassword: boolean;
 }
 
 /// Safe view only: never the password hash, never the Apple sub.
@@ -413,6 +485,7 @@ export function publicMethod(row: LinkedMethodRow): PublicMethod {
     method: row.method,
     email: row.method === "email" ? row.email : row.appleEmail,
     emailVerified: row.emailVerified,
+    hasPassword: row.method === "email" && row.emailVerified && !!row.passwordHash?.startsWith("scrypt-v1$"),
   };
 }
 
@@ -553,12 +626,12 @@ export async function requestMagicLink(
 
 export type ConsumeMagicLinkResult =
   | { kind: "session"; result: AuthenticatedResult }
-  | { kind: "linked"; userId: string; methods: PublicMethod[] };
+  | { kind: "linked"; userId: string; methods: PublicMethod[]; session: IssuedSession };
 
 /// One generic problem covers unknown, expired, and already-used links.
 /// With a live session the link attaches its email to that account
 /// (link mode); without one it finds or creates the account for the
-/// email, marks it verified, drops any legacy password hash, and
+/// email, marks it verified, preserves modern password hashes, and
 /// issues the standard session.
 export async function consumeMagicLink(
   db: AuthDb,
@@ -580,7 +653,7 @@ export async function consumeMagicLink(
     }
     if (!(await db.consumeMagicLink(tokenHash, new Date(nowMs).toISOString()))) throw magicLinkProblem();
     if (owner) {
-      await db.markEmailVerifiedAndClearPassword(owner.id);
+      await db.markEmailVerified(owner.id);
     } else {
       try {
         await db.addMethod({
@@ -599,6 +672,7 @@ export async function consumeMagicLink(
     }
     return {
       kind: "linked",
+      session: await issueSession(db, input.sessionUserId, nowMs),
       userId: input.sessionUserId,
       methods: (await db.listMethods(input.sessionUserId)).map(publicMethod),
     };
@@ -607,7 +681,7 @@ export async function consumeMagicLink(
   if (!(await db.consumeMagicLink(tokenHash, new Date(nowMs).toISOString()))) throw magicLinkProblem();
   const existing = await db.findEmailMethod(email);
   if (existing) {
-    await db.markEmailVerifiedAndClearPassword(existing.id);
+    await db.markEmailVerified(existing.id);
     return { kind: "session", result: await authenticated(db, existing.userId, false) };
   }
   const userId = crypto.randomUUID();
@@ -627,7 +701,7 @@ export async function consumeMagicLink(
     // Lost a race with a concurrent first sign-in for the same email.
     const raced = await db.findEmailMethod(email);
     if (raced) {
-      await db.markEmailVerifiedAndClearPassword(raced.id);
+      await db.markEmailVerified(raced.id);
       return { kind: "session", result: await authenticated(db, raced.userId, false) };
     }
     throw new AuthProblem(409, "already_linked", "That sign-in method is already linked to an account.");
@@ -713,6 +787,50 @@ export async function unlinkMethod(db: AuthDb, userId: string, methodId: string)
   return (await db.listMethods(userId)).map(publicMethod);
 }
 
+// ---- optional email passwords -------------------------------------------
+
+export const PASSWORD_REAUTH_MS = 10 * 60 * 1000;
+const passwordProblem = () => new AuthProblem(401, "invalid_credentials", "That email and password didn't match. Try again, or use an email link.");
+const reauthProblem = () => new AuthProblem(403, "reauthentication_required", "Confirm it's you with an email link, then try again.");
+
+export async function passwordSignIn(db: AuthDb, rawEmail: string, password: string,
+  options: { nowMs?: number; requesterHash?: string | null } = {}): Promise<AuthenticatedResult> {
+  const nowMs = options.nowMs ?? Date.now();
+  const email = normalizeEmail(rawEmail);
+  const ipKey = `ip:${options.requesterHash ?? "unknown"}`;
+  const ipAllowed = await db.takePasswordAttempt(ipKey, nowMs, 30);
+  const emailAllowed = await db.takePasswordAttempt(`email:${await sha256Hex(email)}`, nowMs, 10);
+  if (!ipAllowed || !emailAllowed) throw new AuthProblem(429, "rate_limited", "Too many tries. Wait a little, or use an email link.");
+  if (!isPlausibleEmail(email) || !isValidPassword(password)) throw passwordProblem();
+  const method = await db.findEmailMethod(email);
+  // Unknown/unverified emails and unset passwords do the same expensive work.
+  const matched = await verifyPassword(password, method?.emailVerified ? method.passwordHash : null);
+  if (!matched || !method || !method.emailVerified) throw passwordProblem();
+  const session = await issueSession(db, method.userId, nowMs, { id: method.id, hash: method.passwordHash! });
+  return { userId: method.userId, session, isNewUser: false, methods: (await db.listMethods(method.userId)).map(publicMethod) };
+}
+
+export async function setEmailPassword(db: AuthDb, token: string, methodId: string, password: string,
+  nowMs = Date.now()): Promise<PublicMethod[]> {
+  const sessionHash = await sha256Hex(token);
+  const session = await db.findSessionByHash(sessionHash);
+  if (!session || session.revokedAt || Date.parse(session.expiresAt) <= nowMs) {
+    throw new AuthProblem(401, "unauthorized", "Sign in first.");
+  }
+  const method = await db.getMethodById(methodId);
+  if (!method || method.userId !== session.userId || method.method !== "email" || !method.emailVerified) {
+    throw new AuthProblem(404, "method_not_found", "Verify your email with a sign-in link first.");
+  }
+  if (nowMs - Date.parse(session.createdAt) > PASSWORD_REAUTH_MS) throw reauthProblem();
+  if (!isValidPassword(password)) throw new AuthProblem(400, "invalid_password", "Use between 15 and 128 characters.");
+  if (!await db.takePasswordAttempt(`setup:${await sha256Hex(session.userId)}`, nowMs, 5)) {
+    throw new AuthProblem(429, "rate_limited", "Too many tries. Wait a little before trying again.");
+  }
+  const hash = await hashPassword(password);
+  if (!await db.replacePassword(method, hash, sessionHash, nowMs)) throw reauthProblem();
+  return (await db.listMethods(session.userId)).map(publicMethod);
+}
+
 // ---- request resolution + HTTP routes ------------------------------------
 
 function bearerToken(request: Request): string {
@@ -761,7 +879,7 @@ export async function handleAuthRequest(
   try {
     const body = request.method === "GET" || request.method === "DELETE"
       ? ({} as Record<string, unknown>)
-      : ((await request.json().catch(() => ({}))) as Record<string, unknown>);
+      : (await authBody(request));
     const str = (v: unknown) => (typeof v === "string" ? v : "");
 
     if (request.method === "POST" && parts.join("/") === "auth/apple") {
@@ -798,8 +916,20 @@ export async function handleAuthRequest(
     if (request.method === "POST" && parts.join("/") === "auth/email/consume") {
       const sessionUserId = await resolveRequestUserId(request, env, db);
       const outcome = await consumeMagicLink(db, str(body.token), { nowMs: opts.nowMs, sessionUserId });
-      if (outcome.kind === "linked") return json({ methods: outcome.methods });
+      if (outcome.kind === "linked") {
+        await revokeSession(db, bearerToken(request));
+        return json({ ...outcome.session, linked: true, methods: outcome.methods });
+      }
       return json(sessionBody(outcome.result), outcome.result.isNewUser ? 201 : 200);
+    }
+    if (request.method === "POST" && parts.join("/") === "auth/email/password") {
+      const result = await passwordSignIn(db, str(body.email), str(body.password), {
+        nowMs: opts.nowMs, requesterHash: await requesterHashFrom(request),
+      });
+      return json(sessionBody(result));
+    }
+    if (request.method === "POST" && parts.join("/") === "auth/methods/password") {
+      return json({ methods: await setEmailPassword(db, bearerToken(request), str(body.methodId), str(body.password), opts.nowMs) });
     }
     if (request.method === "POST" && parts.join("/") === "auth/signout") {
       await revokeSession(db, bearerToken(request));
@@ -825,7 +955,7 @@ export async function handleAuthRequest(
   } catch (e) {
     if (e instanceof AuthProblem) return json({ error: e.code, message: e.publicMessage }, e.status);
     // Internal detail stays in worker logs only (no user data, no secrets).
-    console.error("auth request failed:", e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+    console.error("auth request failed:", e instanceof Error ? e.name : "unknown error");
     return json({ error: "auth_unavailable", message: "Sign-in is unavailable just now. Try again in a moment." }, 500);
   }
 }
