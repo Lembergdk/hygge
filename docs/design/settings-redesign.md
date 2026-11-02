@@ -66,4 +66,4 @@ The insights header uses the dedicated `SettingsInsightsFlame` peeking pose from
 the approved sheet: front-facing coral/gold flame, brown stick arms resting over
 the time-saved tile, glints and sage leaves. It is anchored to that tile rather
 than rendered as the walking `FlameMark` beside the heading. The earnings tile
-label is “Logged earnings”; its underlying amount remains unchanged.
+label is “Your earnings”; its underlying amount remains unchanged.
