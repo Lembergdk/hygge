@@ -53,3 +53,9 @@ device-scoped. Normal app navigation must also be checked before release.
 
 Merging this work triggers the repository's existing main-branch CI and staging
 deployment. TestFlight and production publication remain separate workflows.
+
+The insights header uses the dedicated `SettingsInsightsFlame` peeking pose from
+the approved sheet: front-facing coral/gold flame, brown stick arms resting over
+the time-saved tile, glints and sage leaves. It is anchored to that tile rather
+than rendered as the walking `FlameMark` beside the heading. The earnings tile
+label is “Logged earnings”; its underlying amount remains unchanged.
