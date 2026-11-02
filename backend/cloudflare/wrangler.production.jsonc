@@ -31,8 +31,10 @@
     "HYGGE_ENV": "production",
     "HYGGE_TRACE_PAYLOADS": "0",
     // AI Gateway -> custom provider -> https://api.meta.ai/v1.
-    // Rollback: use that URL directly (gateway headers stay off
-    // without HYGGE_AIG_TOKEN). Payload 0 = gateway logs keep
+    // The Meta key lives in the gateway's stored keys (BYOK);
+    // HYGGE_LLM_API_KEY remains only for rollback: use the Meta
+    // URL directly AND delete the HYGGE_AIG_TOKEN secret.
+    // Payload 0 = gateway logs keep
     // metadata + usage only, never raw prompts/responses.
     "HYGGE_LLM_BASE_URL": "https://gateway.ai.cloudflare.com/v1/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-production/custom-meta-ai/v1",
     "HYGGE_AIG_COLLECT_PAYLOAD": "0",

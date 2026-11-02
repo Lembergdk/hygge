@@ -27,7 +27,9 @@ test("gateway headers: direct calls unchanged, gateway calls fail closed on payl
     ...CFG, apiKey: "meta-key", gatewayToken: "run-token",
     agentName: "hygge-browser-agent", agentId: "hygge-production",
   }, "muse-wonder-1.0");
-  assert.equal(prod.Authorization, "Bearer meta-key");
+  // Gateway injects its stored provider key only when the
+  // provider Authorization header is absent.
+  assert.equal(prod.Authorization, undefined);
   assert.equal(prod["cf-aig-authorization"], "Bearer run-token");
   // Unset collect flag = metadata only, never raw bodies.
   assert.equal(prod["cf-aig-collect-log-payload"], "false");
