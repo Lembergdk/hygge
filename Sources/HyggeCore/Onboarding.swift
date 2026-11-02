@@ -180,6 +180,11 @@ public struct ChatEntry: Codable, Identifiable, Equatable, Sendable {
 public enum OnboardingStep: String, Codable, CaseIterable, Sendable {
     case welcome, enjoyWork, lowestRate, `where`, when, summary, signIn, done
 
+    /// The conversation opener is fixed, not generated: it must
+    /// appear after a beat of thinking dots, never after a model
+    /// round-trip. Personalization starts with the second turn.
+    public static let firstMessage = "Hey, welcome to Hygge! What kinds of work do you actually enjoy? Tap any that fit, or just tell me."
+
     public var prompt: String {
         switch self {
         case .welcome: return "Hygge — \"hoo-gah\". Danish for cozy time with the people you love. That is what the money is for. I'll find work across the internet, draft everything, and only tap you on the shoulder when a decision is really yours. Ready?"

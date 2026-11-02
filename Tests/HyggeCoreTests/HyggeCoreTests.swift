@@ -522,6 +522,13 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertEqual(AuthGate.resolve(introDone: true, hasOnboarded: false, isSignedIn: false, authRequired: false), .onboarding)
     }
 
+    func testFirstMessageIsFixedOpener() {
+        // The opener is predefined so it can render after a beat
+        // of thinking dots; it asks the first real question.
+        XCTAssertTrue(OnboardingStep.firstMessage.contains("welcome to Hygge"))
+        XCTAssertTrue(OnboardingStep.firstMessage.contains("enjoy"))
+    }
+
     func testSignInCompletionDecisions() {
         // Onboarded server account: adopt it, never import local over it.
         XCTAssertEqual(SignInCompletion.decide(serverHasState: true, serverHasOnboarded: true, localProfileComplete: true), .adoptServerState)

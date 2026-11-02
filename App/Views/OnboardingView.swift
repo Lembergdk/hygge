@@ -67,7 +67,7 @@ struct OnboardingView: View {
                         // Straight into the first real question: the
                         // intro carousel already did the welcoming.
                         if conversation.step == .welcome { conversation.step = .enjoyWork }
-                        Task { await agentTurn() }
+                        Task { await firstTurn() }
                     }
                 }
             }
@@ -489,7 +489,7 @@ struct OnboardingView: View {
 
     private var skillOptions: [String] {
         let ordered = conversation.suggestedSkills + SkillPresets.all.filter { !conversation.suggestedSkills.contains($0) }
-        var capped = Array(ordered.prefix(8))
+        var capped = Array(ordered.prefix(6))
         for selected in conversation.profile.skills where !capped.contains(selected) {
             capped.append(selected)
         }
@@ -516,7 +516,7 @@ struct OnboardingView: View {
                     }
                 }
             }
-            .padding(.horizontal, 16).padding(.vertical, 14)
+            .padding(.horizontal, 16).padding(.vertical, 11)
             // Hug the content: the row is only as tall as its
             // tallest tile's label needs, tops aligned.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -591,6 +591,22 @@ struct OnboardingView: View {
         removeInputs()
         withAnimation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.88)) {
             entries.append(FeedEntry(kind: .input, step: conversation.step))
+        }
+    }
+
+    /// The opener is predefined (OnboardingStep.firstMessage):
+    /// one second of thinking dots, then the message and its
+    /// input card. No model call, so no "picked for you" header
+    /// or skill chips before the user has said anything.
+    private func firstTurn() async {
+        let thinking = FeedEntry(kind: .thinking)
+        entries.append(thinking)
+        try? await Task.sleep(for: .seconds(reduceMotion ? 0 : 1))
+        replaceEntry(thinking.id, with: OnboardingStep.firstMessage)
+        store.appendChat(fromAgent: true, text: OnboardingStep.firstMessage)
+        Task {
+            try? await Task.sleep(for: .milliseconds(reduceMotion ? 0 : 320))
+            appendInputCard()
         }
     }
 
