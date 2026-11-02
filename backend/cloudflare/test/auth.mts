@@ -1,9 +1,10 @@
-// Identity tests: Apple sign-in + email magic links (passwords are gone).
+// Identity tests: Apple sign-in + email magic links and optional passwords.
 // Run via npm test (node --test test/*.mts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   AuthProblem,
+  passwordSignIn, setEmailPassword, issueSession, PASSWORD_REAUTH_MS, publicMethod,
   MAGIC_LINK_MAX_SENDS_PER_HOUR,
   MAGIC_LINK_TTL_MS,
   appleAppSiteAssociation,
@@ -53,12 +54,35 @@ class MemDb {
   async deleteMethod(id: string) {
     this.methods.delete(id);
   }
-  async markEmailVerifiedAndClearPassword(id: string) {
+  async markEmailVerified(id: string) {
     const m = this.methods.get(id);
-    if (m) { m.emailVerified = true; m.passwordHash = null; }
+    if (m) { m.emailVerified = true; if (!m.passwordHash?.startsWith("scrypt-v1$")) m.passwordHash = null; }
+  }
+  passwordAttempts: Array<{ key: string; at: number }> = [];
+  async takePasswordAttempt(key: string, nowMs: number, limit: number) {
+    if (this.passwordAttempts.filter(r => r.key === key && r.at >= nowMs - 900000).length >= limit) return false;
+    this.passwordAttempts.push({ key, at: nowMs });
+    return true;
+  }
+  async replacePassword(method: LinkedMethodRow, hash: string, sessionHash: string, nowMs: number) {
+    const m = this.methods.get(method.id);
+    const session = this.sessions.get(sessionHash);
+    if (!m || m.passwordHash !== method.passwordHash || !session || session.revokedAt ||
+      Date.parse(session.expiresAt) <= nowMs || nowMs - Date.parse(session.createdAt) > PASSWORD_REAUTH_MS) return false;
+    m.passwordHash = hash;
+    for (const s of this.sessions.values()) {
+      if (s.userId === method.userId && s.tokenHash !== sessionHash) s.revokedAt = new Date(nowMs).toISOString();
+    }
+    return true;
   }
   async createSession(row: AuthSessionRow) {
     this.sessions.set(row.tokenHash, row);
+  }
+  async createPasswordSession(row: AuthSessionRow, methodId: string, hash: string) {
+    const method = this.methods.get(methodId);
+    if (!method || !method.emailVerified || method.userId !== row.userId || method.passwordHash !== hash) return false;
+    this.sessions.set(row.tokenHash, row);
+    return true;
   }
   async findSessionByHash(tokenHash: string) {
     return this.sessions.get(tokenHash) ?? null;
@@ -444,7 +468,7 @@ test("http: landing never consumes; consume signs in; signout revokes", async ()
   assert.equal(afterOut.status, 401);
 });
 
-test("http: password routes are gone", async () => {
+test("http: obsolete password signup and unverified linking routes remain unavailable", async () => {
   const { post } = httpDb();
   for (const path of ["/auth/email/signup", "/auth/email/signin", "/auth/password/change", "/auth/methods/link/email"]) {
     const res = await post(path, { email: "sam@example.com", password: "whatever whatever" });
@@ -468,4 +492,141 @@ test("magic link requests are capped per requester, not just per inbox", async (
   assert.equal(sent.length, MAGIC_LINK_MAX_REQUESTS_PER_IP_PER_HOUR, "capped requester sends nothing more");
   await requestMagicLink(db, "one-more@example.com", { send, baseUrl, requesterHash: "ip-b" });
   assert.equal(sent.length, MAGIC_LINK_MAX_REQUESTS_PER_IP_PER_HOUR + 1, "a different requester is unaffected");
+});
+
+const SECRET = "hygge quiet autumn evening";
+async function passwordFixture() {
+  const db = new MemDb();
+  await db.createUser({ id: "owner", contactEmail: "sam@example.com", displayName: null });
+  const method: LinkedMethodRow = { id: "email", userId: "owner", method: "email", email: "sam@example.com",
+    emailVerified: true, appleSub: null, appleEmail: null, passwordHash: null };
+  await db.addMethod(method);
+  const session = await issueSession(db, "owner");
+  return { db, method, session };
+}
+
+test("password creation, login and change keep one identity and revoke other sessions", async () => {
+  const { db, method, session } = await passwordFixture();
+  const other = await issueSession(db, "owner");
+  const methods = await setEmailPassword(db, session.token, method.id, SECRET);
+  assert.equal(methods[0].hasPassword, true);
+  assert.equal(JSON.stringify(methods).includes("scrypt"), false);
+  assert.notEqual(method.passwordHash, SECRET);
+  assert.equal(await resolveSessionUserId(db, other.token), null);
+  assert.equal(await resolveSessionUserId(db, session.token), "owner");
+  const signedIn = await passwordSignIn(db, " SAM@example.com ", SECRET);
+  assert.equal(signedIn.userId, "owner");
+  assert.equal(signedIn.isNewUser, false);
+  await setEmailPassword(db, session.token, method.id, SECRET + " new");
+  assert.equal(await resolveSessionUserId(db, signedIn.session.token), null);
+  assert.equal((await problem(passwordSignIn(db, "sam@example.com", SECRET))).code, "invalid_credentials");
+  assert.equal((await passwordSignIn(db, "sam@example.com", SECRET + " new")).userId, "owner");
+});
+
+test("password creation requires ownership, verified email and a recent real session", async () => {
+  const { db, method, session } = await passwordFixture();
+  assert.equal((await problem(setEmailPassword(db, "dev-token", method.id, SECRET))).status, 401);
+  const other = await issueSession(db, "other");
+  assert.equal((await problem(setEmailPassword(db, other.token, method.id, SECRET))).status, 404);
+  method.emailVerified = false;
+  assert.equal((await problem(setEmailPassword(db, session.token, method.id, SECRET))).status, 404);
+  method.emailVerified = true;
+  method.method = "apple";
+  assert.equal((await problem(setEmailPassword(db, session.token, method.id, SECRET))).status, 404);
+  method.method = "email";
+  assert.equal((await problem(setEmailPassword(db, session.token, method.id, SECRET, Date.now() + PASSWORD_REAUTH_MS + 1000))).code, "reauthentication_required");
+  assert.equal(method.passwordHash, null);
+  for (const value of ["short", "a".repeat(129)]) {
+    assert.equal((await problem(setEmailPassword(db, session.token, method.id, value))).code, "invalid_password");
+  }
+});
+
+test("magic links preserve passwords and refresh confirmation without creating an account", async () => {
+  const { db, method, session } = await passwordFixture();
+  await setEmailPassword(db, session.token, method.id, SECRET);
+  const hash = method.passwordHash;
+  const token = await requestAndToken(db, method.email!);
+  const linked = await consumeMagicLink(db, token, { nowMs: T0 + 1000, sessionUserId: "owner" });
+  assert.equal(linked.kind, "linked");
+  if (linked.kind !== "linked") assert.fail();
+  assert.equal(linked.methods[0].hasPassword, true);
+  assert.equal(method.passwordHash, hash);
+  assert.equal(linked.session.userId, "owner");
+  const again = await requestAndToken(db, method.email!, T0 + 2000);
+  const loggedIn = await consumeMagicLink(db, again, { nowMs: T0 + 3000 });
+  assert.equal(loggedIn.kind, "session");
+  assert.equal(method.passwordHash, hash);
+  assert.equal(db.users.size, 1);
+});
+
+test("unknown, unverified, unset and wrong passwords return the same error", async () => {
+  const { db, method, session } = await passwordFixture();
+  const unset = await problem(passwordSignIn(db, "sam@example.com", SECRET));
+  const unknown = await problem(passwordSignIn(db, "absent@example.com", SECRET));
+  await setEmailPassword(db, session.token, method.id, SECRET);
+  const wrong = await problem(passwordSignIn(db, "sam@example.com", SECRET + "?"));
+  method.emailVerified = false;
+  const unverified = await problem(passwordSignIn(db, "sam@example.com", SECRET));
+  assert.deepEqual([unset, unknown, wrong, unverified].map(e => [e.status, e.code, e.publicMessage]),
+    Array(4).fill([401, "invalid_credentials", unset.publicMessage]));
+  assert.equal(publicMethod(method).hasPassword, false);
+});
+
+test("password limits apply across concurrent requests and expire", async () => {
+  const { db } = await passwordFixture();
+  const attempts = await Promise.all(Array.from({ length: 12 }, (_, i) =>
+    problem(passwordSignIn(db, "sam@example.com", "short", { nowMs: T0, requesterHash: `ip-${i}` }))));
+  assert.equal(attempts.filter(e => e.code === "rate_limited").length, 2);
+  assert.equal((await problem(passwordSignIn(db, "sam@example.com", "short", { nowMs: T0 + 900001 }))).code, "invalid_credentials");
+  for (let i = 0; i < 30; i++) {
+    assert.equal((await problem(passwordSignIn(db, `u${i}@example.com`, "short", { requesterHash: "one-ip", nowMs: T0 }))).code, "invalid_credentials");
+  }
+  assert.equal((await problem(passwordSignIn(db, "new@example.com", "short", { requesterHash: "one-ip", nowMs: T0 }))).code, "rate_limited");
+});
+
+test("native scrypt salts differ, Unicode is exact, malformed hashes fail closed", async () => {
+  const { hashPassword, verifyPassword } = await import("../src/passwords.ts");
+  const secret = "🍂".repeat(15);
+  const a = await hashPassword(secret), b = await hashPassword(secret);
+  assert.notEqual(a, b);
+  assert.equal(await verifyPassword(secret, a), true);
+  assert.equal(await verifyPassword(secret + " ", a), false);
+  assert.equal(await verifyPassword(secret, "scrypt-v1$999999$8$3$ff$00"), false);
+});
+
+test("HTTP reauthentication rotates the current session and enables password setup", async () => {
+  const { post, db, trap } = httpDb();
+  await post("/auth/email/request", { email: "sam@example.com" });
+  const first = await post("/auth/email/consume", { token: trap.tokenAt(0) });
+  const session = await first.json() as { token: string; methods: Array<{ id: string }> };
+  await post("/auth/email/request", { email: "sam@example.com" }, session.token, T0 + 1000);
+  const refreshed = await post("/auth/email/consume", { token: trap.tokenAt(1) }, session.token, T0 + 2000);
+  const result = await refreshed.json() as { linked: boolean; token: string };
+  assert.equal(result.linked, true);
+  assert.ok(result.token);
+  assert.equal(await resolveSessionUserId(db, session.token), null);
+  const saved = await post("/auth/methods/password", { methodId: session.methods[0].id, password: SECRET }, result.token, T0 + 3000);
+  assert.equal(saved.status, 200);
+  const signedIn = await post("/auth/email/password", { email: "sam@example.com", password: SECRET });
+  assert.equal(signedIn.status, 200);
+  assert.ok((await signedIn.json() as { token: string }).token);
+});
+
+test("HTTP auth responses aren't cached and oversized credentials never reach hashing", async () => {
+  const { post, db } = httpDb();
+  const result = await post("/auth/email/password", { email: "sam@example.com", password: "x".repeat(20000) });
+  assert.equal(result.status, 413);
+  assert.equal(result.headers.get("cache-control"), "no-store");
+  assert.equal(db.passwordAttempts.length, 0);
+});
+
+test("password change during sign-in cannot issue a session for the old hash", async () => {
+  const { db, method, session } = await passwordFixture();
+  await setEmailPassword(db, session.token, method.id, SECRET);
+  const create = db.createPasswordSession.bind(db);
+  db.createPasswordSession = async (row, id, hash) => {
+    method.passwordHash = "changed-concurrently";
+    return create(row, id, hash);
+  };
+  assert.equal((await problem(passwordSignIn(db, "sam@example.com", SECRET))).code, "invalid_credentials");
 });

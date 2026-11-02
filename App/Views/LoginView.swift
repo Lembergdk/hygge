@@ -12,29 +12,35 @@ struct LoginView: View {
     var body: some View {
         ZStack {
             HyggeTheme.paper.ignoresSafeArea()
-            VStack(spacing: 0) {
-                HStack {
-                    Button("Sign up") {
-                        store.wantsSignIn = false
-                        store.wantsOnboarding = true
-                        // Back to the very first onboarding page,
-                        // even if the carousel ran earlier today.
-                        store.introDone = false
+            ScrollView {
+                VStack(spacing: 0) {
+                    HStack {
+                        Button("Sign up") {
+                            store.wantsSignIn = false
+                            store.wantsOnboarding = true
+                            // Back to the very first onboarding page,
+                            // even if the carousel ran earlier today.
+                            store.introDone = false
+                        }
+                        .font(.body)
+                        .foregroundStyle(HyggeTheme.secondary)
+                        .buttonStyle(.plain)
+                        Spacer()
                     }
-                    .font(.body)
-                    .foregroundStyle(HyggeTheme.secondary)
-                    .buttonStyle(.plain)
-                    Spacer()
+                    .padding(.top, 14)
+                    .padding(.leading, 22)
+                    AnimatedFlame(size: 132)
+                        .padding(.top, 28)
+                        .padding(.bottom, 12)
+                    Text("Welcome back")
+                        .font(.system(.largeTitle, design: .rounded, weight: .bold))
+                        .foregroundStyle(HyggeTheme.ink)
+                        .padding(.bottom, 32)
+                    SignInCard(localProfile: nil, isReturningLogin: true) {}
+                        .padding(.horizontal, 22)
+                    Spacer(minLength: 30)
                 }
-                .padding(.top, 14)
-                .padding(.leading, 22)
-                AnimatedFlame(size: 132)
-                    .padding(.top, 28)
-                    .padding(.bottom, 30)
-                SignInCard(localProfile: nil) {}
-                    .padding(.horizontal, 22)
-                Spacer()
-            }
+            }.scrollDismissesKeyboard(.interactively)
         }
         .fontDesign(.rounded)
     }

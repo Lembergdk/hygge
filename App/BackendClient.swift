@@ -4,10 +4,12 @@ import Foundation
 enum AuthClientError: LocalizedError {
     case message(String)
     case unavailable
+    case reauthenticationRequired
 
     var errorDescription: String? {
         switch self {
         case .message(let message): return message
+        case .reauthenticationRequired: return "Confirm it’s you with an email link, then try again."
         case .unavailable: return "Sign-in is unavailable just now. Try again in a moment."
         }
     }
@@ -541,6 +543,7 @@ struct BackendClient {
     private struct EmailRequestBody: Encodable { var email: String }
     private struct MagicConsumeBody: Encodable { var token: String }
     private struct MagicConsumeResponse: Decodable {
+        var linked: Bool?
         var token: String?
         var expiresAt: String?
         var userId: String?
@@ -582,9 +585,21 @@ struct BackendClient {
             body: MagicConsumeBody(token: token))
         if let sessionToken = response.token {
             setSessionToken(sessionToken, userID: response.userId)
-            return nil
+            return response.linked == true ? response.methods ?? [] : nil
         }
         return response.methods ?? []
+    }
+
+    func signInWithPassword(email: String, password: String) async throws {
+        let session: AuthSessionResponse = try await authRequest("auth/email/password", method: "POST",
+            body: ["email": HyggeAuth.normalizeEmail(email), "password": password])
+        setSessionToken(session.token, userID: session.userId)
+    }
+
+    func setEmailPassword(methodID: String, password: String) async throws -> [LinkedLoginMethod] {
+        let response: MethodsResponse = try await authRequest("auth/methods/password", method: "POST",
+            body: ["methodId": methodID, "password": password])
+        return response.methods
     }
 
     func fetchLoginMethods() async throws -> [LinkedLoginMethod] {
@@ -634,6 +649,7 @@ struct BackendClient {
         guard (200...299).contains(http.statusCode) else {
             if let decoded = try? JSONDecoder().decode(AuthErrorBody.self, from: data),
                let message = decoded.message, !message.isEmpty {
+                if decoded.error == "reauthentication_required" { throw AuthClientError.reauthenticationRequired }
                 throw AuthClientError.message(message)
             }
             throw AuthClientError.unavailable
