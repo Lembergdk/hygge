@@ -316,6 +316,8 @@ export class UserSandbox extends DurableObject<Env> {
       agentName,
       agentId: `hygge-${this.env.HYGGE_ENV}`,
       tracePayloads: this.env.HYGGE_TRACE_PAYLOADS === "1",
+      gatewayToken: this.env.HYGGE_AIG_TOKEN,
+      gatewayCollectPayload: this.env.HYGGE_AIG_COLLECT_PAYLOAD === "1",
     };
   }
 

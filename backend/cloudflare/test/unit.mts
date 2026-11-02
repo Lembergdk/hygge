@@ -1,7 +1,7 @@
 // Unit tests for the ported pure logic. Run: node --test test/
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { selectTier, parseDecision, type LLMConfig } from "../src/llm.ts";
+import { selectTier, parseDecision, llmRequestHeaders, type LLMConfig } from "../src/llm.ts";
 import { generateDEK, wrapDEK, unwrapDEK, seal, open, masterKey } from "../src/vault.ts";
 import { ReplyStreamExtractor, heuristicSuggestions } from "../src/onboarding.ts";
 import { distillHints } from "../src/agent.ts";
@@ -14,6 +14,31 @@ test("tier routing: routine spark, failures escalate", () => {
   assert.equal(selectTier(CFG, { repeatedAction: true }).tier, "wonder");
   assert.equal(selectTier(CFG, { taskKind: "signup", isFinalSubmit: true }).tier, "wonder");
   assert.equal(selectTier(CFG, { taskKind: "discover", isFinalSubmit: true }).tier, "spark");
+});
+
+test("gateway headers: direct calls unchanged, gateway calls fail closed on payloads", () => {
+  const direct = llmRequestHeaders({ ...CFG, apiKey: "meta-key" });
+  assert.deepEqual(direct, {
+    "Content-Type": "application/json",
+    Authorization: "Bearer meta-key",
+  });
+
+  const prod = llmRequestHeaders({
+    ...CFG, apiKey: "meta-key", gatewayToken: "run-token",
+    agentName: "hygge-browser-agent", agentId: "hygge-production",
+  });
+  assert.equal(prod.Authorization, "Bearer meta-key");
+  assert.equal(prod["cf-aig-authorization"], "Bearer run-token");
+  // Unset collect flag = metadata only, never raw bodies.
+  assert.equal(prod["cf-aig-collect-log-payload"], "false");
+  assert.deepEqual(JSON.parse(prod["cf-aig-metadata"]), {
+    agent: "hygge-browser-agent", agent_id: "hygge-production",
+  });
+
+  const staging = llmRequestHeaders({
+    ...CFG, apiKey: "meta-key", gatewayToken: "run-token", gatewayCollectPayload: true,
+  });
+  assert.equal(staging["cf-aig-collect-log-payload"], "true");
 });
 
 test("parseDecision tolerates prose and fences", () => {
