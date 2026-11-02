@@ -135,6 +135,8 @@ async function handleOnboardingPreview(
     agentName: "hygge-onboarding",
     agentId: `hygge-${env.HYGGE_ENV}`,
     tracePayloads: env.HYGGE_TRACE_PAYLOADS === "1",
+    gatewayToken: env.HYGGE_AIG_TOKEN,
+    gatewayCollectPayload: env.HYGGE_AIG_COLLECT_PAYLOAD === "1",
   });
   const url = new URL(request.url);
   if (url.pathname.endsWith("/message")) {
