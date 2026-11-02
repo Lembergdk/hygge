@@ -87,11 +87,13 @@ public struct LinkedLoginMethod: Codable, Identifiable, Equatable {
     }
 }
 
-/// Where launch routing lands: carousel -> onboarding conversation
-/// (sign-in is its final step) -> home. There is no standalone
-/// sign-in screen: `.signIn` is the onboarding conversation showing
-/// only its sign-in message, for returning users. Pure so every
-/// branch is testable without a simulator.
+/// Where launch routing lands. Signed in: home once onboarded,
+/// otherwise the onboarding conversation continues. Signed out:
+/// someone who has signed in on this phone before lands straight
+/// on the log in page; a brand-new person gets the intro
+/// carousel, then the onboarding conversation (sign-in is its
+/// final step — unless they already arrived signed in). Pure so
+/// every branch is testable without a simulator.
 public enum AuthGateScreen: Equatable {
     case carousel
     case onboarding
@@ -101,19 +103,33 @@ public enum AuthGateScreen: Equatable {
 }
 
 public enum AuthGate {
-    public static func resolve(hasSeenCarousel: Bool, hasOnboarded: Bool,
+    /// `introDone` is this-launch state only (finished or skipped
+    /// the carousel just now); `hasSignedInBefore` is the durable
+    /// on-device memory that an account was ever signed into here.
+    public static func resolve(introDone: Bool, hasOnboarded: Bool,
                                isSignedIn: Bool, authRequired: Bool,
-                               wantsSignIn: Bool = false) -> AuthGateScreen {
-        if !hasOnboarded && !hasSeenCarousel { return .carousel }
-        // A signed-out returning user who asked to sign in sees the
-        // sign-in message alone, not the whole conversation again.
-        if authRequired && !isSignedIn && wantsSignIn { return .signIn }
-        if hasOnboarded {
-            // Home needs a live session when cloud is required; until
-            // then the path back is the same sign-in message.
-            return (isSignedIn || !authRequired) ? .home : .signIn
+                               wantsSignIn: Bool = false,
+                               hasSignedInBefore: Bool = false,
+                               wantsOnboarding: Bool = false) -> AuthGateScreen {
+        if isSignedIn {
+            return hasOnboarded ? .home : .onboarding
         }
-        return .onboarding
+        // Signed out from here.
+        if wantsOnboarding {
+            // "Sign up" from the log in page: the new-user flow.
+            return introDone ? .onboarding : .carousel
+        }
+        if wantsSignIn || hasSignedInBefore {
+            // An explicit "Log in" tap, or simply having an
+            // account from before: straight to the log in page.
+            return .signIn
+        }
+        if hasOnboarded {
+            // Local-only legacy state (no account ever): home in
+            // builds that don't require cloud, log in otherwise.
+            return authRequired ? .signIn : .home
+        }
+        return introDone ? .onboarding : .carousel
     }
 }
 

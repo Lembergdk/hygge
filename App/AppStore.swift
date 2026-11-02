@@ -99,13 +99,12 @@ final class AppStore {
     var lastSyncError: String?
     @ObservationIgnored private var pushTask: Task<Void, Never>?
     static let backendFirstKey = "hyggeBackendFirstV1"
-    /// Shared with ContentView's @AppStorage: the 3-screen intro
-    /// shows once per account on this device. Sign-out clears it
-    /// with the rest of the per-user traces, so whoever picks the
-    /// app up next gets the full first-run flow (intro, onboarding
-    /// chat, sign-in last) — its "I already have an account" path
-    /// still leads straight to the sign-in message.
-    static let introCarouselSeenKey = "hasSeenIntroCarousel"
+    /// Durable on-device memory that an account has been signed
+    /// into on this phone at least once. Survives sign-out on
+    /// purpose: it is what sends a signed-out launch straight to
+    /// the log in page instead of the new-user onboarding.
+    static let hasSignedInBeforeKey = "hyggeHasSignedInBeforeV1"
+    var hasSignedInBefore: Bool { UserDefaults.standard.bool(forKey: Self.hasSignedInBeforeKey) }
     /// A pending "save this login" ask (Brief 03). Set the moment the
     /// user confirms they already have a profile on a site and no
     /// login is saved yet; the joining work waits for the sheet.
@@ -223,9 +222,14 @@ final class AppStore {
     var magicLinkError: String?
     /// "I already have an account": show the sign-in message alone.
     var wantsSignIn = false
+    /// Session-only: "Sign up" tapped on the log in page.
+    var wantsOnboarding = false
 
     func refreshAuthState() {
         isSignedIn = backend.hasSessionToken
+        // Any live session (including one from a build predating
+        // this flag) proves a previous sign-in on this phone.
+        if isSignedIn { UserDefaults.standard.set(true, forKey: Self.hasSignedInBeforeKey) }
     }
 
     /// Universal-link and hygge:// entry: remember the token and
@@ -249,6 +253,7 @@ final class AppStore {
     func finishSignIn(localProfile: EarningsProfile? = nil) async {
         refreshAuthState()
         wantsSignIn = false
+        wantsOnboarding = false
         magicLinkError = nil
         // Identity safety: if the session just issued belongs to a
         // different account than the one cached on this device, the
@@ -420,7 +425,9 @@ final class AppStore {
         isSignedIn = false
         pendingMagicToken = nil
         magicLinkError = nil
-        // Back to the sign-in message path, not a dead end.
+        wantsOnboarding = false
+        // hasSignedInBefore now routes signed-out launches (this
+        // one included) straight to the log in page.
         wantsSignIn = true
         // Wipe every per-user local trace: the next account on this
         // device must never see the previous account's cached feed,
@@ -429,7 +436,6 @@ final class AppStore {
         pushTask = nil
         isBackendFirst = false
         UserDefaults.standard.removeObject(forKey: Self.backendFirstKey)
-        UserDefaults.standard.removeObject(forKey: Self.introCarouselSeenKey)
         hasRealServerFeedItem = false
         lastSyncError = nil
         pendingCredentialSave = nil

@@ -7,12 +7,26 @@ import SwiftUI
 /// itself (Home for an onboarded account, otherwise the
 /// onboarding questions continue).
 struct LoginView: View {
+    @Environment(AppStore.self) private var store
+
     var body: some View {
         ZStack {
             HyggeTheme.paper.ignoresSafeArea()
             VStack(spacing: 0) {
+                HStack {
+                    Button("Sign up") {
+                        store.wantsSignIn = false
+                        store.wantsOnboarding = true
+                    }
+                    .font(.body)
+                    .foregroundStyle(HyggeTheme.secondary)
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+                .padding(.top, 14)
+                .padding(.leading, 22)
                 FlameMark(size: 72)
-                    .padding(.top, 64)
+                    .padding(.top, 40)
                     .padding(.bottom, 36)
                 SignInCard(localProfile: nil) {}
                     .padding(.horizontal, 22)

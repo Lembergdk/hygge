@@ -276,7 +276,6 @@ private struct Screen3Page: View {
                         .foregroundStyle(HyggeTheme.ink)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, typeSize.isAccessibilitySize ? 8 : 20)
                     Text("Everything I do is posted in the feed. If I need your attention on anything, I will send you a message.")
                         .font(.body)
                         .foregroundStyle(HyggeTheme.ink)

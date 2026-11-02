@@ -497,23 +497,29 @@ final class HyggeCoreTests: XCTestCase {
     }
 
     func testAuthGateRouting() {
-        // New user: carousel, then the onboarding conversation (sign-in
-        // is its final step — before any account exists), then home.
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: false, hasOnboarded: false, isSignedIn: false, authRequired: true), .carousel)
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: false, authRequired: true), .onboarding)
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: true, authRequired: true), .onboarding)
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: true, isSignedIn: true, authRequired: true), .home)
-        // "I already have an account": the sign-in message alone.
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: false, authRequired: true, wantsSignIn: true), .signIn)
-        // Sign-out resets the carousel flag (per-user trace), so the
-        // intro leads again even though sign-in was asked for — the
-        // carousel's own sign-in path is one tap from there.
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: false, hasOnboarded: false, isSignedIn: false, authRequired: true, wantsSignIn: true), .carousel)
-        // Signed-out onboarded user returns via the sign-in message.
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: true, isSignedIn: false, authRequired: true), .signIn)
-        // Debug builds without required cloud keep the legacy flow.
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: false, authRequired: false), .onboarding)
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: false, hasOnboarded: true, isSignedIn: false, authRequired: false), .home)
+        // Brand-new person (never signed in on this phone): carousel,
+        // then the onboarding conversation, then home once signed in.
+        XCTAssertEqual(AuthGate.resolve(introDone: false, hasOnboarded: false, isSignedIn: false, authRequired: true), .carousel)
+        XCTAssertEqual(AuthGate.resolve(introDone: true, hasOnboarded: false, isSignedIn: false, authRequired: true), .onboarding)
+        XCTAssertEqual(AuthGate.resolve(introDone: true, hasOnboarded: false, isSignedIn: true, authRequired: true), .onboarding)
+        XCTAssertEqual(AuthGate.resolve(introDone: true, hasOnboarded: true, isSignedIn: true, authRequired: true), .home)
+        // Signed in before on this phone, currently out: straight to
+        // the log in page — no carousel, no onboarding replay. This
+        // holds even when the new account never finished onboarding,
+        // and in builds that don't require an account (Debug).
+        XCTAssertEqual(AuthGate.resolve(introDone: false, hasOnboarded: true, isSignedIn: false, authRequired: true, hasSignedInBefore: true), .signIn)
+        XCTAssertEqual(AuthGate.resolve(introDone: false, hasOnboarded: false, isSignedIn: false, authRequired: false, hasSignedInBefore: true), .signIn)
+        // Carousel "Log in": the log in page, any build flavor.
+        XCTAssertEqual(AuthGate.resolve(introDone: true, hasOnboarded: false, isSignedIn: false, authRequired: false, wantsSignIn: true), .signIn)
+        // "Sign up" on the log in page overrides the returning-user
+        // landing and starts the new-user flow again.
+        XCTAssertEqual(AuthGate.resolve(introDone: false, hasOnboarded: false, isSignedIn: false, authRequired: true, hasSignedInBefore: true, wantsOnboarding: true), .carousel)
+        XCTAssertEqual(AuthGate.resolve(introDone: true, hasOnboarded: false, isSignedIn: false, authRequired: true, hasSignedInBefore: true, wantsOnboarding: true), .onboarding)
+        // Legacy local-only onboarded state, never signed in: home in
+        // builds without required cloud, log in otherwise.
+        XCTAssertEqual(AuthGate.resolve(introDone: true, hasOnboarded: true, isSignedIn: false, authRequired: true), .signIn)
+        XCTAssertEqual(AuthGate.resolve(introDone: false, hasOnboarded: true, isSignedIn: false, authRequired: false), .home)
+        XCTAssertEqual(AuthGate.resolve(introDone: true, hasOnboarded: false, isSignedIn: false, authRequired: false), .onboarding)
     }
 
     func testSignInCompletionDecisions() {
