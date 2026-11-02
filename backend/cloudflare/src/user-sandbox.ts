@@ -32,7 +32,8 @@ import {
 } from "./scan.ts";
 import { ensureLearningProfile, rankSiteProposals } from "./learning.ts";
 import {
-  applyProbeOutcome, consumeUnknownCycle, eligibilityOf, reprobeDue,
+  applyProbeOutcome, consumeUnknownCycle, eligibilityOf, extractProbeChecks,
+  parseProbeJudgeReply, probeJudgePrompt, reprobeDue,
   unknownAccessRecord, withdrawProposalsForSite, type Eligibility, type ProbeOutcome, type SiteAccessRecord,
 } from "./web-access.ts";
 
@@ -925,20 +926,28 @@ export class UserSandbox extends DurableObject<Env> {
     const items: string[] = Array.isArray(done.extracted_items) ? done.extracted_items : [];
     const text = [...(done.log ?? []), ...items,
       ...(done.browser_trace ?? []).map((t: any) => String(t.summary ?? ""))].join("\n");
-    const appWall = /continue in (the )?app|open in the app|download (our|the) app|only in (the|our) app|app[- ]only|use our app to/i.test(text);
-    let checks: ProbeOutcome["checks"] = null;
-    for (const item of items) {
+    let appWall = /continue in (the )?app|open in the app|download (our|the) app|only in (the|our) app|app[- ]only|use our app to/i.test(text);
+    let checks: ProbeOutcome["checks"] = extractProbeChecks(text);
+    if (!checks && !appWall && text.trim()) {
+      // The exploring mission rarely emits the checks JSON itself
+      // (live probes stayed undecided 3/3 that way), so a judge
+      // reads the collected evidence and answers the four checks.
+      // A thin or failed visit yields "undecided", never a guess.
       try {
-        const obj = JSON.parse(String(item));
-        if (obj && typeof obj === "object" && "signupReachable" in obj) {
-          checks = {
-            signupReachable: obj.signupReachable === true,
-            signupFormPresent: obj.signupFormPresent === true,
-            profileEditReachable: obj.profileEditReachable === true,
-            applyStartable: obj.applyStartable === true,
-          };
+        const client = new LLMClient(this.llmConfig());
+        if (client.configured) {
+          const reply = await client.complete({
+            model: client.cfg.modelFast,
+            system: "Reply with ONLY a JSON object, no prose.",
+            user: probeJudgePrompt(site.name, text),
+          });
+          const verdict = parseProbeJudgeReply(String(reply));
+          if (verdict) {
+            checks = verdict.checks;
+            appWall = appWall || verdict.appWall;
+          }
         }
-      } catch { /* free-text extraction: checks stay undecided */ }
+      } catch { /* judge unavailable: the probe stays undecided */ }
     }
     return {
       status: done.status === "succeeded" ? "succeeded" : done.status === "needsHuman" ? "needs_human" : "failed",

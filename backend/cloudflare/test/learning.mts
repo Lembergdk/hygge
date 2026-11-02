@@ -15,7 +15,8 @@ import {
   type FeedbackEvent, type RankableItem,
 } from "../src/learning.ts";
 import {
-  applyAppWallStrike, applyProbeOutcome, eligibilityOf, unknownAccessRecord,
+  applyAppWallStrike, applyProbeOutcome, eligibilityOf, extractProbeChecks,
+  parseProbeJudgeReply, probeJudgePrompt, unknownAccessRecord,
   type ProbeOutcome, type SiteAccessRecord,
 } from "../src/web-access.ts";
 import {
@@ -329,6 +330,26 @@ function harness(opts: {
 const eligibleRecord = (probedAt = NOWISO): SiteAccessRecord => ({
   domain: "rover.com", displayName: "Rover", webAccessible: "true", probedAt,
   probeEvidence: "ok", unknownCyclesUsed: 0, appWallStrikes: 0,
+});
+
+test("probe judging: checks are found inside prose; strict judge parsing never guesses", () => {
+  const wrapped = 'I opened the join page. Result: {"signupReachable":true,"signupFormPresent":true,"profileEditReachable":false,"applyStartable":true} — done.';
+  assert.deepEqual(extractProbeChecks(wrapped), {
+    signupReachable: true, signupFormPresent: true, profileEditReachable: false, applyStartable: true,
+  });
+  assert.equal(extractProbeChecks('{"signupReachable":true}'), null, "partial checks are not a verdict");
+  assert.equal(extractProbeChecks("no json here"), null);
+  assert.equal(extractProbeChecks('{"signupReachable":"yes","signupFormPresent":true,"profileEditReachable":true,"applyStartable":true}'),
+    null, "non-boolean checks are not a verdict");
+
+  assert.equal(parseProbeJudgeReply('{"undecided":true}'), null);
+  assert.equal(parseProbeJudgeReply("the site looks fine"), null);
+  assert.equal(parseProbeJudgeReply('{"signupReachable":true,"signupFormPresent":true,"profileEditReachable":true}'), null);
+  const verdict = parseProbeJudgeReply('{"signupReachable":true,"signupFormPresent":false,"profileEditReachable":false,"applyStartable":false,"appWallText":"Continue in the app to finish signing up"}');
+  assert.equal(verdict?.appWall, true, "quoted app-wall text counts as an app wall");
+  assert.equal(verdict?.checks.signupFormPresent, false);
+  assert.match(probeJudgePrompt("Rover", "evidence text"), /undecided/);
+  assert.match(probeJudgePrompt("Rover", "evidence text"), /ONLY from this evidence/);
 });
 
 test("probe: app-walled site becomes ineligible — never scanned (zero mission calls)", async () => {
