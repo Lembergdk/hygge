@@ -180,13 +180,18 @@ public struct ChatEntry: Codable, Identifiable, Equatable, Sendable {
 public enum OnboardingStep: String, Codable, CaseIterable, Sendable {
     case welcome, enjoyWork, lowestRate, `where`, when, summary, signIn, done
 
+    /// The conversation opener is fixed, not generated: it must
+    /// appear after a beat of thinking dots, never after a model
+    /// round-trip. Personalization starts with the second turn.
+    public static let firstMessage = "Hey, welcome to Hygge! What kinds of work do you actually enjoy? Tap any that fit, or just tell me."
+
     public var prompt: String {
         switch self {
         case .welcome: return "Hygge — \"hoo-gah\". Danish for cozy time with the people you love. That is what the money is for. I'll find work across the internet, draft everything, and only tap you on the shoulder when a decision is really yours. Ready?"
         case .enjoyWork: return "What kinds of work do you actually enjoy? Tap any that fit, or just tell me."
         case .lowestRate: return "What's your lowest rate? Anything below it, I'll quietly drop — you'll never see it."
         case .where: return "Roughly where are you? It keeps local work close to home."
-        case .when: return "And when are you usually free? It stops me double-booking you."
+        case .when: return "One permission helps: your calendar, so I never double-book you and approved gigs land in it."
         case .summary: return "That's all I need to start. I'll look overnight and tell you in the morning — sooner if something needs you."
         // Sign-in is the final question, in the same conversation.
         // This exact wording is the one fixed local line.
@@ -266,7 +271,8 @@ public struct OnboardingConversation: Equatable, Sendable {
         switch step {
         case .enjoyWork: return false // taste always confirms with the user
         case .where: return !profile.locationLabel.isEmpty
-        case .when: return !profile.availabilityNotes.isEmpty
+        // .when asks for calendar access now; it always runs, even
+        // when availability was volunteered earlier in the chat.
         default: return false
         }
     }

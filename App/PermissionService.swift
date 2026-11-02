@@ -60,8 +60,19 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         defer { timeout.cancel() }
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
-            manager.requestWhenInUseAuthorization()
-            manager.requestLocation()
+            // Ask first, locate second: requesting a fix while the
+            // permission dialog is still up fails immediately
+            // behind it. The authorization callback starts the fix
+            // once the user has actually answered.
+            switch manager.authorizationStatus {
+            case .authorizedAlways, .authorizedWhenInUse:
+                manager.requestLocation()
+            case .denied, .restricted:
+                denied = true
+                finish(nil)
+            default:
+                manager.requestWhenInUseAuthorization()
+            }
         }
     }
 
@@ -75,14 +86,21 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        denied = true
+        // A transient "location unknown" is not a refusal; only a
+        // real denial marks the service denied.
+        if (error as? CLError)?.code == .denied { denied = true }
         finish(nil)
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
+        switch manager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            if continuation != nil { manager.requestLocation() }
+        case .denied, .restricted:
             denied = true
             finish(nil)
+        default:
+            break
         }
     }
 

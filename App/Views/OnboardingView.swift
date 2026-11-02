@@ -43,19 +43,16 @@ struct OnboardingView: View {
     @State private var streamingEntryID: UUID?
     @State private var started = false
     @State private var isLocating = false
-    @State private var locationFailed = false
 
     var body: some View {
         NavigationStack {
             ZStack {
                 GPTheme.paper.ignoresSafeArea()
-                if conversation.step == .welcome && !signInOnly {
-                    welcomeHero
-                } else {
-                    VStack(spacing: 0) {
-                        header
-                        feed
-                    }
+                // The 3-screen intro is the welcome now; this view
+                // is always the chat itself.
+                VStack(spacing: 0) {
+                    header
+                    feed
                 }
             }
             .onAppear {
@@ -67,42 +64,13 @@ struct OnboardingView: View {
                         entries.append(FeedEntry(kind: .agent, text: OnboardingStep.signIn.prompt))
                         appendInputCard()
                     } else {
-                        Task { await agentTurn() }
+                        // Straight into the first real question: the
+                        // intro carousel already did the welcoming.
+                        if conversation.step == .welcome { conversation.step = .enjoyWork }
+                        Task { await firstTurn() }
                     }
                 }
             }
-        }
-    }
-
-    private var welcomeHero: some View {
-        VStack(spacing: 0) {
-            Spacer()
-            AnimatedFlame(size: 150)
-            Text("Hi, I'm Hygge,")
-                .font(.system(size: 36, weight: .bold, design: .rounded))
-                .foregroundStyle(GPTheme.ink)
-                .padding(.top, 26)
-            Text("hoo-gah").font(.headline).foregroundStyle(GPTheme.amber).padding(.top, 6)
-            Text("I find work you like and handle\nthe boring parts.")
-                .font(.body).foregroundStyle(GPTheme.ink)
-                .multilineTextAlignment(.center).lineSpacing(3)
-                .padding(.top, 14)
-            Spacer()
-            Button {
-                submitUser("Ready", value: "")
-            } label: {
-                Text("Get started")
-                    .font(.body.weight(.semibold))
-                    .frame(maxWidth: .infinity).padding(.vertical, 17)
-                    .background(GPTheme.amber, in: Capsule()).foregroundStyle(.white)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 22)
-            Button("I already have an account") { store.wantsSignIn = true }
-                .font(.subheadline)
-                .foregroundStyle(GPTheme.secondary)
-                .buttonStyle(.plain)
-                .padding(.top, 10).padding(.bottom, 14)
         }
     }
 
@@ -129,25 +97,45 @@ struct OnboardingView: View {
                             .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                     }
                     Color.clear.frame(height: 28)
+                    // Stable bottom target: entry identities change
+                    // as thinking/streaming entries are replaced, so
+                    // scrolling aims here instead.
+                    Color.clear.frame(height: 1).id(Self.bottomSentinel)
                 }
                 .padding(.horizontal, 20).padding(.top, 6)
                 .animation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.88), value: entries.count)
                 .animation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.88), value: conversation.step)
             }
+            .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: entries.count) { _, _ in scrollToBottom(proxy) }
             .onChange(of: streamingTextLength) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: conversation.step) { _, _ in scrollToBottom(proxy) }
         }
     }
 
     private var streamingTextLength: Int { entries.last(where: { $0.kind == .agent })?.text.count ?? 0 }
 
+    private static let bottomSentinel = "feed-bottom"
+
+    /// Scroll once now and once after layout settles: an input card
+    /// appended this frame (tiles, slider, permission row) reaches
+    /// its real height a beat later, and the first scroll alone
+    /// used to land short of it.
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        guard let last = entries.last else { return }
+        scrollNow(proxy)
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(380))
+            scrollNow(proxy)
+        }
+    }
+
+    private func scrollNow(_ proxy: ScrollViewProxy) {
+        guard !entries.isEmpty else { return }
         if reduceMotion {
-            proxy.scrollTo(last.id, anchor: .bottom)
+            proxy.scrollTo(Self.bottomSentinel, anchor: .bottom)
         } else {
-            withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(last.id, anchor: .bottom) }
+            withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(Self.bottomSentinel, anchor: .bottom) }
         }
     }
 
@@ -262,42 +250,13 @@ struct OnboardingView: View {
                 }
                 Slider(value: Binding(get: { conversation.profile.hourlyRateFloor },
                                       set: { conversation.profile.hourlyRateFloor = $0 }),
-                       in: 10...120, step: 1)
+                       in: 10...300, step: 5)
                     .tint(GPTheme.teal)
                 primaryButton("Continue") {
                     finishInput(userText: "At least $\(Int(conversation.profile.hourlyRateFloor))/hr", mutate: { $0.advance() })
                 }
             case .where:
-                textRow(placeholder: "Town or city")
-                Button {
-                    isLocating = true
-                    locationFailed = false
-                    Task {
-                        let label = await locationService.requestLocality()
-                        isLocating = false
-                        if let label {
-                            input = label
-                            conversation.profile.locationLabel = label
-                        } else {
-                            locationFailed = true
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 7) {
-                        if isLocating {
-                            ProgressView().controlSize(.small).tint(GPTheme.teal)
-                            Text("Finding you…")
-                        } else {
-                            Label("Use my current location", systemImage: "location.fill")
-                        }
-                    }
-                    .font(.subheadline.weight(.medium)).foregroundStyle(GPTheme.teal)
-                }
-                .disabled(isLocating)
-                if locationFailed {
-                    Text("Couldn't find you — typing your town works just as well.")
-                        .font(.caption).foregroundStyle(GPTheme.secondary)
-                }
+                locationRow
                 primaryButton("Continue") {
                     let place = input.isEmpty ? conversation.profile.locationLabel : input
                     submitUser(place, value: place)
@@ -306,16 +265,15 @@ struct OnboardingView: View {
                 .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty)
                 .opacity(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty ? 0.45 : 1)
             case .when:
-                // Free text, like any other message — no invented picker UI.
-                textRow(placeholder: "Weekends, weekday evenings…")
+                // Calendar permission only. Availability itself is
+                // honed later in the ongoing conversation, not here.
                 permissionRow(icon: "calendar", title: "Calendar",
                               why: "So I never double-book you, and approved gigs land in your calendar.",
                               granted: calendarGranted) {
                     Task { calendarGranted = await PermissionService.requestCalendar() }
                 }
                 primaryButton("Continue") {
-                    submitUser(input.isEmpty ? "It varies" : input, value: input)
-                    input = ""
+                    submitUser(calendarGranted == true ? "Calendar allowed" : "Not now", value: "")
                 }
             case .summary:
                 summaryCard
@@ -347,7 +305,10 @@ struct OnboardingView: View {
             if !conversation.profile.skills.isEmpty {
                 summaryRow("wrench.and.screwdriver", conversation.profile.skills.joined(separator: ", "))
             }
-            summaryRow("mappin.and.ellipse", "\(conversation.profile.locationLabel) — from $\(Int(conversation.profile.hourlyRateFloor))/hr")
+            if !conversation.profile.locationLabel.isEmpty {
+                summaryRow("mappin.and.ellipse", conversation.profile.locationLabel)
+            }
+            summaryRow("banknote", "From $\(Int(conversation.profile.hourlyRateFloor))/hr")
             if !conversation.profile.availabilityNotes.isEmpty {
                 summaryRow("clock", conversation.profile.availabilityNotes)
             }
@@ -375,32 +336,94 @@ struct OnboardingView: View {
         }
     }
 
+    /// One soft panel, stacked so the words always get the full
+    /// width: badge + title on top, the one-line reason under it,
+    /// then a filled Allow pill. Side-by-side squeezed the text
+    /// into hyphenated one-word lines at large text sizes.
     private func permissionRow(icon: String, title: String, why: String, granted: Bool?,
                                action: @escaping () -> Void) -> some View {
-        // Icon, title, and the action share the top row; the explanation
-        // gets the full width below instead of a squeezed middle column.
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 11) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 9).fill(GPTheme.teal.opacity(0.12)).frame(width: 34, height: 34)
-                    Image(systemName: icon).font(.system(size: 14)).foregroundStyle(GPTheme.teal)
-                }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                permissionBadge(icon)
                 Text(title).font(.body.weight(.semibold)).foregroundStyle(GPTheme.ink)
                 Spacer()
-                if let granted {
-                    Label(granted ? "On" : "Off", systemImage: granted ? "checkmark.circle.fill" : "circle")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(granted ? GPTheme.teal : GPTheme.secondary)
-                        .labelStyle(.iconOnly)
-                } else {
-                    Button("Allow") { action() }
-                        .font(.caption.weight(.semibold))
-                        .buttonStyle(.bordered).tint(GPTheme.teal).controlSize(.small)
-                }
+                permissionState(granted)
             }
-            Text(why).font(.caption).foregroundStyle(GPTheme.secondary)
+            Text(why).font(.subheadline).foregroundStyle(GPTheme.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if granted == nil { allowPill(action) }
         }
+        .padding(16)
+        .background(GPTheme.paper, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(GPTheme.hairline, lineWidth: 1))
+    }
+
+    private func permissionBadge(_ icon: String) -> some View {
+        ZStack {
+            Circle().fill(GPTheme.teal.opacity(0.14)).frame(width: 44, height: 44)
+            Image(systemName: icon).font(.system(size: 18)).foregroundStyle(GPTheme.teal)
+        }
+    }
+
+    @ViewBuilder
+    private func permissionState(_ granted: Bool?) -> some View {
+        if let granted {
+            Label(granted ? "On" : "Off", systemImage: granted ? "checkmark.circle.fill" : "circle")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(granted ? GPTheme.teal : GPTheme.secondary)
+                .labelStyle(.iconOnly)
+        }
+    }
+
+    private func allowPill(_ action: @escaping () -> Void) -> some View {
+        Button("Allow") { action() }
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 22).padding(.vertical, 10)
+            .background(GPTheme.teal, in: Capsule())
+            .foregroundStyle(.white)
+            .buttonStyle(.plain)
+    }
+
+    /// Town/city field with the locate action as an icon at its
+    /// trailing end — no extra row, no instructions.
+    private var locationRow: some View {
+        HStack(spacing: 6) {
+            TextField("Town or city", text: $input)
+                .textFieldStyle(.plain)
+                .font(.body)
+                .textInputAutocapitalization(.words)
+                .onSubmit { submitUser(input, value: input); input = "" }
+            Button {
+                isLocating = true
+                Task {
+                    let label = await locationService.requestLocality()
+                    isLocating = false
+                    if let label {
+                        input = label
+                        conversation.profile.locationLabel = label
+                    }
+                }
+            } label: {
+                Group {
+                    if isLocating {
+                        ProgressView().controlSize(.small).tint(GPTheme.teal)
+                    } else {
+                        Image(systemName: "location.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(GPTheme.teal)
+                    }
+                }
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isLocating)
+            .accessibilityLabel("Use my location")
+        }
+        .padding(.leading, 17).padding(.trailing, 4)
+        .padding(.vertical, 3)
+        .background(GPTheme.card, in: Capsule())
+        .overlay(Capsule().stroke(GPTheme.hairline, lineWidth: 1))
     }
 
     private func chip(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -466,7 +489,7 @@ struct OnboardingView: View {
 
     private var skillOptions: [String] {
         let ordered = conversation.suggestedSkills + SkillPresets.all.filter { !conversation.suggestedSkills.contains($0) }
-        var capped = Array(ordered.prefix(8))
+        var capped = Array(ordered.prefix(6))
         for selected in conversation.profile.skills where !capped.contains(selected) {
             capped.append(selected)
         }
@@ -490,12 +513,13 @@ struct OnboardingView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         tileIcon(category, selected: selected)
                         tileText(category, selected: selected)
-                        Spacer(minLength: 0)
                     }
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
-            .padding(.horizontal, 16).padding(.vertical, 14)
+            .padding(.horizontal, 16).padding(.vertical, 11)
+            // Hug the content: the row is only as tall as its
+            // tallest tile's label needs, tops aligned.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(selected ? HyggeTheme.peach : GPTheme.card,
                         in: RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20)
@@ -570,10 +594,34 @@ struct OnboardingView: View {
         }
     }
 
+    /// The opener is predefined (OnboardingStep.firstMessage):
+    /// one second of thinking dots, then the message and its
+    /// input card. No model call, so no "picked for you" header
+    /// or skill chips before the user has said anything.
+    private func firstTurn() async {
+        let thinking = FeedEntry(kind: .thinking)
+        entries.append(thinking)
+        try? await Task.sleep(for: .seconds(reduceMotion ? 0 : 1))
+        replaceEntry(thinking.id, with: OnboardingStep.firstMessage)
+        store.appendChat(fromAgent: true, text: OnboardingStep.firstMessage)
+        Task {
+            try? await Task.sleep(for: .milliseconds(reduceMotion ? 0 : 320))
+            appendInputCard()
+        }
+    }
+
     /// One generated agent turn, streamed. Thinking dots show until the first
     /// token arrives; the input card appears only after the reply completes.
     private func agentTurn() async {
         guard conversation.step != .done else { return }
+        // Arrived signed in (a log in with an unknown email or
+        // Apple account just created the account): the final
+        // sign-in question is already answered — finish instead.
+        if conversation.step == .signIn && store.isSignedIn {
+            conversation.advance()
+            store.completeOnboarding(profile: conversation.profile)
+            return
+        }
         // The sign-in question is fixed and local: it never waits on
         // the backend, signed in or not.
         if conversation.step == .signIn {

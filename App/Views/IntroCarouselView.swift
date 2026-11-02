@@ -30,11 +30,13 @@ struct IntroCarouselView: View {
     }()
     @State private var entrancePlayed = false
 
-    /// One size, one position, every screen.
-    static let flameSize: CGFloat = 150
-    static let flameTop: CGFloat = 168
+    /// One size, one position, every screen — smaller and higher
+    /// at accessibility text sizes, where the words need the room.
+    @Environment(\.dynamicTypeSize) private var typeSize
+    var flameSize: CGFloat { typeSize.isAccessibilitySize ? 84 : 150 }
+    var flameTop: CGFloat { typeSize.isAccessibilitySize ? 72 : 120 }
     /// Vertical space pages reserve under the flame.
-    static var flameZone: CGFloat { flameTop + flameSize * 1.25 + 14 }
+    var flameZone: CGFloat { flameTop + flameSize * 1.25 + 14 }
 
     private var page: Int { pageId ?? 0 }
 
@@ -44,16 +46,16 @@ struct IntroCarouselView: View {
                 GeometryReader { area in
                 ZStack(alignment: .topTrailing) {
                     pager(pageWidth: area.size.width, pageHeight: area.size.height)
-                    PersistentFlame(page: page)
+                    PersistentFlame(page: page, size: flameSize)
                         .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, Self.flameTop)
+                        .padding(.top, flameTop)
                         .allowsHitTesting(false)
-                    Button("Skip") { onFinish(.signup) }
+                    Button("Log in") { onFinish(.signIn) }
                         .font(.body)
                         .foregroundStyle(HyggeTheme.secondary)
                         .padding(.top, 14)
                         .padding(.trailing, 22)
-                        .accessibilityLabel("Skip introduction")
+                        .accessibilityLabel("Log in")
                 }
                 }
                 bottomCluster
@@ -70,7 +72,7 @@ struct IntroCarouselView: View {
                 whoPage(width: pageWidth, height: pageHeight).id(0)
                 howPage(width: pageWidth, height: pageHeight).id(1)
                 Screen3Page(entrancePlayed: $entrancePlayed, isCurrent: page == 2,
-                            width: pageWidth, height: pageHeight).id(2)
+                            width: pageWidth, height: pageHeight, flameZone: flameZone).id(2)
             }
             .scrollTargetLayout()
         }
@@ -99,32 +101,26 @@ struct IntroCarouselView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Page \(page + 1) of 3")
 
-            Button {
-                if page < 2 {
-                    withAnimation { pageId = page + 1 }
-                } else {
-                    onFinish(.signup)
+            // Pages 1-2 are swipe-only (no Next button). The
+            // invisible same-size placeholder keeps the cluster's
+            // height constant so page content never jumps.
+            if page == 2 {
+                Button { onFinish(.signup) } label: {
+                    Text("Get started")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 17)
+                        .background(HyggeTheme.emberDeep, in: Capsule())
+                        .foregroundStyle(.white)
                 }
-            } label: {
-                Text(page < 2 ? "Next" : "Get started")
+                .buttonStyle(.plain)
+            } else {
+                Text("Get started")
                     .font(.body.weight(.semibold))
                     .frame(maxWidth: .infinity).padding(.vertical, 17)
-                    .background(HyggeTheme.emberDeep, in: Capsule())
-                    .foregroundStyle(.white)
+                    .opacity(0)
+                    .accessibilityHidden(true)
             }
-            .buttonStyle(.plain)
 
-            // Constant-height row: only visible/tappable on page 3, so
-            // the cluster never resizes (and pages never jump) mid-swipe.
-            Button { onFinish(.signIn) } label: {
-                Text("Already have an account? Sign in")
-                    .font(.subheadline)
-                    .foregroundStyle(HyggeTheme.secondary)
-            }
-            .buttonStyle(.plain)
-            .opacity(page == 2 ? 1 : 0)
-            .allowsHitTesting(page == 2)
-            .accessibilityHidden(page != 2)
         }
         .padding(.horizontal, 22)
         .padding(.top, 10)
@@ -133,8 +129,6 @@ struct IntroCarouselView: View {
 
     // MARK: - Page shell: reserves the flame zone, scrolls vertically
     // when large text needs more room than the screen has.
-
-    @Environment(\.dynamicTypeSize) private var typeSize
 
     private func pageShell<Content: View>(topReserve: CGFloat, width: CGFloat, height: CGFloat,
                                           @ViewBuilder content: @escaping () -> Content) -> some View {
@@ -149,14 +143,13 @@ struct IntroCarouselView: View {
         }
         .frame(width: width, height: height)
         .scrollBounceBehavior(.basedOnSize)
-        .scrollDisabled(!typeSize.isAccessibilitySize)
     }
 
     // MARK: - Screen 1: Who
 
     private func whoPage(width: CGFloat, height: CGFloat) -> some View {
-        pageShell(topReserve: Self.flameZone, width: width, height: height) {
-            Text("Hi, I'm Hygge,")
+        pageShell(topReserve: flameZone, width: width, height: height) {
+            Text("Hi, I’m Hygge")
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .foregroundStyle(HyggeTheme.ink)
                 .multilineTextAlignment(.center)
@@ -165,7 +158,7 @@ struct IntroCarouselView: View {
                 .font(.headline)
                 .foregroundStyle(HyggeTheme.emberDeep)
                 .padding(.top, 6)
-            Text("I find work you like and handle\nthe boring parts.")
+            Text("I help you find work you enjoy, so you can focus on the rest of life.")
                 .font(.body)
                 .foregroundStyle(HyggeTheme.ink)
                 .multilineTextAlignment(.center)
@@ -179,13 +172,13 @@ struct IntroCarouselView: View {
     // MARK: - Screen 2: How
 
     private func howPage(width: CGFloat, height: CGFloat) -> some View {
-        pageShell(topReserve: Self.flameZone, width: width, height: height) {
-            Text("I work on my own\ncomputer.")
+        pageShell(topReserve: flameZone, width: width, height: height) {
+            Text("Leave the fiddly bits to me")
                 .font(.system(size: 34, weight: .bold, design: .rounded))
                 .foregroundStyle(HyggeTheme.ink)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("I have my own browser and manage your profiles on the work sites you allow. Nothing happens without your approval.")
+            Text("I handle your work profiles, chase down new gigs, and keep your schedule in order.")
                 .font(.body)
                 .foregroundStyle(HyggeTheme.ink)
                 .multilineTextAlignment(.center)
@@ -203,19 +196,19 @@ struct IntroCarouselView: View {
 /// animation as a placeholder until the pointing animation lands.
 private struct PersistentFlame: View {
     var page: Int
+    var size: CGFloat
 
     private let animations: [FlameAnimation] = [.walk, .laptop, .notify]
 
     var body: some View {
         ZStack {
             ForEach(animations.indices, id: \.self) { i in
-                AnimatedFlame(animation: animations[i], size: IntroCarouselView.flameSize)
+                AnimatedFlame(animation: animations[i], size: size)
                     .opacity(i == page ? 1 : 0)
             }
         }
         .animation(.easeInOut(duration: 0.45), value: page)
-        .frame(width: IntroCarouselView.flameSize,
-               height: IntroCarouselView.flameSize * 1.25)
+        .frame(width: size, height: size * 1.25)
         .accessibilityHidden(true)
     }
 }
@@ -254,6 +247,7 @@ private struct Screen3Page: View {
     var isCurrent: Bool
     var width: CGFloat
     var height: CGFloat
+    var flameZone: CGFloat
     @State private var shown = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -264,24 +258,31 @@ private struct Screen3Page: View {
                     // Mockups sit ABOVE the persistent flame; the
                     // flame (an overlay) overlaps their lower edge,
                     // and the headline starts below the flame.
-                    Color.clear.frame(height: 52)
-                    mockups
-                        .scaleEffect(typeSize.isAccessibilitySize ? 0.85 : 0.92, anchor: .top)
-                        .frame(height: typeSize.isAccessibilitySize ? 172 : 186)
-                    Color.clear.frame(height: max(6, IntroCarouselView.flameZone - 52 - (typeSize.isAccessibilitySize ? 172 : 186)))
-                    Text("One feed for all\nyour work")
+                    if typeSize.isAccessibilitySize {
+                        // The mockups are a fixed-size illustration
+                        // whose tiny text cannot scale; at
+                        // accessibility sizes they give their space
+                        // to the real words instead.
+                        Color.clear.frame(height: flameZone)
+                    } else {
+                        Color.clear.frame(height: 52)
+                        mockups
+                            .scaleEffect(0.92, anchor: .top)
+                            .frame(height: 186)
+                        Color.clear.frame(height: max(6, flameZone - 52 - 186))
+                    }
+                    Text("You’re always in control")
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundStyle(HyggeTheme.ink)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, 20)
-                    Text("Everything I do is posted in the feed. If I need your attention on anything, I will send you a message.")
+                    Text("Nothing goes out without your approval. I’ll take care of the details—you have the final say.")
                         .font(.body)
                         .foregroundStyle(HyggeTheme.ink)
                         .multilineTextAlignment(.center)
                         .lineSpacing(3)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, 12)
+                        .padding(.top, typeSize.isAccessibilitySize ? 6 : 12)
                         .padding(.horizontal, 6)
                     Spacer(minLength: 0)
                 }
@@ -291,7 +292,6 @@ private struct Screen3Page: View {
         }
         .frame(width: width, height: height)
         .scrollBounceBehavior(.basedOnSize)
-        .scrollDisabled(!typeSize.isAccessibilitySize)
         .onAppear { if isCurrent { startEntrance() } }
         .onChange(of: isCurrent) { _, current in
             if current { startEntrance() }

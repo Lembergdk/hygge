@@ -34,35 +34,42 @@ struct SignInCard: View {
 
             HStack(spacing: 12) {
                 Rectangle().fill(HyggeTheme.hairline).frame(height: 1)
-                Text("or with email").font(.caption).foregroundStyle(HyggeTheme.secondary)
+                Text("or").font(.caption).foregroundStyle(HyggeTheme.secondary)
                 Rectangle().fill(HyggeTheme.hairline).frame(height: 1)
             }
             .accessibilityHidden(true)
 
-            TextField("Email", text: $email)
-                .textContentType(.emailAddress)
-                .keyboardType(.emailAddress)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .padding(.horizontal, 17).padding(.vertical, 13)
-                .background(HyggeTheme.card, in: Capsule())
-                .overlay(Capsule().stroke(HyggeTheme.hairline, lineWidth: 1))
-                .accessibilityLabel("Email address")
-            Button {
-                Task { await sendLink() }
-            } label: {
-                Group {
-                    if isWorking { ProgressView().tint(.white) }
-                    else { Text("Email me a sign-in link").font(.body.weight(.semibold)) }
+            // Field and send sit on one line: the round send
+            // button needs no label next to an email field.
+            HStack(spacing: 10) {
+                TextField("Email", text: $email)
+                    .textContentType(.emailAddress)
+                    .keyboardType(.emailAddress)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 17).padding(.vertical, 13)
+                    .background(HyggeTheme.card, in: Capsule())
+                    .overlay(Capsule().stroke(HyggeTheme.hairline, lineWidth: 1))
+                    .accessibilityLabel("Email address")
+                Button {
+                    Task { await sendLink() }
+                } label: {
+                    Group {
+                        if isWorking { ProgressView().tint(.white) }
+                        else {
+                            Image(systemName: "paperplane.fill")
+                                .font(.system(size: 17, weight: .semibold))
+                        }
+                    }
+                    .frame(width: 50, height: 50)
+                    .background(HyggeTheme.emberDeep, in: Circle())
+                    .foregroundStyle(.white)
                 }
-                .frame(maxWidth: .infinity).padding(.vertical, 15)
-                .background(HyggeTheme.emberDeep, in: Capsule())
-                .foregroundStyle(.white)
+                .buttonStyle(.plain)
+                .disabled(!HyggeAuth.isPlausibleEmail(email) || isWorking)
+                .opacity(HyggeAuth.isPlausibleEmail(email) && !isWorking ? 1 : 0.45)
+                .accessibilityLabel("Email me a sign-in link")
             }
-            .buttonStyle(.plain)
-            .disabled(!HyggeAuth.isPlausibleEmail(email) || isWorking)
-            .opacity(HyggeAuth.isPlausibleEmail(email) && !isWorking ? 1 : 0.45)
-            .accessibilityLabel("Email me a sign-in link")
 
             if let error = store.magicLinkError {
                 Text(error)
