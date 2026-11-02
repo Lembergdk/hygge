@@ -106,6 +106,12 @@
 							com.apple.Push = {
 								enabled = 1;
 							};
+							com.apple.SignInWithApple = {
+								enabled = 1;
+							};
+							com.apple.AssociatedDomains = {
+								enabled = 1;
+							};
 						};
 					};
 				};

@@ -379,27 +379,38 @@ test("suggested site passwords meet the strength policy and vary", () => {
   assert.equal(isStrongSitePassword("short"), false);
 });
 
-test("receive-only: no mail-send path exists in backend source or config", () => {
+test("receive-only inbox: the only mail-send path is magic-link auth mail", () => {
+  // Brief 04's own-address inbox stays receive-only. The single later
+  // exception (user decision 2026-11-01): auth.ts sends magic sign-in
+  // links through the send_email binding, pinned to one sender. This
+  // test keeps that exception from growing into general sending.
   const srcDir = new URL("../src/", import.meta.url).pathname;
   const files = readdirSync(srcDir).filter((f) => f.endsWith(".ts"));
   assert.ok(files.includes("email.ts"));
-  const banned = [
+  const codeOnly = (file: string) => readFileSync(srcDir + file, "utf8")
+    .split("\n").filter((line) => !/^\s*(\/\/|\*)/.test(line)).join("\n");
+  const sendShaped = [
     /send_email/i, /SendEmail/, /\bsmtp\b/i, /nodemailer/i, /sendMail\s*\(/,
-    /message\.forward\s*\(/, /message\.reply\s*\(/, /setReject\s*\(/,
     /api\.sendgrid|mailgun|postmark|resend\.com|ses\..*SendEmail/i,
+    /env\.EMAIL/,
   ];
+  const alwaysBanned = [/message\.forward\s*\(/, /message\.reply\s*\(/, /setReject\s*\(/];
   for (const file of files) {
-    // Code only: comments stating the receive-only rule ("No SMTP")
-    // are not a send path.
-    const text = readFileSync(srcDir + file, "utf8")
-      .split("\n").filter((line) => !/^\s*(\/\/|\*)/.test(line)).join("\n");
-    for (const pattern of banned) {
+    const text = codeOnly(file);
+    for (const pattern of alwaysBanned) {
+      assert.equal(pattern.test(text), false, `${file} matches banned pattern ${pattern}`);
+    }
+    if (file === "auth.ts" || file === "env.ts") continue; // the one send path + its binding type
+    for (const pattern of sendShaped) {
       assert.equal(pattern.test(text), false, `${file} matches send pattern ${pattern}`);
     }
   }
+  // auth.ts may send only as the pinned login sender.
+  assert.match(codeOnly("auth.ts"), /login@usehygge\.app/);
   for (const cfg of ["wrangler.staging.jsonc", "wrangler.production.jsonc"]) {
     const text = readFileSync(new URL(`../${cfg}`, import.meta.url), "utf8");
-    assert.equal(/send_email|SEND_MAIL|smtp/i.test(text), false, cfg);
+    assert.match(text, /"send_email": \[\s*\{\s*"name": "EMAIL",\s*"allowed_sender_addresses": \["login@usehygge\.app"\]\s*\}\s*\]/, cfg);
+    assert.equal(/\bsmtp\b/i.test(text), false, cfg);
   }
   // The Email Worker entry exists and is inbound-shaped.
   const index = readFileSync(srcDir + "index.ts", "utf8");

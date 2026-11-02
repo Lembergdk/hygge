@@ -27,6 +27,9 @@ private struct FeedEntry: Identifiable {
 /// token; the input for a step appears IN the feed only after its agent
 /// message has finished. There is deliberately no fixed footer composer.
 struct OnboardingView: View {
+    /// Returning-user path: the same feed, showing only the sign-in
+    /// message instead of the whole conversation.
+    var signInOnly = false
     @Environment(AppStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -46,7 +49,7 @@ struct OnboardingView: View {
         NavigationStack {
             ZStack {
                 GPTheme.paper.ignoresSafeArea()
-                if conversation.step == .welcome {
+                if conversation.step == .welcome && !signInOnly {
                     welcomeHero
                 } else {
                     VStack(spacing: 0) {
@@ -59,7 +62,13 @@ struct OnboardingView: View {
                 Task { await checkService() }
                 if !started {
                     started = true
-                    Task { await agentTurn() }
+                    if signInOnly {
+                        conversation.step = .signIn
+                        entries.append(FeedEntry(kind: .agent, text: OnboardingStep.signIn.prompt))
+                        appendInputCard()
+                    } else {
+                        Task { await agentTurn() }
+                    }
                 }
             }
         }
@@ -88,7 +97,12 @@ struct OnboardingView: View {
                     .background(GPTheme.amber, in: Capsule()).foregroundStyle(.white)
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 22).padding(.bottom, 14)
+            .padding(.horizontal, 22)
+            Button("I already have an account") { store.wantsSignIn = true }
+                .font(.subheadline)
+                .foregroundStyle(GPTheme.secondary)
+                .buttonStyle(.plain)
+                .padding(.top, 10).padding(.bottom, 14)
         }
     }
 
@@ -305,6 +319,13 @@ struct OnboardingView: View {
                 }
             case .summary:
                 summaryCard
+            case .signIn:
+                SignInCard(localProfile: signInOnly ? nil : conversation.profile) {
+                    // Signed in mid-onboarding: proposals can refresh
+                    // now that the account exists. Routing itself
+                    // follows the store (Home or more questions).
+                    if !signInOnly { Task { await store.refreshProposalsFromBackend() } }
+                }
             case .done:
                 EmptyView()
             }
@@ -334,10 +355,9 @@ struct OnboardingView: View {
                 summaryRow("envelope", conversation.profile.email)
             }
             primaryButton("Looks good", icon: "arrow.right") {
-                let profile = conversation.profile
-                removeInputs()
-                store.completeOnboarding(profile: profile)
-                Task { await store.refreshProposalsFromBackend() }
+                // One last question: how to sign in. Onboarding only
+                // completes once that sign-in succeeds.
+                finishInput(userText: "Looks good", mutate: { $0.advance() })
             }
             .disabled(!conversation.profile.isComplete)
             .opacity(conversation.profile.isComplete ? 1 : 0.45)
@@ -554,6 +574,14 @@ struct OnboardingView: View {
     /// token arrives; the input card appears only after the reply completes.
     private func agentTurn() async {
         guard conversation.step != .done else { return }
+        // The sign-in question is fixed and local: it never waits on
+        // the backend, signed in or not.
+        if conversation.step == .signIn {
+            entries.append(FeedEntry(kind: .agent, text: OnboardingStep.signIn.prompt))
+            store.appendChat(fromAgent: true, text: OnboardingStep.signIn.prompt)
+            appendInputCard()
+            return
+        }
         let thinking = FeedEntry(kind: .thinking)
         entries.append(thinking)
         let transcript = entries.compactMap { entry -> BackendClient.TranscriptLine? in

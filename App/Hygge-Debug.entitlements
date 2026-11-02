@@ -6,5 +6,17 @@
 	     staging sender pairs with this via HYGGE_APNS_ENVIRONMENT=sandbox. -->
 	<key>aps-environment</key>
 	<string>development</string>
+	<!-- Without this, Sign in with Apple dies on device before any
+	     backend call. -->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
+	<!-- Magic-link universal links on the API hosts. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:api.usehygge.app</string>
+		<string>applinks:api-staging.usehygge.app</string>
+	</array>
 </dict>
 </plist>

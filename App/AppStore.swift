@@ -207,10 +207,101 @@ final class AppStore {
         credentialRefs.first { $0.domain == domain }
     }
 
-    // MARK: - Identity (Brief 00)
+    // MARK: - Identity
+
+    /// A magic-link token that arrived via a URL, waiting for the
+    /// sign-in step to consume it. Never persisted, never logged.
+    var pendingMagicToken: String?
+    /// One calm sentence when a tapped link no longer works.
+    var magicLinkError: String?
+    /// "I already have an account": show the sign-in message alone.
+    var wantsSignIn = false
 
     func refreshAuthState() {
         isSignedIn = backend.hasSessionToken
+    }
+
+    /// Universal-link and hygge:// entry: remember the token and
+    /// steer routing to the sign-in message, which consumes it.
+    func handleMagicURL(_ url: URL) -> Bool {
+        guard let token = MagicLink.token(from: url) else { return false }
+        pendingMagicToken = token
+        magicLinkError = nil
+        if !isSignedIn { wantsSignIn = true }
+        return true
+    }
+
+    /// Called right after a verified sign-in (Apple or a consumed
+    /// magic link). `localProfile` carries the onboarding answers
+    /// collected on this device before the account existed. The
+    /// decision itself is HyggeCore's SignInCompletion: an onboarded
+    /// server account is adopted as-is (the local snapshot is never
+    /// imported over it); a fresh account imports the local answers
+    /// exactly once via the existing first-sign-in migration.
+    /// `hasOnboarded` only ever flips true from here.
+    func finishSignIn(localProfile: EarningsProfile? = nil) async {
+        refreshAuthState()
+        wantsSignIn = false
+        magicLinkError = nil
+        // Identity safety: if the session just issued belongs to a
+        // different account than the one cached on this device, the
+        // local snapshot is the previous account's and nothing from
+        // it may be imported or pushed. Onboarding answers handed
+        // in by this run of the flow are the one exception — they
+        // belong to the person who just answered them.
+        let differentAccount = backend.previousSessionUserID != nil
+            && backend.sessionUserID != nil
+            && backend.previousSessionUserID != backend.sessionUserID
+        if differentAccount {
+            pushTask?.cancel()
+            pushTask = nil
+            isBackendFirst = false
+            UserDefaults.standard.removeObject(forKey: Self.backendFirstKey)
+            hasRealServerFeedItem = false
+            pendingCredentialSave = nil
+            sessionProfileRefs = []
+            resetLocalState()
+            if let url = storeURL { try? FileManager.default.removeItem(at: url) }
+            writeCache()
+        }
+        let answers = localProfile ?? profile
+        let localComplete = answers.isComplete
+        // The account probe is part of finishing: if it cannot run,
+        // stay on the sign-in step with a clear message rather than
+        // completing onboarding from the local cache and pushing it
+        // over an unseen server account.
+        guard let counts = try? await backend.stateCounts() else {
+            magicLinkError = "You're signed in, but your account wouldn't load just now. Try your sign-in again in a moment."
+            return
+        }
+        if counts.total > 0 {
+            // The account already lives on the server: adopt first,
+            // decide from its real profile. A failed pull decides
+            // nothing — never fall back to the local copy.
+            markBackendFirst(hasReal: counts.hasRealFeedItem)
+            guard await pullFromServer() else {
+                magicLinkError = "You're signed in, but your account wouldn't load just now. Try your sign-in again in a moment."
+                return
+            }
+            switch SignInCompletion.decide(serverHasState: true,
+                                           serverHasOnboarded: hasOnboarded,
+                                           localProfileComplete: localComplete) {
+            case .adoptServerState:
+                return // straight Home on the account's own state
+            case .completeOnboardingAndImport:
+                completeOnboarding(profile: answers)
+                return
+            case .continueOnboarding:
+                return
+            }
+        }
+        // Fresh account: finish locally when the answers are
+        // complete, then run the one-time import, which itself
+        // refuses to overwrite a server that already has state.
+        if localComplete {
+            completeOnboarding(profile: answers)
+        }
+        await syncOnLaunch()
     }
 
     // MARK: - Push notifications (Brief 07)
@@ -320,6 +411,10 @@ final class AppStore {
         highlightedOpportunityID = nil
         await backend.signOut()
         isSignedIn = false
+        pendingMagicToken = nil
+        magicLinkError = nil
+        // Back to the sign-in message path, not a dead end.
+        wantsSignIn = true
         // Wipe every per-user local trace: the next account on this
         // device must never see the previous account's cached feed,
         // profile, or beliefs, and must not inherit backend-first mode.
@@ -1102,11 +1197,12 @@ final class AppStore {
     /// Foreground/launch pull: server state replaces the cache (local
     /// demo listings survive until a real item hides them; drafts in
     /// `tasks` are untouched — live task records keep their own flow).
-    func pullFromServer() async {
-        guard isBackendFirst, !isSyncing else { return }
+    @discardableResult
+    func pullFromServer() async -> Bool {
+        guard isBackendFirst, !isSyncing else { return false }
         isSyncing = true
         defer { isSyncing = false }
-        guard let export = try? await backend.exportState() else { return }
+        guard let export = try? await backend.exportState() else { return false }
         applyServerExport(export)
         if let refs = try? await backend.listCredentialRefs() { credentialRefs = refs }
         if let memory = try? await backend.listSiteMemory(), !memory.memories.isEmpty {
@@ -1116,6 +1212,7 @@ final class AppStore {
         // A pull can be the moment the first notifiable thing
         // exists (a scan found work while the app was closed).
         await refreshNotificationPrimer()
+        return true
     }
 
     func applyServerExport(_ export: ServerExport) {

@@ -29,6 +29,17 @@ struct HyggeApp: App {
                         }
                     }
                 }
+                // Magic links: hygge:// from the landing page, and the
+                // https universal link when associated domains open
+                // the app directly. The sign-in step consumes them.
+                .onOpenURL { url in
+                    _ = store.handleMagicURL(url)
+                }
+                .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+                    if let url = activity.webpageURL {
+                        _ = store.handleMagicURL(url)
+                    }
+                }
         }
     }
 }

@@ -472,8 +472,19 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertTrue(HyggeAuth.isPlausibleEmail("sam@example.com"))
         XCTAssertFalse(HyggeAuth.isPlausibleEmail("sam@"))
         XCTAssertFalse(HyggeAuth.isPlausibleEmail("not an email"))
-        XCTAssertNil(HyggeAuth.passwordProblem("1234567890"))
-        XCTAssertNotNil(HyggeAuth.passwordProblem("short"))
+        XCTAssertEqual(LinkedLoginMethod.Kind.email.label, "Email")
+    }
+
+    func testMagicLinkParsing() {
+        XCTAssertEqual(MagicLink.token(from: URL(string: "https://api.usehygge.app/auth/magic?token=abc-123")!), "abc-123")
+        XCTAssertEqual(MagicLink.token(from: URL(string: "https://api-staging.usehygge.app/auth/magic?token=abc-123")!), "abc-123")
+        XCTAssertEqual(MagicLink.token(from: URL(string: "hygge://auth/magic?token=abc-123")!), "abc-123")
+        // Wrong host, wrong path, missing or empty token: not a sign-in link.
+        XCTAssertNil(MagicLink.token(from: URL(string: "https://evil.example/auth/magic?token=abc-123")!))
+        XCTAssertNil(MagicLink.token(from: URL(string: "https://api.usehygge.app/auth/other?token=abc-123")!))
+        XCTAssertNil(MagicLink.token(from: URL(string: "https://api.usehygge.app/auth/magic")!))
+        XCTAssertNil(MagicLink.token(from: URL(string: "hygge://auth/magic?token=")!))
+        XCTAssertNil(MagicLink.token(from: URL(string: "hygge://tasks/123")!))
     }
 
     func testPrivateRelayIsDetectedAndNeverRemovableLogic() {
@@ -486,16 +497,44 @@ final class HyggeCoreTests: XCTestCase {
     }
 
     func testAuthGateRouting() {
-        // New user: carousel first, then sign-in, then onboarding, then home.
+        // New user: carousel, then the onboarding conversation (sign-in
+        // is its final step — before any account exists), then home.
         XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: false, hasOnboarded: false, isSignedIn: false, authRequired: true), .carousel)
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: false, authRequired: true), .auth)
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: false, authRequired: true), .onboarding)
         XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: true, authRequired: true), .onboarding)
         XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: true, isSignedIn: true, authRequired: true), .home)
-        // Signed-out returning user goes back through sign-in.
-        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: true, isSignedIn: false, authRequired: true), .auth)
+        // "I already have an account": the sign-in message alone.
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: false, authRequired: true, wantsSignIn: true), .signIn)
+        // Signed-out onboarded user returns via the sign-in message.
+        XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: true, isSignedIn: false, authRequired: true), .signIn)
         // Debug builds without required cloud keep the legacy flow.
         XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: true, hasOnboarded: false, isSignedIn: false, authRequired: false), .onboarding)
         XCTAssertEqual(AuthGate.resolve(hasSeenCarousel: false, hasOnboarded: true, isSignedIn: false, authRequired: false), .home)
+    }
+
+    func testSignInCompletionDecisions() {
+        // Onboarded server account: adopt it, never import local over it.
+        XCTAssertEqual(SignInCompletion.decide(serverHasState: true, serverHasOnboarded: true, localProfileComplete: true), .adoptServerState)
+        XCTAssertEqual(SignInCompletion.decide(serverHasState: true, serverHasOnboarded: true, localProfileComplete: false), .adoptServerState)
+        // Fresh account with finished local answers: complete + import once.
+        XCTAssertEqual(SignInCompletion.decide(serverHasState: false, serverHasOnboarded: false, localProfileComplete: true), .completeOnboardingAndImport)
+        // Server state exists but never onboarded: local answers still win the finish.
+        XCTAssertEqual(SignInCompletion.decide(serverHasState: true, serverHasOnboarded: false, localProfileComplete: true), .completeOnboardingAndImport)
+        // Nothing finished yet: keep asking the onboarding questions.
+        XCTAssertEqual(SignInCompletion.decide(serverHasState: false, serverHasOnboarded: false, localProfileComplete: false), .continueOnboarding)
+        XCTAssertEqual(SignInCompletion.decide(serverHasState: true, serverHasOnboarded: false, localProfileComplete: false), .continueOnboarding)
+    }
+
+    func testOnboardingEndsWithSignInStep() {
+        XCTAssertEqual(OnboardingStep.allCases.suffix(2), [.signIn, .done])
+        XCTAssertEqual(OnboardingStep.signIn.prompt, "How do you want to sign in?")
+        var conversation = OnboardingConversation()
+        conversation.step = .summary
+        conversation.advance()
+        XCTAssertEqual(conversation.step, .signIn)
+        // Typed text never completes the sign-in step.
+        XCTAssertFalse(conversation.submitText("email please"))
+        XCTAssertEqual(conversation.step, .signIn)
     }
 
     func testLegacyTokenMigrationDecision() {

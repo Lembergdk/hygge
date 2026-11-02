@@ -1,10 +1,9 @@
 import SwiftUI
 
-/// Where the carousel hands off. The signup screen itself is a later
-/// deliverable (auth method still open — see
-/// docs/design/onboarding-package/ONBOARDING-BUILD-SPEC.md §9); this
-/// is the single swap point when it lands.
-enum AuthDestination {
+/// Where the carousel hands off: into the onboarding conversation
+/// (sign-in is its final step), or — for someone who already has an
+/// account — straight to that conversation's sign-in message.
+enum AuthDestination: Equatable {
     case signup
     case signIn
 }
