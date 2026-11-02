@@ -20,13 +20,22 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var appContent: some View {
+        routedContent
+            .sheet(isPresented: Binding(get: { store.passwordFlow != nil && !store.isShowingLogins && !store.isShowingProfile },
+                                        set: { if !$0 { store.passwordFlow = nil } })) {
+                PasswordConfirmationView().presentationDragIndicator(.visible)
+            }
+    }
+
+    @ViewBuilder private var routedContent: some View {
         switch AuthGate.resolve(introDone: store.introDone,
                                 hasOnboarded: store.hasOnboarded,
                                 isSignedIn: store.isSignedIn,
                                 authRequired: BackendClient.requireCloud,
                                 wantsSignIn: store.wantsSignIn,
                                 hasSignedInBefore: store.hasSignedInBefore,
-                                wantsOnboarding: store.wantsOnboarding) {
+                                wantsOnboarding: store.wantsOnboarding,
+                                isExistingAccount: store.isExistingAccount) {
         case .carousel:
             IntroCarouselView { destination in
                 // The latest tap is the intent: clear the opposite

@@ -218,7 +218,17 @@ export interface MagicLinkRow {
   createdAt: string;
 }
 
+export interface PasswordConfirmationRow {
+  id: string; userId: string; methodId: string; email: string;
+  tokenHash: string; passwordHash: string; expectedHash: string | null;
+  expiresAt: string; createdAt: string;
+}
+
 export interface AuthDb {
+  createPasswordConfirmation(row: PasswordConfirmationRow): Promise<void>;
+  findPasswordConfirmation(tokenHash: string): Promise<PasswordConfirmationRow | null>;
+  cancelPasswordConfirmation(id: string, userId: string): Promise<void>;
+  confirmPassword(row: PasswordConfirmationRow, nowMs: number): Promise<boolean>;
   createUser(user: { id: string; contactEmail: string | null; displayName: string | null }): Promise<void>;
   findAppleMethod(appleSub: string): Promise<LinkedMethodRow | null>;
   findEmailMethod(email: string): Promise<LinkedMethodRow | null>;
@@ -266,6 +276,45 @@ export function d1AuthDb(db: D1Database): AuthDb {
   const one = async (sql: string, ...binds: unknown[]) =>
     (await db.prepare(sql).bind(...binds).first()) as D1Row | null;
   return {
+    async createPasswordConfirmation(row) {
+      await db.batch([
+        db.prepare("DELETE FROM password_confirmations WHERE method_id = ?1 OR expires_at <= ?2")
+          .bind(row.methodId, row.createdAt),
+        db.prepare(`INSERT INTO password_confirmations
+          (id, user_id, method_id, email, token_hash, password_hash, expected_hash, expires_at, created_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)`)
+          .bind(row.id, row.userId, row.methodId, row.email, row.tokenHash, row.passwordHash,
+            row.expectedHash, row.expiresAt, row.createdAt),
+      ]);
+    },
+    async findPasswordConfirmation(tokenHash) {
+      const r = await one("SELECT * FROM password_confirmations WHERE token_hash = ?1", tokenHash);
+      return r ? { id: String(r.id), userId: String(r.user_id), methodId: String(r.method_id),
+        email: String(r.email), tokenHash: String(r.token_hash), passwordHash: String(r.password_hash),
+        expectedHash: r.expected_hash == null ? null : String(r.expected_hash),
+        expiresAt: String(r.expires_at), createdAt: String(r.created_at) } : null;
+    },
+    async cancelPasswordConfirmation(id, userId) {
+      await db.prepare("DELETE FROM password_confirmations WHERE id = ?1 AND user_id = ?2").bind(id, userId).run();
+    },
+    async confirmPassword(row, nowMs) {
+      const now = new Date(nowMs).toISOString();
+      // D1 batch is transactional. The pending row, expiry, ownership and
+      // previous hash are checked in the same statement that changes the password.
+      const results = await db.batch([
+        db.prepare(`UPDATE linked_methods SET password_hash = ?1 WHERE id = ?2 AND user_id = ?3
+          AND method = 'email' AND email_verified = 1 AND email = ?4 AND password_hash IS ?5
+          AND EXISTS (SELECT 1 FROM password_confirmations WHERE id = ?6 AND token_hash = ?7
+            AND password_hash = ?1 AND expires_at > ?8)`)
+          .bind(row.passwordHash, row.methodId, row.userId, row.email, row.expectedHash, row.id, row.tokenHash, now),
+        db.prepare(`UPDATE auth_sessions SET revoked_at = ?1 WHERE user_id = ?2 AND revoked_at IS NULL
+          AND EXISTS (SELECT 1 FROM linked_methods WHERE id = ?3 AND password_hash = ?4)
+          AND EXISTS (SELECT 1 FROM password_confirmations WHERE id = ?5 AND token_hash = ?6)`)
+          .bind(now, row.userId, row.methodId, row.passwordHash, row.id, row.tokenHash),
+        db.prepare("DELETE FROM password_confirmations WHERE id = ?1 AND token_hash = ?2").bind(row.id, row.tokenHash),
+      ]);
+      return results[0].meta.changes === 1;
+    },
     async createUser({ id, contactEmail, displayName }) {
       await db
         .prepare("INSERT INTO users (id, email, contact_email, display_name, do_instance) VALUES (?1, ?2, ?2, ?3, ?1)")
@@ -711,9 +760,9 @@ export async function consumeMagicLink(
 
 /// Universal Links open the app before this fallback is requested. Mail scanners
 /// may fetch the fallback: GET never consumes a token or creates a session.
-export function magicLandingHtml(rawToken: string): string {
+export function magicLandingHtml(rawToken: string, passwordConfirmation = false): string {
   const token = rawToken ?? "";
-  const appLink = `hygge://auth/magic?token=${encodeURIComponent(token)}`;
+  const appLink = `hygge://auth/magic?token=${encodeURIComponent(token)}${passwordConfirmation ? "&action=password" : ""}`;
   const canOpen = /^[A-Za-z0-9_-]{43}$/.test(token);
   return [
     "<!doctype html>",
@@ -822,6 +871,55 @@ export async function unlinkMethod(db: AuthDb, userId: string, methodId: string)
   }
   await db.deleteMethod(methodId);
   return (await db.listMethods(userId)).map(publicMethod);
+}
+
+// Password confirmation is purpose-scoped and independent of ordinary sign-in
+// links. Only salted password hashes and token hashes are stored; a GET (including
+// mail scanning) cannot activate a password. Closing/restarting the app is safe.
+export async function requestPasswordConfirmation(db: AuthDb, userId: string, methodId: string,
+  password: string, opts: RequestMagicLinkOptions = {}) {
+  const nowMs = opts.nowMs ?? Date.now();
+  const method = await db.getMethodById(methodId);
+  if (!method || method.userId !== userId || method.method !== "email" || !method.emailVerified || !method.email) {
+    throw new AuthProblem(404, "method_not_found", "That verified email login wasn't found.");
+  }
+  if (!isValidPassword(password)) throw new AuthProblem(400, "invalid_password", "Use between 15 and 128 characters.");
+  if (!opts.send || !opts.baseUrl) throw new AuthProblem(503, "email_unavailable", "We couldn't send the confirmation email. Try again in a moment.");
+  if (!await db.takePasswordAttempt(`confirmation:${await sha256Hex(userId)}`, nowMs, 5)) {
+    throw new AuthProblem(429, "rate_limited", "Please wait a few minutes before requesting another confirmation email.");
+  }
+  const token = b64url(crypto.getRandomValues(new Uint8Array(32)));
+  const row: PasswordConfirmationRow = {
+    id: crypto.randomUUID(), userId, methodId, email: method.email,
+    tokenHash: await sha256Hex(token), passwordHash: await hashPassword(password), expectedHash: method.passwordHash,
+    createdAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + MAGIC_LINK_TTL_MS).toISOString(),
+  };
+  await db.createPasswordConfirmation(row);
+  const link = `${opts.baseUrl.replace(/\/$/, "")}/auth/magic?token=${encodeURIComponent(token)}&action=password`;
+  try {
+    await opts.send({ to: method.email, from: MAGIC_LINK_FROM, subject: "Confirm your Hygge password",
+      text: `Tap the link to save the password you just chose for Hygge:\n\n${link}\n\nIt works for 15 minutes, and only once. If you didn't request a password change, ignore this email. Your password will stay the same.`,
+      html: `<p>Confirm the password you just chose for Hygge.</p><p><a href="${link.replaceAll("&", "&amp;")}">Confirm password</a></p><p>This link works for 15 minutes, and only once. If you didn't request this change, ignore this email. Your password will stay the same.</p>` });
+  } catch {
+    await db.cancelPasswordConfirmation(row.id, userId);
+    throw new AuthProblem(502, "email_unavailable", "We couldn't send the confirmation email. Your password hasn't changed. Try again.");
+  }
+  return { id: row.id, email: row.email, expiresAt: row.expiresAt };
+}
+
+export async function confirmEmailPassword(db: AuthDb, token: string,
+  input: { sessionUserId?: string | null; nowMs?: number } = {}): Promise<AuthenticatedResult> {
+  const nowMs = input.nowMs ?? Date.now();
+  const row = await db.findPasswordConfirmation(await sha256Hex(token));
+  const invalid = () => new AuthProblem(401, "invalid_confirmation", "This confirmation link has expired or was already used. Create your password again to get a new email.");
+  if (!row || Date.parse(row.expiresAt) <= nowMs) throw invalid();
+  if (input.sessionUserId && input.sessionUserId !== row.userId) {
+    throw new AuthProblem(409, "different_account", "This link belongs to another account. Sign out before opening it.");
+  }
+  if (!await db.confirmPassword(row, nowMs)) throw invalid();
+  // Bind session issuance to the exact committed hash, guarding a concurrent change.
+  const session = await issueSession(db, row.userId, nowMs, { id: row.methodId, hash: row.passwordHash });
+  return { userId: row.userId, session, isNewUser: false, methods: (await db.listMethods(row.userId)).map(publicMethod) };
 }
 
 // ---- optional email passwords -------------------------------------------
@@ -942,7 +1040,7 @@ export async function handleAuthRequest(
     }
     if (request.method === "GET" && parts.join("/") === "auth/magic") {
       // Landing only: never consumes, so mail prefetchers are harmless.
-      return new Response(magicLandingHtml(url.searchParams.get("token") ?? ""), {
+      return new Response(magicLandingHtml(url.searchParams.get("token") ?? "", url.searchParams.get("action") === "password"), {
         headers: {
           "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store",
@@ -967,6 +1065,22 @@ export async function handleAuthRequest(
         nowMs: opts.nowMs, requesterHash: await requesterHashFrom(request),
       });
       return json(sessionBody(result));
+    }
+    if (request.method === "POST" && parts.join("/") === "auth/methods/password/request") {
+      const userId = await requireUser(request, env, db);
+      return json(await requestPasswordConfirmation(db, userId, str(body.methodId), str(body.password), {
+        nowMs: opts.nowMs, baseUrl: env.HYGGE_MAGIC_BASE_URL,
+        send: opts.sendMagicEmail ?? (env.EMAIL ? async m => { await env.EMAIL!.send(m); } : undefined),
+      }));
+    }
+    if (request.method === "POST" && parts.join("/") === "auth/methods/password/confirm") {
+      const sessionUserId = await resolveRequestUserId(request, env, db);
+      return json(sessionBody(await confirmEmailPassword(db, str(body.token), { sessionUserId, nowMs: opts.nowMs })));
+    }
+    if (request.method === "POST" && parts.join("/") === "auth/methods/password/cancel") {
+      const userId = await requireUser(request, env, db);
+      await db.cancelPasswordConfirmation(str(body.id), userId);
+      return json({ ok: true });
     }
     if (request.method === "POST" && parts.join("/") === "auth/methods/password") {
       return json({ methods: await setEmailPassword(db, bearerToken(request), str(body.methodId), str(body.password), opts.nowMs) });

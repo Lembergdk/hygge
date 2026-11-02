@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  AuthProblem,
+  AuthProblem, requestPasswordConfirmation, confirmEmailPassword, type PasswordConfirmationRow,
   passwordSignIn, setEmailPassword, issueSession, PASSWORD_REAUTH_MS, publicMethod,
   MAGIC_LINK_MAX_SENDS_PER_HOUR,
   MAGIC_LINK_TTL_MS,
@@ -24,6 +24,27 @@ import {
 } from "../src/auth.ts";
 
 class MemDb {
+  confirmations = new Map<string, PasswordConfirmationRow>();
+  async createPasswordConfirmation(row: PasswordConfirmationRow) {
+    for (const [key, pending] of this.confirmations) {
+      if (pending.methodId === row.methodId || pending.expiresAt <= row.createdAt) this.confirmations.delete(key);
+    }
+    this.confirmations.set(row.tokenHash, row);
+  }
+  async findPasswordConfirmation(hash: string) { return this.confirmations.get(hash) ?? null; }
+  async cancelPasswordConfirmation(id: string, userId: string) {
+    for (const [key, row] of this.confirmations) if (row.id === id && row.userId === userId) this.confirmations.delete(key);
+  }
+  async confirmPassword(row: PasswordConfirmationRow, nowMs: number) {
+    const live = this.confirmations.get(row.tokenHash);
+    const method = this.methods.get(row.methodId);
+    if (!live || Date.parse(live.expiresAt) <= nowMs || !method || method.userId !== row.userId ||
+      !method.emailVerified || method.email !== row.email || method.passwordHash !== row.expectedHash) return false;
+    method.passwordHash = row.passwordHash;
+    this.confirmations.delete(row.tokenHash);
+    await this.revokeAllSessions(row.userId, new Date(nowMs).toISOString());
+    return true;
+  }
   users = new Map<string, { id: string; contactEmail: string | null; displayName: string | null }>();
   methods = new Map<string, LinkedMethodRow>();
   sessions = new Map<string, AuthSessionRow>();
@@ -629,4 +650,99 @@ test("password change during sign-in cannot issue a session for the old hash", a
     return create(row, id, hash);
   };
   assert.equal((await problem(passwordSignIn(db, "sam@example.com", SECRET))).code, "invalid_credentials");
+});
+
+// ---- Password changes completed by a purpose-scoped email link -----------
+async function confirmationFixture() {
+  const db = new MemDb();
+  const userId = "confirmation-user";
+  await db.createUser({ id: userId, contactEmail: "person@example.com", displayName: null });
+  await db.addMethod({ id: "email-method", userId, method: "email", email: "person@example.com",
+    appleSub: null, appleEmail: null, passwordHash: null, emailVerified: true });
+  const session = await issueSession(db, userId);
+  let delivered: any;
+  const opts = { baseUrl: "https://api.usehygge.app", send: async (message: any) => { delivered = message; } };
+  const request = () => requestPasswordConfirmation(db, userId, "email-method", "a very good password", opts);
+  const token = () => new URL(delivered.text.match(/https:\/\/[^\s]+/)[0]).searchParams.get("token")!;
+  return { db, userId, session, request, token, opts, delivered: () => delivered };
+}
+
+test("password confirmation sends explicit mail and commits once, including without an app session", async () => {
+  const f = await confirmationFixture();
+  const receipt = await f.request();
+  assert.equal(receipt.email, "person@example.com");
+  assert.equal(f.db.methods.get("email-method")!.passwordHash, null);
+  assert.equal(f.delivered().subject, "Confirm your Hygge password");
+  assert.match(f.delivered().text, /action=password/);
+  assert.doesNotMatch(JSON.stringify([...f.db.confirmations.values()]), /a very good password/);
+  // A regular magic link endpoint cannot consume this token.
+  assert.equal((await problem(consumeMagicLink(f.db, f.token()))).code, "invalid_magic_link");
+  const result = await confirmEmailPassword(f.db, f.token());
+  assert.equal(result.isNewUser, false);
+  assert.equal(result.methods[0].hasPassword, true);
+  assert.equal(await resolveSessionUserId(f.db, f.session.token), null);
+  assert.equal(await resolveSessionUserId(f.db, result.session.token), f.userId);
+  assert.equal((await passwordSignIn(f.db, "person@example.com", "a very good password")).userId, f.userId);
+  assert.equal((await problem(confirmEmailPassword(f.db, f.token()))).code, "invalid_confirmation");
+});
+
+test("confirmation rejects wrong account, expired, cancelled and superseded links", async () => {
+  const f = await confirmationFixture();
+  const first = await f.request();
+  const oldToken = f.token();
+  assert.equal((await problem(confirmEmailPassword(f.db, oldToken, { sessionUserId: "other" }))).code, "different_account");
+  assert.equal(f.db.methods.get("email-method")!.passwordHash, null);
+  assert.equal((await problem(confirmEmailPassword(f.db, oldToken, { nowMs: Date.now() + MAGIC_LINK_TTL_MS + 1000 }))).code, "invalid_confirmation");
+  await f.db.cancelPasswordConfirmation(first.id, "other");
+  assert.equal(f.db.confirmations.size, 1); // another user cannot cancel it
+  const latest = await f.request();
+  assert.equal((await problem(confirmEmailPassword(f.db, oldToken))).code, "invalid_confirmation");
+  await f.db.cancelPasswordConfirmation(latest.id, f.userId);
+  assert.equal((await problem(confirmEmailPassword(f.db, f.token()))).code, "invalid_confirmation");
+});
+
+test("delivery failure is explicit and leaves no usable pending change", async () => {
+  const f = await confirmationFixture();
+  const error = await problem(requestPasswordConfirmation(f.db, f.userId, "email-method", "a very good password", {
+    baseUrl: f.opts.baseUrl, send: async () => { throw new Error("provider failure"); },
+  }));
+  assert.equal(error.code, "email_unavailable");
+  assert.equal(f.db.confirmations.size, 0);
+  assert.equal(f.db.methods.get("email-method")!.passwordHash, null);
+});
+
+test("confirmation cannot overwrite a newer password or follow a deleted/relinked method", async () => {
+  for (const change of ["password", "owner", "delete", "verification"]) {
+    const f = await confirmationFixture(); await f.request();
+    const m = f.db.methods.get("email-method")!;
+    if (change === "password") m.passwordHash = "newer-password-hash";
+    if (change === "owner") m.userId = "other";
+    if (change === "delete") f.db.methods.delete(m.id);
+    if (change === "verification") m.emailVerified = false;
+    assert.equal((await problem(confirmEmailPassword(f.db, f.token()))).code, "invalid_confirmation");
+    assert.equal(await resolveSessionUserId(f.db, f.session.token), f.userId);
+  }
+});
+
+test("password request requires an owned verified email, validates password and throttles sends", async () => {
+  const f = await confirmationFixture();
+  assert.equal((await problem(requestPasswordConfirmation(f.db, "other", "email-method", "a very good password", f.opts))).code, "method_not_found");
+  assert.equal((await problem(requestPasswordConfirmation(f.db, f.userId, "email-method", "short", f.opts))).code, "invalid_password");
+  for (let i = 0; i < 5; i++) await f.request();
+  assert.equal((await problem(f.request())).code, "rate_limited");
+});
+
+test("confirmation HTTP routes enforce auth, keep GET scanner-safe and preserve action in app fallback", async () => {
+  const f = await confirmationFixture();
+  const env = { HYGGE_MAGIC_BASE_URL: "https://api.usehygge.app" } as any;
+  const request = (path: string, body: object, signedIn = true) => new Request(`https://api.usehygge.app/auth/${path}`, {
+    method: "POST", headers: signedIn ? { Authorization: `Bearer ${f.session.token}` } : {}, body: JSON.stringify(body),
+  });
+  assert.equal((await handleAuthRequest(request("methods/password/request", {}, false), env, f.db)).status, 401);
+  const sent = await handleAuthRequest(request("methods/password/request", { methodId: "email-method", password: "a very good password" }), env, f.db, { sendMagicEmail: f.opts.send });
+  assert.equal(sent.status, 200);
+  const landing = await handleAuthRequest(new Request(`https://api.usehygge.app/auth/magic?token=${f.token()}&action=password`), env, f.db);
+  assert.match(await landing.text(), /action=password/);
+  assert.equal(f.db.methods.get("email-method")!.passwordHash, null);
+  assert.equal((await handleAuthRequest(request("methods/password/confirm", { token: f.token() }), env, f.db)).status, 200);
 });

@@ -164,12 +164,15 @@ final class AppStore {
     /// True with a usable session token (Keychain, or a Debug
     /// developer token). Drives the launch sign-in gate (Brief 00).
     var isSignedIn = false
+    var isExistingAccount = false
+    private(set) var isCompletingSignIn = false
 
     init() {
         if !load() {
             opportunities = SampleData.opportunities
         }
         isSignedIn = backend.hasSessionToken
+        isExistingAccount = isSignedIn && !backend.sessionIsNewUser
         visitMarker = lastVisitAt ?? .distantPast
         lastVisitAt = Date()
         // A token or a tap that arrives while running is drained
@@ -238,6 +241,9 @@ final class AppStore {
     /// A magic-link token that arrived via a URL, waiting for the
     /// sign-in step to consume it. Never persisted, never logged.
     var pendingMagicToken: String?
+    var passwordFlow: PasswordConfirmationState?
+    var isShowingLogins = false
+    var isShowingProfile = false
     /// One calm sentence when a tapped link no longer works.
     var magicLinkError: String?
     /// "I already have an account": show the sign-in message alone.
@@ -250,6 +256,7 @@ final class AppStore {
 
     func refreshAuthState() {
         isSignedIn = backend.hasSessionToken
+        isExistingAccount = isSignedIn && !backend.sessionIsNewUser
         // Any live session (including one from a build predating
         // this flag) proves a previous sign-in on this phone.
         if isSignedIn { UserDefaults.standard.set(true, forKey: Self.hasSignedInBeforeKey) }
@@ -259,6 +266,10 @@ final class AppStore {
     /// steer routing to the sign-in message, which consumes it.
     func handleMagicURL(_ url: URL) -> Bool {
         guard let token = MagicLink.token(from: url) else { return false }
+        if MagicLink.isPasswordConfirmation(url) {
+            Task { await finishPasswordConfirmation(token: token) }
+            return true
+        }
         pendingMagicToken = token
         magicLinkError = nil
         if !isSignedIn { wantsSignIn = true }
@@ -274,9 +285,23 @@ final class AppStore {
     /// exactly once via the existing first-sign-in migration.
     /// `hasOnboarded` only ever flips true from here.
     func finishSignIn(localProfile: EarningsProfile? = nil) async {
-        refreshAuthState()
-        wantsSignIn = false
-        wantsOnboarding = false
+        guard !isCompletingSignIn else { return }
+        isCompletingSignIn = true
+        var accountLoaded = false
+        defer {
+            isCompletingSignIn = false
+            if accountLoaded {
+                refreshAuthState()
+                wantsSignIn = false
+                wantsOnboarding = false
+            }
+        }
+        // Keep the sign-in view mounted until adoption finishes. In particular,
+        // do not publish isSignedIn while hasOnboarded is still the cleared cache.
+        while isSyncing {
+            guard !Task.isCancelled else { return }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
         magicLinkError = nil
         // Identity safety: if the session just issued belongs to a
         // different account than the one cached on this device, the
@@ -318,6 +343,8 @@ final class AppStore {
                 magicLinkError = "You're signed in, but your account wouldn't load just now. Try your sign-in again in a moment."
                 return
             }
+            accountLoaded = true
+            if !backend.sessionIsNewUser { return }
             switch SignInCompletion.decide(serverHasState: true,
                                            serverHasOnboarded: hasOnboarded,
                                            localProfileComplete: localComplete) {
@@ -330,13 +357,23 @@ final class AppStore {
                 return
             }
         }
+        if !backend.sessionIsNewUser {
+            // An existing identity may have no profile row yet. It still belongs
+            // in Home; never import another account's cached onboarding answers.
+            resetLocalState()
+            markBackendFirst(hasReal: false)
+            writeCache()
+            accountLoaded = true
+            return
+        }
         // Fresh account: finish locally when the answers are
         // complete, then run the one-time import, which itself
         // refuses to overwrite a server that already has state.
         if localComplete {
             completeOnboarding(profile: answers)
         }
-        await syncOnLaunch()
+        await syncOnLaunch(finishingSignIn: true)
+        accountLoaded = true
     }
 
     // MARK: - Push notifications (Brief 07)
@@ -446,6 +483,8 @@ final class AppStore {
         highlightedOpportunityID = nil
         await backend.signOut()
         isSignedIn = false
+        isExistingAccount = false
+        passwordFlow = nil
         pendingMagicToken = nil
         magicLinkError = nil
         wantsOnboarding = false
@@ -1210,8 +1249,8 @@ final class AppStore {
 
     /// Launch entry point: migrate once if needed, otherwise pull.
     /// Any failure leaves the cache exactly as it was.
-    func syncOnLaunch() async {
-        guard !isSyncing else { return }
+    func syncOnLaunch(finishingSignIn: Bool = false) async {
+        guard (!isCompletingSignIn || finishingSignIn), !isSyncing else { return }
         if isBackendFirst {
             await pullFromServer()
             return

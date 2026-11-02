@@ -62,6 +62,12 @@ public enum MagicLink {
         return token
     }
 
+    public static func isPasswordConfirmation(_ url: URL) -> Bool {
+        guard token(from: url) != nil else { return false }
+        return URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+            .contains(where: { $0.name == "action" && $0.value == "password" }) == true
+    }
+
     public static func isMagicLink(_ url: URL) -> Bool { token(from: url) != nil }
 }
 
@@ -128,9 +134,10 @@ public enum AuthGate {
                                isSignedIn: Bool, authRequired: Bool,
                                wantsSignIn: Bool = false,
                                hasSignedInBefore: Bool = false,
-                               wantsOnboarding: Bool = false) -> AuthGateScreen {
+                               wantsOnboarding: Bool = false,
+                               isExistingAccount: Bool = false) -> AuthGateScreen {
         if isSignedIn {
-            return hasOnboarded ? .home : .onboarding
+            return (isExistingAccount || hasOnboarded) ? .home : .onboarding
         }
         // Signed out from here.
         if wantsOnboarding {

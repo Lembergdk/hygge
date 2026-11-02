@@ -11,7 +11,6 @@ struct LoginMethodsContent: View {
     @State private var currentNonce: String?
     @State private var editingMethodID: String?
     @State private var password = ""
-    @State private var reauthenticationNeeded = false
     @State private var passwordConfirmation: String?
 
     var body: some View {
@@ -123,16 +122,11 @@ struct LoginMethodsContent: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("New password").font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
                 AccountPasswordField(title: "At least 15 characters", password: $password)
-                if reauthenticationNeeded {
-                    Button("Confirm with an email link") { Task { await sendLink(to: method.email ?? "") } }
-                        .buttonStyle(SettingsActionStyle())
-                } else {
-                    Button(method.hasPassword ? "Update password" : "Create password") {
-                        Task { await savePassword(for: method) }
-                    }.buttonStyle(SettingsActionStyle())
-                        .disabled(!HyggeAuth.isValidPassword(password))
-                        .opacity(HyggeAuth.isValidPassword(password) ? 1 : 0.5)
-                }
+                Button(method.hasPassword ? "Update password" : "Create password") {
+                    Task { await savePassword(for: method) }
+                }.buttonStyle(SettingsActionStyle())
+                    .disabled(!HyggeAuth.isValidPassword(password))
+                    .opacity(HyggeAuth.isValidPassword(password) ? 1 : 0.5)
                 Button("Cancel") { closeEditor() }
                     .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
                     .frame(maxWidth: .infinity, minHeight: 44).buttonStyle(.plain)
@@ -142,7 +136,6 @@ struct LoginMethodsContent: View {
                 editingMethodID = method.id
                 password = ""
                 message = nil
-                reauthenticationNeeded = false
             } label: {
                 HStack(spacing: 14) {
                     Image(systemName: "key").font(.title2).frame(width: 32)
@@ -159,7 +152,6 @@ struct LoginMethodsContent: View {
     private func closeEditor() {
         editingMethodID = nil
         password = ""
-        reauthenticationNeeded = false
         message = nil
     }
 
@@ -168,12 +160,9 @@ struct LoginMethodsContent: View {
         message = nil
         defer { isWorking = false }
         do {
-            methods = try await store.backend.setEmailPassword(methodID: method.id, password: password)
+            let receipt = try await store.backend.requestPasswordConfirmation(methodID: method.id, password: password)
             closeEditor()
-            passwordConfirmation = method.hasPassword ? "Password updated" : "Password created"
-        } catch AuthClientError.reauthenticationRequired {
-            reauthenticationNeeded = true
-            message = AuthCopy.message(for: AuthClientError.reauthenticationRequired)
+            store.passwordFlow = PasswordConfirmationState(phase: .waiting, email: receipt.email, requestID: receipt.id)
         } catch { message = AuthCopy.message(for: error) }
     }
 
@@ -212,8 +201,7 @@ struct LoginMethodsContent: View {
             if let updated = try await store.backend.consumeMagicLink(token: token) {
                 methods = updated
                 linkEmail = ""
-                message = reauthenticationNeeded ? "Confirmed. You can set your password now." : "Email sign-in added."
-                reauthenticationNeeded = false
+                message = "Email sign-in added."
                 store.magicLinkError = nil
             }
         } catch { store.magicLinkError = AuthCopy.message(for: error) }
