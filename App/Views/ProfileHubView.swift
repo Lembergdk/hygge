@@ -92,15 +92,22 @@ struct ProfileHubView: View {
     }
 
     private var insights: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .bottom) {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .bottom, spacing: 0) {
                 Text("A little more for you").font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                Spacer(minLength: 0)
-                FlameMark(size: 52)
-            }
+                    .padding(.bottom, 12)
+                // Reserve room for the peeking artwork anchored to the card below.
+                Spacer(minLength: 104)
+            }.frame(minHeight: 74, alignment: .bottom)
             HStack(alignment: .top, spacing: 12) {
-                metric("Confirmed earnings", value: JournalBuilder.money(store.earningsGross), asset: "SettingsEarnings", tint: HyggeTheme.butterTint)
+                metric("Logged earnings", value: JournalBuilder.money(store.earningsGross), asset: "SettingsEarnings", tint: HyggeTheme.butterTint)
                 metric("Time saved", value: store.timeSavedMinutes == 0 ? "0 min" : TimeSaved.aboutLabel(minutes: store.timeSavedMinutes), asset: "SettingsTime", tint: HyggeTheme.sageTint)
+                    .overlay(alignment: .topTrailing) {
+                        Image("SettingsInsightsFlame").resizable().scaledToFit()
+                            .frame(width: 124, height: 93)
+                            .offset(y: -77)
+                            .accessibilityHidden(true).allowsHitTesting(false)
+                    }
             }
         }
     }
