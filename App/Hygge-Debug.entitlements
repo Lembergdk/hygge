@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Debug/personal builds hold development APNs tokens; the
+	     staging sender pairs with this via HYGGE_APNS_ENVIRONMENT=sandbox. -->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

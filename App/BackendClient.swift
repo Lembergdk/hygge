@@ -213,6 +213,31 @@ struct BackendClient {
         return response.messages
     }
 
+    // MARK: - Push notifications (Brief 07)
+    //
+    // The device token is registered for the signed-in user only;
+    // the session in the Authorization header is the identity, the
+    // token itself proves nothing. Registration is idempotent, so a
+    // refresh on every foregrounding is safe. Unregistering happens
+    // on sign-out, before the session goes away.
+
+    private struct DeviceTokenAck: Decodable { var registered: Bool? }
+    private struct DeviceTokenBody: Encodable { var token: String; var platform: String }
+
+    @discardableResult
+    func registerDeviceToken(_ token: String) async -> Bool {
+        guard DeviceTokenEncoding.isPlausible(token) else { return false }
+        let ack: DeviceTokenAck? = try? await post(
+            "device-tokens",
+            body: DeviceTokenBody(token: token.lowercased(), platform: "ios"))
+        return ack?.registered == true
+    }
+
+    @discardableResult
+    func unregisterDeviceToken(_ token: String) async -> Bool {
+        await delete(path: "device-tokens/\(token.lowercased())")
+    }
+
     private func delete(path: String) async -> Bool {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "DELETE"

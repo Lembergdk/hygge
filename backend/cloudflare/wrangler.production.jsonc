@@ -36,7 +36,12 @@
     // Brief 04 receive-only email domain. Email Routing (MX +
     // catch-all to this worker) is a dashboard step — see
     // docs/email-usehygge-cc.md. No send binding exists.
-    "HYGGE_EMAIL_DOMAIN": "usehygge.cc"
+    "HYGGE_EMAIL_DOMAIN": "usehygge.cc",
+    // Brief 07: Release builds hold production APNs tokens. The .p8
+    // key is a secret (HYGGE_APNS_KEY_P8) and the key/team ids are
+    // set per environment once the key exists — see
+    // docs/push-notifications.md.
+    "HYGGE_APNS_ENVIRONMENT": "production"
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "hygge-production", "database_id": "d36ecef4-1b4c-4679-bc52-158b6f552775" }

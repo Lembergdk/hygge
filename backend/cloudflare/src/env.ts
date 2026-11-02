@@ -16,9 +16,13 @@ export interface Env {
   HYGGE_DEV_TOKENS?: string; // staging only: JSON map token -> userId
   HYGGE_APPLE_BUNDLE_ID?: string;
   HYGGE_EMAIL_DOMAIN?: string; // receive-only @usehygge.cc domain (Brief 04)
+  // Brief 07 APNs (see push.ts): HYGGE_APNS_KEY_P8 is a wrangler
+  // secret only; key/team ids may be vars or secrets. APNs host is
+  // chosen by HYGGE_APNS_ENVIRONMENT ("sandbox" | "production").
   HYGGE_APNS_KEY_P8?: string;
   HYGGE_APNS_KEY_ID?: string;
   HYGGE_APNS_TEAM_ID?: string;
+  HYGGE_APNS_ENVIRONMENT?: string;
 }
 
 export function json(body: unknown, status = 200): Response {

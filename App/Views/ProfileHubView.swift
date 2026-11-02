@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Profile hub — sections in the fixed spec order. Opened only from the
 /// profile button on Home. Beliefs are editable sentences, not a form.
@@ -11,6 +12,7 @@ struct ProfileHubView: View {
     @State private var saveLoginSite: TargetSite?
     @State private var editingBelief: Belief?
     @State private var beliefDraft = ""
+    @State private var pushAuthorization: NotificationAuthorizationKind = .notDetermined
 
     var body: some View {
         NavigationStack {
@@ -27,6 +29,7 @@ struct ProfileHubView: View {
                         invite
                         hyggeAccount
                         hyggeEmail
+                        notifications
                         loginsAndService
                         Color.clear.frame(height: 12)
                     }
@@ -37,6 +40,7 @@ struct ProfileHubView: View {
             .task {
                 await store.refreshSessionProfiles()
                 await store.refreshHyggeEmail()
+                pushAuthorization = await PermissionService.notificationAuthorization()
             }
             .sheet(item: $saveLoginSite) { site in
                 CredentialSaveSheet(siteName: site.name, domain: site.domain)
@@ -357,6 +361,38 @@ struct ProfileHubView: View {
                     .font(.caption).foregroundStyle(HyggeTheme.secondary)
                 Button("Get a Hygge email address") {
                     Task { await store.chooseHyggeEmailAddress() }
+                }
+                .font(.caption.weight(.semibold)).buttonStyle(.bordered).tint(HyggeTheme.sageDeep)
+            }
+        }
+    }
+
+    /// Brief 07: the quiet way back in. Hygge asked once (the Home
+    /// primer) and never nags; after a no, this section is the only
+    /// place notifications come up again.
+    private var notifications: some View {
+        sectionCard("Notifications", badge: "bell") {
+            switch pushAuthorization {
+            case .authorized:
+                Text("On. Hygge lets you know only when something needs you, or when new work turns up while you are away.")
+                    .font(.caption).foregroundStyle(HyggeTheme.secondary)
+            case .denied:
+                Text("Off. Turn them on if you would like a word when something needs you — nothing is missed either way; it all waits in your feed.")
+                    .font(.caption).foregroundStyle(HyggeTheme.secondary)
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+                .font(.caption.weight(.semibold)).buttonStyle(.bordered).tint(HyggeTheme.sageDeep)
+            case .notDetermined:
+                Text("Hygge can let you know when something needs your OK, or when new work turns up while you are away. Nothing else, ever.")
+                    .font(.caption).foregroundStyle(HyggeTheme.secondary)
+                Button("Yes, let me know") {
+                    Task {
+                        await store.allowNotifications()
+                        pushAuthorization = await PermissionService.notificationAuthorization()
+                    }
                 }
                 .font(.caption.weight(.semibold)).buttonStyle(.bordered).tint(HyggeTheme.sageDeep)
             }

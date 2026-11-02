@@ -3,6 +3,7 @@ import { json, sandboxFor } from "./env.ts";
 import { handleAuthRequest, resolveRequestUserId } from "./auth.ts";
 import { runDateOf, slotForCron, sweepOrder } from "./scan.ts";
 import { handleEmailAddressRequest, handleEmailMessage } from "./email.ts";
+import { d1PushDb, handleDeviceTokenRequest } from "./push.ts";
 
 export { UserSandbox } from "./user-sandbox.ts";
 
@@ -36,6 +37,8 @@ const USER_ROUTES = [
   "/scheduled-scan",
   // Brief 04 receive-only email: own address + filed mail + codes meta.
   "/email",
+  // Brief 07 push: own device-token registration (D1, see push.ts).
+  "/device-tokens",
 ];
 
 /// Fleet sweeper (Brief 05): one cron tick fans out to every user's
@@ -126,6 +129,13 @@ export default {
     // DO. Everything else user-scoped goes into the user's sandbox.
     if (url.pathname === "/email/address") {
       return handleEmailAddressRequest(request, env, userId);
+    }
+
+    // Device tokens also live in D1 (the sender runs outside any
+    // one user's object during scan ticks only via that user's DO,
+    // but registration itself is a fleet-table write).
+    if (url.pathname === "/device-tokens" || url.pathname.startsWith("/device-tokens/")) {
+      return handleDeviceTokenRequest(request, userId, d1PushDb(env.DB));
     }
 
     // Everything user-scoped happens inside that user's sandbox.
