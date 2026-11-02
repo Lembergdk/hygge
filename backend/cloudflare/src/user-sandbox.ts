@@ -978,8 +978,10 @@ export class UserSandbox extends DurableObject<Env> {
       // human-only check still decides nothing.
       status: checks && missionStatus !== "needs_human" ? "succeeded" : missionStatus,
       appWall, checks,
+      // With checks decided, let applyProbeOutcome phrase the
+      // evidence (it names exactly which checks failed).
       evidence: appWall ? "A key step can only be done in the site's phone app."
-        : checks ? "Checked signup, profile editing, and starting an application on the web."
+        : checks ? null
         : "The web check could not finish, so nothing was decided yet.",
     };
   }
