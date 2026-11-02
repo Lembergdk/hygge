@@ -49,8 +49,14 @@ jobs:
           security import $CERT_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
+          security cms -D -i "$PP_PATH" > /tmp/hygge-profile.plist
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' /tmp/hygge-profile.plist)
+          echo "HYGGE_PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
+          cp "$PP_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+      - name: Verify provisioning profile capabilities
+        run: python3 scripts/check-release-app-links.py --profile /tmp/profile.mobileprovision
 
       - name: Archive with app capabilities
         run: >
@@ -60,12 +66,12 @@ jobs:
           CURRENT_PROJECT_VERSION=$((BUILD_NUMBER + 100))
           CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Manual
           CODE_SIGN_IDENTITY="Apple Distribution: Get BOB, Inc."
-          PROVISIONING_PROFILE_SPECIFIER="Hygge App Store CI"
+          PROVISIONING_PROFILE_SPECIFIER="$HYGGE_PROFILE_UUID"
           archive
 
       - name: Export IPA (manual signing)
         run: |
-          cat > /tmp/ExportOptionsCI.plist <<'PLIST'
+          cat > /tmp/ExportOptionsCI.plist <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -81,7 +87,7 @@ jobs:
             <key>provisioningProfiles</key>
             <dict>
               <key>app.usehygge</key>
-              <string>Hygge App Store CI</string>
+              <string>$HYGGE_PROFILE_UUID</string>
             </dict>
             <key>uploadSymbols</key>
             <true/>
@@ -95,7 +101,7 @@ jobs:
             -exportPath /tmp/HyggeExport \
             -exportOptionsPlist /tmp/ExportOptionsCI.plist
 
-      - name: Verify exported Universal Link entitlements
+      - name: Verify exported app capabilities
         run: python3 scripts/check-release-app-links.py /tmp/HyggeExport/Hygge.ipa
 
       - name: Upload to TestFlight

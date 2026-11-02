@@ -36,6 +36,15 @@ fails the release instead of silently shipping a web-only handoff. No credential
 Apple capabilities, provisioning profiles or live releases were changed by this
 code change.
 
+The 2026-11-02 TestFlight archive exposed a stale CI provisioning profile: Apple
+marked it invalid, and it omitted Associated Domains, Push Notifications and
+Sign in with Apple even though the App ID already enabled all three. Replace
+`BUILD_PROVISION_PROFILE_BASE64` with a freshly generated App Store profile for
+the same App ID and distribution certificate. The workflow selects that profile
+by its embedded UUID for both archive and export, avoiding a fixed display name.
+It checks profile expiration, distribution type and every declared release
+capability before archiving, then checks the signed IPA again before upload.
+
 ## Acceptance and limits
 
 Automated tests cover direct email hrefs, iPhone/iPad handoffs, desktop handling,
