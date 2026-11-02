@@ -40,6 +40,36 @@ export class BrowserRunBrowser {
   async createSession(url: string, restore?: SessionState | null): Promise<Snapshot> {
     const browser = await launch(this.binding);
     const page = await browser.newPage();
+    // Experience parity with an end user's browser: no safe-mode
+    // restrictions are imposed anywhere (JavaScript and cookies
+    // stay enabled, nothing is content-blocked), the viewport is
+    // a normal laptop size instead of the 800x600 automation
+    // default, and the UA keeps the real engine/platform/version
+    // minus the "Headless" token. Datacenter egress and a fresh
+    // profile per session remain inherent to server-side
+    // browsing; the user's saved sign-in restores on top below.
+    await page.setJavaScriptEnabled(true).catch(() => {});
+    await page.setViewport({ width: 1365, height: 900 }).catch(() => {});
+    try {
+      const ua = (await page.evaluate(() => navigator.userAgent)) as unknown as string;
+      if (ua.includes("HeadlessChrome")) {
+        const clean = ua.replace("HeadlessChrome", "Chrome");
+        // Browser Run ignores puppeteer's setUserAgent; the CDP
+        // emulation override is what sticks (header + JS alike).
+        let applied = false;
+        try {
+          const cdp = await (page as any).createCDPSession();
+          await cdp.send("Emulation.setUserAgentOverride", { userAgent: clean });
+          applied = true;
+        } catch { /* fall through */ }
+        if (!applied) {
+          try { await page.setUserAgent(clean); } catch { /* header below still applies */ }
+        }
+        // Browser Run may silently ignore both overrides above at
+        // the JS level; the header override always reaches servers.
+        await page.setExtraHTTPHeaders({ "User-Agent": clean }).catch(() => {});
+      }
+    } catch { /* keep the default UA */ }
     if (restore?.cookies?.length) {
       await (page as Page).setCookie(...(restore.cookies as never[])).catch(() => {});
     }
