@@ -257,7 +257,7 @@ struct OnboardingView: View {
                             ProgressView().controlSize(.small).tint(GPTheme.teal)
                             Text("Finding you…")
                         } else {
-                            Label("Use my current location", systemImage: "location.fill")
+                            Label("Use my location", systemImage: "location.fill")
                         }
                     }
                     .font(.subheadline.weight(.medium)).foregroundStyle(GPTheme.teal)
@@ -275,16 +275,15 @@ struct OnboardingView: View {
                 .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty)
                 .opacity(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty ? 0.45 : 1)
             case .when:
-                // Free text, like any other message — no invented picker UI.
-                textRow(placeholder: "Weekends, weekday evenings…")
+                // Calendar permission only. Availability itself is
+                // honed later in the ongoing conversation, not here.
                 permissionRow(icon: "calendar", title: "Calendar",
                               why: "So I never double-book you, and approved gigs land in your calendar.",
                               granted: calendarGranted) {
                     Task { calendarGranted = await PermissionService.requestCalendar() }
                 }
                 primaryButton("Continue") {
-                    submitUser(input.isEmpty ? "It varies" : input, value: input)
-                    input = ""
+                    submitUser(calendarGranted == true ? "Calendar allowed" : "Not now", value: "")
                 }
             case .summary:
                 summaryCard
@@ -316,7 +315,10 @@ struct OnboardingView: View {
             if !conversation.profile.skills.isEmpty {
                 summaryRow("wrench.and.screwdriver", conversation.profile.skills.joined(separator: ", "))
             }
-            summaryRow("mappin.and.ellipse", "\(conversation.profile.locationLabel) — from $\(Int(conversation.profile.hourlyRateFloor))/hr")
+            if !conversation.profile.locationLabel.isEmpty {
+                summaryRow("mappin.and.ellipse", conversation.profile.locationLabel)
+            }
+            summaryRow("banknote", "From $\(Int(conversation.profile.hourlyRateFloor))/hr")
             if !conversation.profile.availabilityNotes.isEmpty {
                 summaryRow("clock", conversation.profile.availabilityNotes)
             }
@@ -459,12 +461,13 @@ struct OnboardingView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         tileIcon(category, selected: selected)
                         tileText(category, selected: selected)
-                        Spacer(minLength: 0)
                     }
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
             .padding(.horizontal, 16).padding(.vertical, 14)
+            // Hug the content: the row is only as tall as its
+            // tallest tile's label needs, tops aligned.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(selected ? HyggeTheme.peach : GPTheme.card,
                         in: RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20)

@@ -168,7 +168,7 @@ final class HyggeCoreTests: XCTestCase {
         _ = chat.submitText("25") // rate -> where (already known, skipped) -> when
         XCTAssertEqual(chat.step, .when)
         chat.profile.availabilityNotes = "Mornings"
-        XCTAssertTrue(chat.submitText("")) // availability already satisfied
+        XCTAssertTrue(chat.submitText("")) // calendar step answered -> summary
         XCTAssertEqual(chat.step, .summary)
     }
 

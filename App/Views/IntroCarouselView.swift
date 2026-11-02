@@ -34,7 +34,7 @@ struct IntroCarouselView: View {
     /// at accessibility text sizes, where the words need the room.
     @Environment(\.dynamicTypeSize) private var typeSize
     var flameSize: CGFloat { typeSize.isAccessibilitySize ? 84 : 150 }
-    var flameTop: CGFloat { typeSize.isAccessibilitySize ? 88 : 168 }
+    var flameTop: CGFloat { typeSize.isAccessibilitySize ? 72 : 120 }
     /// Vertical space pages reserve under the flame.
     var flameZone: CGFloat { flameTop + flameSize * 1.25 + 14 }
 
@@ -50,12 +50,12 @@ struct IntroCarouselView: View {
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.top, flameTop)
                         .allowsHitTesting(false)
-                    Button("Skip") { onFinish(.signup) }
+                    Button("Log in") { onFinish(.signIn) }
                         .font(.body)
                         .foregroundStyle(HyggeTheme.secondary)
                         .padding(.top, 14)
                         .padding(.trailing, 22)
-                        .accessibilityLabel("Skip introduction")
+                        .accessibilityLabel("Log in")
                 }
                 }
                 bottomCluster
@@ -121,17 +121,6 @@ struct IntroCarouselView: View {
                     .accessibilityHidden(true)
             }
 
-            // Constant-height row: only visible/tappable on page 3, so
-            // the cluster never resizes (and pages never jump) mid-swipe.
-            Button { onFinish(.signIn) } label: {
-                Text("Already have an account? Sign in")
-                    .font(.subheadline)
-                    .foregroundStyle(HyggeTheme.secondary)
-            }
-            .buttonStyle(.plain)
-            .opacity(page == 2 ? 1 : 0)
-            .allowsHitTesting(page == 2)
-            .accessibilityHidden(page != 2)
         }
         .padding(.horizontal, 22)
         .padding(.top, 10)

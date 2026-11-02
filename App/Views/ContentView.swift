@@ -20,9 +20,9 @@ struct ContentView: View {
                 hasSeenCarousel = true
             }
         case .signIn:
-            // Returning user: the same conversation, showing only
-            // its sign-in message.
-            OnboardingView(signInOnly: true)
+            // The minimal log in page (carousel "Log in", or a
+            // signed-out returning user).
+            LoginView()
         case .onboarding:
             OnboardingView()
         case .home:

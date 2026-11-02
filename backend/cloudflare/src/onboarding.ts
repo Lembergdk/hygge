@@ -14,7 +14,7 @@ const OBJECTIVES: Record<string, string> = {
   enjoyWork: "Ask what kinds of work they actually enjoy. Suggest categories and skills tailored to anything they've mentioned. Taste first, taxonomy second.",
   lowestRate: "Ask their lowest rate ($/hr or per job). Explain anything below it gets quietly dropped and never shown. The floor is a hard bound.",
   where: "Ask roughly where they are (town or city). Explain briefly: it keeps local work near them. Only this one question.",
-  when: "Ask when they're usually free. Explain briefly: it stops double-bookings. Only this one question; free text is fine.",
+  when: "Ask for calendar permission in one short sentence: so you never double-book them and approved gigs land in their calendar. Do NOT ask about their availability or schedule — that comes later. Say continuing without it is fine.",
   // Legacy step name from older app builds; treat as the where question.
   whereWhen: "Ask roughly where they are (town or city). Explain briefly: it keeps local work near them. Only this one question.",
   summary: "Summarize their profile in a warm sentence or two, propose a one-line headline, and end with: I'll look overnight and tell you in the morning - sooner if something needs you.",
@@ -27,7 +27,7 @@ const FALLBACK_REPLIES: Record<string, string> = {
   enjoyWork: "What kinds of work do you actually enjoy? Tap any that fit, or just tell me.",
   lowestRate: "What's your lowest rate? Anything below it, I'll quietly drop — you'll never see it.",
   where: "Roughly where are you? It keeps local work close to home.",
-  when: "And when are you usually free? It stops me double-booking you.",
+  when: "One permission helps: your calendar, so I never double-book you and approved gigs land in it.",
   whereWhen: "Roughly where are you? It keeps local work close to home.",
   summary: "That's all I need to start. I'll look overnight and tell you in the morning — sooner if something needs you.",
   general: "I'm here. Ask me anything, or tell me what to change.",
