@@ -52,13 +52,15 @@ jobs:
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
 
-      - name: Archive (unsigned; export signs)
+      - name: Archive with app capabilities
         run: >
           xcodebuild -project Hygge.xcodeproj -scheme Hygge
           -configuration Release -destination 'generic/platform=iOS'
           -archivePath /tmp/Hygge.xcarchive
           CURRENT_PROJECT_VERSION=$((BUILD_NUMBER + 100))
-          CODE_SIGNING_ALLOWED=NO
+          CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Manual
+          CODE_SIGN_IDENTITY="Apple Distribution: Get BOB, Inc."
+          PROVISIONING_PROFILE_SPECIFIER="Hygge App Store CI"
           archive
 
       - name: Export IPA (manual signing)
@@ -92,6 +94,9 @@ jobs:
             -archivePath /tmp/Hygge.xcarchive \
             -exportPath /tmp/HyggeExport \
             -exportOptionsPlist /tmp/ExportOptionsCI.plist
+
+      - name: Verify exported Universal Link entitlements
+        run: python3 scripts/check-release-app-links.py /tmp/HyggeExport/Hygge.ipa
 
       - name: Upload to TestFlight
         run: >

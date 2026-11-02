@@ -709,21 +709,58 @@ export async function consumeMagicLink(
   return { kind: "session", result: await authenticated(db, userId, true) };
 }
 
-/// Mail scanners prefetch links, so the landing page never consumes:
-/// it only offers the app link, which the app POSTs to consume.
+/// Universal Links open the app before this fallback is requested. Mail scanners
+/// may fetch the fallback: GET never consumes a token or creates a session.
 export function magicLandingHtml(rawToken: string): string {
-  const appLink = `hygge://auth/magic?token=${encodeURIComponent(rawToken ?? "")}`;
+  const token = rawToken ?? "";
+  const appLink = `hygge://auth/magic?token=${encodeURIComponent(token)}`;
+  const canOpen = /^[A-Za-z0-9_-]{43}$/.test(token);
   return [
     "<!doctype html>",
     '<html lang="en"><head><meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
     '<meta name="referrer" content="no-referrer">',
-    "<title>Sign in to Hygge</title></head>",
-    "<body style=\"font-family:system-ui,sans-serif;text-align:center;padding:48px 24px\">",
-    "<h1>Almost there</h1>",
-    "<p>Tap below to finish signing in to Hygge on this phone.</p>",
-    `<p><a href="${appLink}" style="display:inline-block;padding:14px 28px;border-radius:999px;background:#2b211c;color:#fff;text-decoration:none">Open Hygge</a></p>`,
-    "<p>The link works for 15 minutes, and only once.</p>",
+    '<meta name="color-scheme" content="light dark">',
+    "<title>Sign in to Hygge</title>",
+    '<style>body{font-family:system-ui,sans-serif;text-align:center;margin:0;padding:64px 24px;background:#281e18;color:#f5e8d1}main{max-width:420px;margin:auto}h1{font-size:30px}p{line-height:1.6;color:#c3b39d}a{display:inline-block;padding:14px 28px;border-radius:999px;background:#a1cbb2;color:#281e18;text-decoration:none;font-weight:600}</style></head>',
+    "<body><main>",
+    canOpen ? '<h1 id="title">Opening Hygge…</h1>' : '<h1>This link doesn’t look right</h1>',
+    canOpen ? '<p id="help">Your sign-in will finish in the app.</p>' : '<p>Ask for a new sign-in link in Hygge.</p>',
+    canOpen ? `<p><a id="open-app" href="${appLink}">Open Hygge</a></p>` : "",
+    canOpen ? '<p>If Hygge doesn’t open, tap above. You’ll need Hygge installed on this iPhone or iPad.</p>' : "",
+    canOpen ? '<noscript><p>Use the Open Hygge button to continue.</p></noscript>' : "",
+    "</main>",
+    // Inline data is URL-encoded and JSON-quoted; no raw token is interpolated
+    // into markup or JavaScript. One foreground attempt, no redirect loop.
+    canOpen ? `<script>
+(() => {
+  const isAppleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const title = document.getElementById("title");
+  const help = document.getElementById("help");
+  let attempted = false;
+  function openApp() {
+    if (attempted || document.visibilityState !== "visible") return;
+    attempted = true;
+    document.removeEventListener("visibilitychange", openApp);
+    if (!isAppleMobile) {
+      title.textContent = "Open this email on your iPhone or iPad";
+      help.textContent = "Tap the sign-in link there to open Hygge.";
+      return;
+    }
+    // Hide the credential from browser history before attempting the handoff.
+    try { history.replaceState(null, "", location.pathname); } catch {}
+    setTimeout(() => {
+      if (document.visibilityState !== "visible") return;
+      title.textContent = "Continue in Hygge";
+      help.textContent = "If your browser asks, allow it to open Hygge.";
+    }, 1800);
+    try { location.replace(${JSON.stringify(appLink)}); } catch {}
+  }
+  document.addEventListener("visibilitychange", openApp);
+  openApp();
+})();
+</script>` : "",
     "</body></html>",
   ].join("\n");
 }
@@ -910,6 +947,9 @@ export async function handleAuthRequest(
           "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store",
           "referrer-policy": "no-referrer",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+          "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         },
       });
     }
