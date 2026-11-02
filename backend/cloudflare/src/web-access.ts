@@ -135,9 +135,20 @@ export function parseProbeJudgeReply(reply: string): ProbeJudgeVerdict | null {
   return null;
 }
 
+/// Format one browser snapshot as judge evidence. Interactive
+/// element labels are what let the judge actually decide: mission
+/// trace summaries alone are agent intentions, not observations.
+export function snapshotEvidence(
+  snap: { title?: string; currentURLString?: string; elements?: { label: string; kind: string }[] } | null,
+): string {
+  if (!snap) return "";
+  const els = (snap.elements ?? []).slice(0, 80).map((e) => `${e.kind}:${e.label}`).join("; ");
+  return `Page snapshot: title "${snap.title ?? ""}" at ${snap.currentURLString ?? ""}. Interactive elements: ${els}`;
+}
+
 export function probeJudgePrompt(siteName: string, evidence: string): string {
   return [
-    `You are judging whether ${siteName} fully works in a desktop web browser, from evidence a browsing agent collected (page text it extracted and its step log).`,
+    `You are judging whether ${siteName} fully works in a desktop web browser, from evidence a browsing agent collected (page snapshots listing interactive elements, extracted page text, and its step log). If a snapshot lists a page's interactive elements and no signup/join element appears there, that is evidence signup is not reachable from that page.`,
     "Decide four checks ONLY from this evidence:",
     "- signupReachable: a signup or join page was opened.",
     "- signupFormPresent: a signup form with input fields was present.",

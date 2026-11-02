@@ -33,7 +33,7 @@ import {
 import { ensureLearningProfile, rankSiteProposals } from "./learning.ts";
 import {
   applyProbeOutcome, consumeUnknownCycle, eligibilityOf, extractProbeChecks,
-  parseProbeJudgeReply, probeJudgePrompt, reprobeDue,
+  parseProbeJudgeReply, probeJudgePrompt, reprobeDue, snapshotEvidence,
   unknownAccessRecord, withdrawProposalsForSite, type Eligibility, type ProbeOutcome, type SiteAccessRecord,
 } from "./web-access.ts";
 
@@ -922,10 +922,25 @@ export class UserSandbox extends DurableObject<Env> {
       log: [`Web check on ${site.name}: looking only — nothing will be sent or submitted.`],
     };
     this.saveTask(task);
+    // Direct homepage snapshot first: judge evidence must include
+    // what the page actually offers, not only the agent's step
+    // intentions (missions can loop or pause before extracting).
+    let homepageEvidence = "";
+    try {
+      const snap = await browser.createSession(site.startURLString);
+      homepageEvidence = snapshotEvidence(snap);
+      await browser.closeSession(snap.sessionID).catch(() => {});
+    } catch { /* mission evidence only */ }
     const done = await this.runTask(task, browser);
     const items: string[] = Array.isArray(done.extracted_items) ? done.extracted_items : [];
-    const text = [...(done.log ?? []), ...items,
-      ...(done.browser_trace ?? []).map((t: any) => String(t.summary ?? ""))].join("\n");
+    let finalEvidence = "";
+    if (done.session_id && browser.hasSession(done.session_id)) {
+      try {
+        finalEvidence = snapshotEvidence(await browser.snapshot(done.session_id));
+      } catch { /* session gone: mission evidence only */ }
+    }
+    const text = [homepageEvidence, finalEvidence, ...(done.log ?? []), ...items,
+      ...(done.browser_trace ?? []).map((t: any) => String(t.summary ?? ""))].filter(Boolean).join("\n");
     let appWall = /continue in (the )?app|open in the app|download (our|the) app|only in (the|our) app|app[- ]only|use our app to/i.test(text);
     let checks: ProbeOutcome["checks"] = extractProbeChecks(text);
     if (!checks && !appWall && text.trim()) {

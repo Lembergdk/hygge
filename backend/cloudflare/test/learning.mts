@@ -16,7 +16,7 @@ import {
 } from "../src/learning.ts";
 import {
   applyAppWallStrike, applyProbeOutcome, eligibilityOf, extractProbeChecks,
-  parseProbeJudgeReply, probeJudgePrompt, unknownAccessRecord,
+  parseProbeJudgeReply, probeJudgePrompt, snapshotEvidence, unknownAccessRecord,
   type ProbeOutcome, type SiteAccessRecord,
 } from "../src/web-access.ts";
 import {
@@ -350,6 +350,14 @@ test("probe judging: checks are found inside prose; strict judge parsing never g
   assert.equal(verdict?.checks.signupFormPresent, false);
   assert.match(probeJudgePrompt("Rover", "evidence text"), /undecided/);
   assert.match(probeJudgePrompt("Rover", "evidence text"), /ONLY from this evidence/);
+
+  const snapText = snapshotEvidence({
+    title: "Rover", currentURLString: "https://www.rover.com/",
+    elements: [{ label: "Sign up", kind: "click" }, { label: "Email", kind: "type" }],
+  });
+  assert.match(snapText, /click:Sign up/);
+  assert.match(snapText, /type:Email/);
+  assert.equal(snapshotEvidence(null), "");
 });
 
 test("probe: app-walled site becomes ineligible — never scanned (zero mission calls)", async () => {
