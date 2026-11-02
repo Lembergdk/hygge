@@ -4,10 +4,12 @@
 /// Object; the mission loop (agent.ts) chooses every action.
 import { launch, type Browser, type Page } from "@cloudflare/puppeteer";
 import type { SessionState } from "./session-profile.ts";
+import { profilePhotoTargetAllowed } from "./profile-photo.ts";
 
 export interface PageElement {
   label: string;
   kind: "type" | "click";
+  inputType?: string;
 }
 
 export interface Snapshot {
@@ -128,11 +130,14 @@ export class BrowserRunBrowser {
         .querySelectorAll("a,button,input,textarea,select,[role=button]")
         .forEach((el) => {
           const e = el as HTMLInputElement;
-          const label = (e.innerText || e.placeholder || e.name || e.type || "").trim().slice(0, 60);
+          const label = (e.type === "file"
+            ? (e.getAttribute("aria-label") || e.labels?.[0]?.textContent || e.name || "file")
+            : (e.innerText || e.placeholder || e.name || e.type || "")).trim().slice(0, 60);
           if (label) {
             out.push({
               label,
               kind: el.tagName === "INPUT" || el.tagName === "TEXTAREA" ? "type" : "click",
+              ...(e.type === "file" ? { inputType: "file" } : {}),
             });
           }
         });
@@ -182,6 +187,30 @@ export class BrowserRunBrowser {
       await field.type(value ?? "");
     }
     return this.snapshot(id);
+  }
+
+  /// Resolves the private asset in the worker, never a model-provided URL/path.
+  /// A unique observed file field and the approved HTTPS host are both required.
+  async uploadProfilePhoto(id: string, target: string, base64: string, approvedURL: string): Promise<void> {
+    const session = this.sessions.get(id);
+    if (!session || session.humanControlled) throw new Error("browser is unavailable for photo attachment");
+    if (!profilePhotoTargetAllowed(session.page.url(), approvedURL)) throw new Error("photo target is outside the approved site");
+    const host = new URL(approvedURL).hostname.replace(/^www\./, "");
+    const attached = await session.page.evaluate(({ target, base64, host }) => {
+      if (location.protocol !== "https:" || location.hostname.replace(/^www\./, "") !== host) return false;
+      const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+      const matches = inputs.filter((e) =>
+        (e.getAttribute("aria-label") || e.labels?.[0]?.textContent || e.name || "file").trim().slice(0, 60) === target);
+      if (matches.length !== 1 || matches[0].disabled) return false;
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], "profile.jpg", { type: "image/jpeg" }));
+      matches[0].files = transfer.files;
+      matches[0].dispatchEvent(new Event("input", { bubbles: true }));
+      matches[0].dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }, { target, base64, host });
+    if (!attached) throw new Error("a unique photo file input was not found on the approved site");
   }
 
   async extract(id: string): Promise<string[]> {

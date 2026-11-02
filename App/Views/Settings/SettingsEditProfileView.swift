@@ -30,6 +30,13 @@ struct SettingsEditProfileView: View {
             }
             if loadingPhoto { ProgressView("Loading photo…") }
             if let photoError { Text(photoError).font(.caption).foregroundStyle(HyggeTheme.emberDeep) }
+            if let error = store.profilePhotoSyncError {
+                Text(error).font(.caption).foregroundStyle(HyggeTheme.secondary)
+                Button("Try again") { Task { await store.syncProfilePhoto() } }.font(.caption).frame(minHeight: 44)
+            } else if store.profilePhotoNeedsUpload {
+                Label(store.isSyncingProfilePhoto ? "Uploading photo…" : "Photo waiting to upload", systemImage: "icloud.and.arrow.up")
+                    .font(.caption).foregroundStyle(HyggeTheme.secondary)
+            }
             Divider()
             VStack(alignment: .leading, spacing: 12) {
                 Text("Work you enjoy").font(.headline).foregroundStyle(HyggeTheme.ink)
@@ -65,6 +72,7 @@ struct SettingsEditProfileView: View {
         }
         .onAppear { rate = store.profile.hourlyRateFloor.formatted(.number.grouping(.never).precision(.fractionLength(0...2))) }
         .task(id: photo) { await loadPhoto() }
+        .task { await store.syncProfilePhoto() }
         .sheet(isPresented: $selectingInterests) {
             NavigationStack {
                 List(OpportunityCategory.allCases) { category in
@@ -130,6 +138,9 @@ struct SettingsEditProfileView: View {
                 if !Task.isCancelled { photoError = "That photo couldn’t be opened. Try another." }; return
             }
             guard !Task.isCancelled else { return }
+            guard jpeg.count <= 512 * 1024 else {
+                photoError = "That photo is too large. Try another."; return
+            }
             store.setProfilePhoto(jpeg)
         } catch { if !Task.isCancelled { photoError = "That photo couldn’t be loaded. Try again." } }
     }

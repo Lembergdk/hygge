@@ -436,6 +436,48 @@ struct BackendClient {
         return SiteMemoryRepository(memories: memories)
     }
 
+    struct ProfilePhotoReceipt: Decodable { let version: String }
+
+    func fetchProfilePhoto() async throws -> Data? {
+        let (data, response) = try await profilePhotoRequest(method: "GET")
+        if response.statusCode == 404 { return nil }
+        guard response.statusCode == 200, response.mimeType == "image/jpeg",
+              data.count <= 512 * 1024 else { throw URLError(.badServerResponse) }
+        return data
+    }
+
+    /// Returns false only when a legacy device-local photo must yield to an
+    /// existing server photo. Other errors leave the upload pending for retry.
+    func uploadProfilePhoto(_ data: Data, onlyIfMissing: Bool) async throws -> Bool {
+        let (body, response) = try await profilePhotoRequest(method: "PUT", data: data, onlyIfMissing: onlyIfMissing)
+        if onlyIfMissing && response.statusCode == 412 { return false }
+        guard response.statusCode == 200 else { throw URLError(.badServerResponse) }
+        _ = try JSONDecoder().decode(ProfilePhotoReceipt.self, from: body)
+        return true
+    }
+
+    func removeProfilePhoto() async throws {
+        let (_, response) = try await profilePhotoRequest(method: "DELETE")
+        guard response.statusCode == 204 else { throw URLError(.badServerResponse) }
+    }
+
+    private func profilePhotoRequest(method: String, data: Data? = nil, onlyIfMissing: Bool = false) async throws -> (Data, HTTPURLResponse) {
+        guard hasSessionToken else { throw URLError(.userAuthenticationRequired) }
+        var request = URLRequest(url: baseURL.appendingPathComponent("profile/photo"))
+        request.httpMethod = method
+        request.timeoutInterval = 20
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        if let data {
+            request.httpBody = data
+            request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        }
+        if onlyIfMissing { request.setValue("*", forHTTPHeaderField: "If-None-Match") }
+        let (body, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        return (body, http)
+    }
+
     private func stateGet<Response: Decodable>(_ path: String) async throws -> Response {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.timeoutInterval = 15

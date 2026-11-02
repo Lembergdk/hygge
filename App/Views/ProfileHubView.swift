@@ -47,7 +47,7 @@ struct ProfileHubView: View {
                     Task { await store.signOut(); dismiss() }
                 }
             }
-            .task { await store.refreshSessionProfiles(); await store.refreshHyggeEmail() }
+            .task { await store.syncProfilePhoto(); await store.refreshSessionProfiles(); await store.refreshHyggeEmail() }
         }
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(28)

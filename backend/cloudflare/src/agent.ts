@@ -24,14 +24,15 @@ import { selectTier, parseDecision, type LLMClient } from "./llm.ts";
 import type { BrowserRunBrowser, Snapshot } from "./browser.ts";
 import { distillSkillDraft, outcomeForTaskKind, type SharedSkill, type SkillBody } from "./skills.ts";
 import { detectCheckpoint, probeAuthenticated, isRememberMeLabel } from "./session-profile.ts";
+import { profilePhotoAllowedForTask, profilePhotoTargetAllowed } from "./profile-photo.ts";
 
-const ACTIONS = new Set(["navigate", "click", "type", "extract", "askUser", "done", "needsHuman"]);
+const ACTIONS = new Set(["navigate", "click", "type", "upload", "extract", "askUser", "done", "needsHuman"]);
 export const MAX_STEPS = 25;
 
 const SYSTEM = [
   "You are browsing the web on behalf of one user to complete a mission.",
   "You see the current page as a list of interactive elements. Reply with ONE",
-  'JSON action: {"action":"navigate|click|type|extract|done|needsHuman",',
+  'JSON action: {"action":"navigate|click|type|upload|extract|done|needsHuman",',
   '"target":"element label exactly as listed, or a URL","value":"text to type",',
   '"valueRef":"credential.username|credential.secret|emailCode.code|draft.<key>","reason":"short",',
   '"questions":["for askUser: the exact things you need from the user"]}.',
@@ -52,6 +53,10 @@ const SYSTEM = [
   "If a required value is not in the available draft refs, use askUser with",
   "specific questions and stop. Do not repeat an action that",
   "just failed; try a different element or path.",
+  "If hasProfilePhoto is true, the user's saved photo is available as profile.photo.",
+  "For a profile-photo file input on the approved site, use action upload,",
+  "valueRef profile.photo and the exact file input label. The worker attaches",
+  "the photo privately; never invent a URL or put photo bytes into text fields.",
 ].join(" ");
 
 export class LLMDecider {
@@ -76,10 +81,12 @@ export class LLMDecider {
         availableDraftRefs: Object.keys(ctx.draft ?? {}).map((k) => `draft.${k}`),
         hasStoredCredential: ctx.hasCredential,
         hasEmailedCode: Boolean(ctx.hasEmailCode),
+        hasProfilePhoto: Boolean(ctx.hasProfilePhoto),
         restoredSession: Boolean(ctx.restoredSession),
         sessionProbe: ctx.sessionProbe ?? null,
         page: { url: ctx.snapshot.currentURLString, title: ctx.snapshot.title,
-                elements: ctx.snapshot.elements.map((e: any) => e.label) },
+                elements: ctx.snapshot.elements.map((e: any) => e.label),
+                fileInputs: ctx.snapshot.elements.filter((e: any) => e.inputType === "file").map((e: any) => e.label) },
         soFar: ctx.history.map((h: any) => `${h.action} ${h.target} -> ${h.succeeded ? "ok" : "FAILED"}`),
       }),
     });
@@ -208,7 +215,19 @@ export function makeDecider(client: LLMClient) {
  * Execute one validated decision. fillCredentialValue(ref, target) is provided
  * by the server and types vault secrets without exposing them here.
  */
-async function execute({ browser, sessionID, decision, task, fillCredentialValue, fillEmailCodeValue }: any) {
+async function execute({ browser, sessionID, decision, task, fillCredentialValue, fillEmailCodeValue, uploadProfilePhoto }: any) {
+  if (decision.action === "upload" || decision.valueRef === "profile.photo") {
+    if (decision.action !== "upload" || decision.valueRef !== "profile.photo" ||
+        !profilePhotoAllowedForTask(task) || !uploadProfilePhoto) {
+      return { succeeded: false, summary: "Profile photo is unavailable for this action" };
+    }
+    const snapshot = await browser.snapshot(sessionID);
+    if (!snapshot || !profilePhotoTargetAllowed(snapshot.currentURLString, task.target_url)) {
+      return { succeeded: false, summary: "Profile photo can only be attached on the approved site" };
+    }
+    await uploadProfilePhoto(decision.target, sessionID);
+    return { succeeded: true, summary: "Saved profile photo attached to the site's file input" };
+  }
   if (/password|passcode|\bcode\b/i.test(decision.target ?? "") && decision.value) {
     return { succeeded: false, summary: "Refused: model tried to type a literal value into a password/code field" };
   }
@@ -249,15 +268,21 @@ export function emailCodeAllowedForTask(task: { scheduled_scan?: unknown } | nul
  */
 export async function runMission({ browser, task, hints = [], hasCredential = false,
                                    hasEmailCode = false, fillEmailCodeValue = null,
+                                   hasProfilePhoto = false, uploadProfilePhoto = null,
                                    decider, fillCredentialValue, maxSteps = MAX_STEPS,
                                    skill = null, skillCandidate = null,
                                    existingSessionID = null, restoreState = null }: {
   browser: any; task: any; hints?: string[]; hasCredential?: boolean;
   hasEmailCode?: boolean; fillEmailCodeValue?: any;
+  hasProfilePhoto?: boolean; uploadProfilePhoto?: any;
   decider: any; fillCredentialValue?: any; maxSteps?: number;
   skill?: SharedSkill | null; skillCandidate?: { body: SkillBody } | null;
   existingSessionID?: string | null; restoreState?: any;
 }): Promise<any> {
+  if (!profilePhotoAllowedForTask(task)) {
+    hasProfilePhoto = false;
+    uploadProfilePhoto = null;
+  }
   if (!emailCodeAllowedForTask(task)) {
     hasEmailCode = false;
     fillEmailCodeValue = null;
@@ -336,7 +361,7 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
     try {
       decision = await decider.decide({
         mission: task.goal, taskKind: task.kind, draft: task.drafted_payload,
-        hints, hasCredential, hasEmailCode, snapshot, history: trace,
+        hints, hasCredential, hasEmailCode, hasProfilePhoto, snapshot, history: trace,
         skill, skillCandidate, authoringMode, site,
         restoredSession: Boolean(restoreState) || resumedSession, sessionProbe,
         tierContext: { taskKind: task.kind, failures, repeatedAction: repeated, skillCoverage },
@@ -387,7 +412,7 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
     }
     let result: any;
     try {
-      result = await execute({ browser, sessionID: snap.sessionID, decision, task, fillCredentialValue, fillEmailCodeValue });
+      result = await execute({ browser, sessionID: snap.sessionID, decision, task, fillCredentialValue, fillEmailCodeValue, uploadProfilePhoto });
     } catch (e: any) {
       result = { succeeded: false, summary: `Action failed (deviation): ${e.message.slice(0, 140)}` };
     }
@@ -395,7 +420,8 @@ export async function runMission({ browser, task, hints = [], hasCredential = fa
     if (!result.succeeded) failures += 1;
     const key = `${decision.action}|${decision.target}|${snapshot.currentURLString}`;
     actionKeys.set(key, (actionKeys.get(key) ?? 0) + 1);
-    trace.push({ action: decision.action, target: decision.target ?? "",
+    // File attachment is input; keep the existing trace enum for older apps.
+    trace.push({ action: decision.action === "upload" ? "type" : decision.action, target: decision.target ?? "",
                  urlString: snapshot.currentURLString,
                  summary: `${result.summary}${decision.reason ? ` — ${decision.reason}` : ""}`,
                  succeeded: result.succeeded, ...stamp });
