@@ -1419,7 +1419,7 @@ final class AppStore {
                 guard stillCurrent() else { return }
                 if revision != profilePhotoRevision { continue }
                 profilePhotoSyncError = profilePhotoNeedsUpload
-                    ? "Your photo is saved on this phone. Upload it when you’re connected so Hygge can use it."
+                    ? "Your photo couldn’t be uploaded. It’s still saved on this phone."
                     : "Your photo couldn’t be refreshed just now."
                 return
             }

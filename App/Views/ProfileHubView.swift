@@ -102,7 +102,7 @@ struct ProfileHubView: View {
                 Spacer(minLength: 104)
             }.frame(minHeight: 74, alignment: .bottom)
             HStack(alignment: .top, spacing: 12) {
-                metric("Logged earnings", value: JournalBuilder.money(store.earningsGross), asset: "SettingsEarnings", tint: HyggeTheme.butterTint)
+                metric("Your earnings", value: JournalBuilder.money(store.earningsGross), asset: "SettingsEarnings", tint: HyggeTheme.butterTint)
                 metric("Time saved", value: store.timeSavedMinutes == 0 ? "0 min" : TimeSaved.aboutLabel(minutes: store.timeSavedMinutes), asset: "SettingsTime", tint: HyggeTheme.sageTint)
                     .overlay(alignment: .topTrailing) {
                         Image("SettingsInsightsFlame").resizable().scaledToFit()

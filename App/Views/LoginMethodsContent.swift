@@ -36,6 +36,10 @@ struct LoginMethodsContent: View {
                         .font(.subheadline).foregroundStyle(HyggeTheme.sageDeep)
                         .accessibilityAddTraits(.updatesFrequently)
                 }
+                if !methods.contains(where: { $0.method == .apple }) ||
+                    !methods.contains(where: { $0.method == .email && $0.emailVerified }) {
+                    Text("Add more").font(.title3.weight(.bold)).foregroundStyle(HyggeTheme.ink)
+                }
                 if !methods.contains(where: { $0.method == .apple }) {
                     SignInWithAppleButton(.signIn) { request in
                         let nonce = SignInCard.makeNonce()
@@ -179,6 +183,9 @@ struct LoginMethodsContent: View {
             let preview = UserDefaults.standard.string(forKey: "passwordPreviewState") ?? "none"
             methods = [LinkedLoginMethod(id: "apple", method: .apple, email: "m@example.com"),
                        LinkedLoginMethod(id: "email", method: .email, email: "m@example.com", emailVerified: true, hasPassword: preview == "created")]
+            if let provider = UserDefaults.standard.string(forKey: "loginMethodsPreviewProvider") {
+                methods = methods.filter { $0.method.rawValue == provider }
+            }
             if preview == "editing" { editingMethodID = "email" }
             if preview == "created" { passwordConfirmation = "Password created" }
             loaded = true

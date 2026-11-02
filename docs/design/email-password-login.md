@@ -6,7 +6,9 @@ email is focused or valid; both need a valid email to act. Switching methods
 preserves the email and clears the password. Empty/invalid email on blur hides
 these actions. Onboarding retains its existing magic-link card.
 
-Your logins groups connected identities in one surface. Verified emails have
+Your logins groups connected identities in one surface. An “Add more” heading
+appears above providers that are not connected and disappears when both methods
+are connected. Verified emails have
 “Create password”, or “Password / Change” when configured. Setup expands inline
 with one revealable field, an explicit create/update action, and Cancel. Success
 collapses the editor with a temporary confirmation. No Email sublabel,
