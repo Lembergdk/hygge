@@ -149,7 +149,7 @@ struct IntroCarouselView: View {
 
     private func whoPage(width: CGFloat, height: CGFloat) -> some View {
         pageShell(topReserve: flameZone, width: width, height: height) {
-            Text("Hi, I'm Hygge,")
+            Text("Hi, I’m Hygge")
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .foregroundStyle(HyggeTheme.ink)
                 .multilineTextAlignment(.center)
@@ -158,7 +158,7 @@ struct IntroCarouselView: View {
                 .font(.headline)
                 .foregroundStyle(HyggeTheme.emberDeep)
                 .padding(.top, 6)
-            Text("I find work you like and handle\nthe boring parts.")
+            Text("I help you find work you enjoy, so you can focus on the rest of life.")
                 .font(.body)
                 .foregroundStyle(HyggeTheme.ink)
                 .multilineTextAlignment(.center)
@@ -173,12 +173,12 @@ struct IntroCarouselView: View {
 
     private func howPage(width: CGFloat, height: CGFloat) -> some View {
         pageShell(topReserve: flameZone, width: width, height: height) {
-            Text("I work on my own\ncomputer.")
+            Text("Leave the fiddly bits to me")
                 .font(.system(size: 34, weight: .bold, design: .rounded))
                 .foregroundStyle(HyggeTheme.ink)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("I have my own browser and manage your profiles on the work sites you allow. Nothing happens without your approval.")
+            Text("I handle your work profiles, chase down new gigs, and keep your schedule in order.")
                 .font(.body)
                 .foregroundStyle(HyggeTheme.ink)
                 .multilineTextAlignment(.center)
@@ -271,12 +271,12 @@ private struct Screen3Page: View {
                             .frame(height: 186)
                         Color.clear.frame(height: max(6, flameZone - 52 - 186))
                     }
-                    Text("One feed for all\nyour work")
+                    Text("You’re always in control")
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundStyle(HyggeTheme.ink)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("Everything I do is posted in the feed. If I need your attention on anything, I will send you a message.")
+                    Text("Nothing goes out without your approval. I’ll take care of the details—you have the final say.")
                         .font(.body)
                         .foregroundStyle(HyggeTheme.ink)
                         .multilineTextAlignment(.center)
