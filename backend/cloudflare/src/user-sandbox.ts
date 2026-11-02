@@ -828,6 +828,7 @@ export class UserSandbox extends DurableObject<Env> {
     const focus = [
       profile.skills.length ? `Skills: ${profile.skills.join(", ")}.` : "",
       profile.interests.length ? `Kinds of work: ${profile.interests.join(", ")}.` : "",
+      profile.customInterests?.length ? `Also enjoys: ${profile.customInterests.join(", ")}.` : "",
       profile.locationLabel ? `Based in ${profile.locationLabel}.` : "",
     ].filter(Boolean).join(" ");
     const task = {
@@ -836,7 +837,7 @@ export class UserSandbox extends DurableObject<Env> {
       target_url: site.startURLString,
       goal: `Find new paid work listings on ${site.name} that fit this person. ${focus} Read the listings and extract each one with its title, pay, and place. Only read: do not apply, do not sign up, do not send any message, and do not book anything.${tier === "public" ? " Browse only what is visible without signing in; do not try to sign in." : ""}`,
       title: `Scheduled look at ${site.name}`,
-      drafted_payload: { searchTerms: profile.skills.join(", ") },
+      drafted_payload: { searchTerms: [...profile.skills, ...(profile.customInterests ?? [])].join(", ") },
       credential_id: tier === "logged" ? credentialId : null,
       requires_approval: false,
       status: "approved",

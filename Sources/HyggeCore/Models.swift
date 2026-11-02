@@ -53,6 +53,7 @@ public struct EarningsProfile: Codable, Equatable, Sendable {
     public var headline: String
     public var skills: [String]
     public var interests: [OpportunityCategory]
+    public var customInterests: [String]
     public var hourlyRateFloor: Double
     public var locationLabel: String
     public var radiusKm: Double
@@ -63,13 +64,14 @@ public struct EarningsProfile: Codable, Equatable, Sendable {
     public var email: String
 
     public init(displayName: String = "", headline: String = "", skills: [String] = [],
-                interests: [OpportunityCategory] = [], hourlyRateFloor: Double = 25,
+                interests: [OpportunityCategory] = [], customInterests: [String] = [], hourlyRateFloor: Double = 25,
                 locationLabel: String = "", radiusKm: Double = 20, remoteOK: Bool = true,
                 hasCar: Bool = false, availabilityNotes: String = "", bio: String = "", email: String = "") {
         self.displayName = displayName
         self.headline = headline
         self.skills = skills
         self.interests = interests
+        self.customInterests = customInterests
         self.hourlyRateFloor = hourlyRateFloor
         self.locationLabel = locationLabel
         self.radiusKm = radiusKm
@@ -82,7 +84,46 @@ public struct EarningsProfile: Codable, Equatable, Sendable {
 
     /// First run collects only three things; name/skills arrive progressively.
     public var isComplete: Bool {
-        !interests.isEmpty && !locationLabel.trimmingCharacters(in: .whitespaces).isEmpty
+        (!interests.isEmpty || !customInterests.isEmpty) && !locationLabel.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case displayName, headline, skills, interests, customInterests, hourlyRateFloor,
+             locationLabel, radiusKm, remoteOK, hasCar, availabilityNotes, bio, email
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        displayName = try values.decode(String.self, forKey: .displayName)
+        headline = try values.decode(String.self, forKey: .headline)
+        skills = try values.decode([String].self, forKey: .skills)
+        interests = try values.decode([OpportunityCategory].self, forKey: .interests)
+        // Existing cloud profiles and local caches predate custom interests.
+        customInterests = try values.decodeIfPresent([String].self, forKey: .customInterests) ?? []
+        hourlyRateFloor = try values.decode(Double.self, forKey: .hourlyRateFloor)
+        locationLabel = try values.decode(String.self, forKey: .locationLabel)
+        radiusKm = try values.decode(Double.self, forKey: .radiusKm)
+        remoteOK = try values.decode(Bool.self, forKey: .remoteOK)
+        hasCar = try values.decode(Bool.self, forKey: .hasCar)
+        availabilityNotes = try values.decode(String.self, forKey: .availabilityNotes)
+        bio = try values.decode(String.self, forKey: .bio)
+        email = try values.decode(String.self, forKey: .email)
+    }
+
+    /// Free-form interests are preferences, not claims about the user's skills.
+    @discardableResult public mutating func addCustomInterest(_ input: String) -> Bool {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return false }
+        if let category = OpportunityCategory.allCases.first(where: {
+            [$0.tileLabel, $0.label, $0.activityLabel].contains { $0.localizedCaseInsensitiveCompare(value) == .orderedSame }
+        }) {
+            guard !interests.contains(category) else { return false }
+            interests.append(category)
+        } else {
+            guard !customInterests.contains(where: { $0.localizedCaseInsensitiveCompare(value) == .orderedSame }) else { return false }
+            customInterests.append(value)
+        }
+        return true
     }
 }
 

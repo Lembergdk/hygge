@@ -11,6 +11,14 @@ and a swipe-to-dismiss sheet with no close button or repeated “You” title.
   minimum rate. Valid edits save locally immediately and use the existing
   debounced cloud import. Pending edits survive relaunch and cannot be replaced
   by a stale profile pull; failures expose a retry action.
+- Name and location use placeholders without separate titles. The location icon
+  asks for when-in-use permission and fills city/region from a fresh fix; manual
+  edits made during lookup win. Denied/unavailable location leaves the input
+  editable. The normal saved-status row and footer flame are removed.
+- Interest chips and the picker use the same short category labels. Custom
+  interests can be added and removed, sync with the profile, and appear in the
+  main sheet and discovery context. They remain preferences, separate from
+  skills and category IDs. Older profiles decode with no custom interests.
 - The profile photo is downsampled, saved in private server storage and cached
   on-device. It syncs across signed-in devices and is available to the browsing
   agent for approved signup/profile tasks. Sign-out clears the local cache;

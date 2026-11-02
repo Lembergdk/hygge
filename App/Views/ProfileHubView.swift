@@ -73,7 +73,9 @@ struct ProfileHubView: View {
 
     private var preferences: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(store.profile.interests.isEmpty ? "Choose the work you enjoy" : store.profile.interests.map(\.settingsLabel).joined(separator: ", "))
+            Text(store.profile.interests.isEmpty && store.profile.customInterests.isEmpty
+                 ? "Choose the work you enjoy"
+                 : (store.profile.interests.map(\.settingsLabel) + store.profile.customInterests).joined(separator: ", "))
                 .font(.headline).foregroundStyle(HyggeTheme.ink)
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) { preferenceChips }
