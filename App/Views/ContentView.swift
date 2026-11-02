@@ -10,6 +10,16 @@ struct ContentView: View {
     @Environment(AppStore.self) private var store
 
     var body: some View {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--settings-preview") {
+            SettingsPreviewHost()
+        } else { appContent }
+        #else
+        appContent
+        #endif
+    }
+
+    @ViewBuilder private var appContent: some View {
         switch AuthGate.resolve(introDone: store.introDone,
                                 hasOnboarded: store.hasOnboarded,
                                 isSignedIn: store.isSignedIn,

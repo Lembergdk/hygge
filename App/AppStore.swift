@@ -19,6 +19,8 @@ struct StoreSnapshot: Codable {
         self.feedbackEvents = feedbackEvents; self.learningProfile = learningProfile
     }
     var profile: EarningsProfile
+    var profilePhotoData: Data? = nil
+    var pendingProfileEdit: Bool = false
     var hasOnboarded: Bool
     var sites: [TargetSite]
     var siteMemory: SiteMemoryRepository
@@ -42,6 +44,8 @@ struct StoreSnapshot: Codable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         profile = try c.decodeIfPresent(EarningsProfile.self, forKey: .profile) ?? EarningsProfile()
+        profilePhotoData = try c.decodeIfPresent(Data.self, forKey: .profilePhotoData)
+        pendingProfileEdit = try c.decodeIfPresent(Bool.self, forKey: .pendingProfileEdit) ?? false
         hasOnboarded = try c.decodeIfPresent(Bool.self, forKey: .hasOnboarded) ?? false
         sites = try c.decodeIfPresent([TargetSite].self, forKey: .sites) ?? SeedSites.all
         siteMemory = try c.decodeIfPresent(SiteMemoryRepository.self, forKey: .siteMemory) ?? SiteMemoryRepository()
@@ -65,6 +69,10 @@ struct StoreSnapshot: Codable {
 @Observable
 final class AppStore {
     var profile = EarningsProfile()
+    // Photo is device-local, kept in the account cache and removed at sign-out.
+    var profilePhotoData: Data?
+    private(set) var pendingProfileEdit = false
+    private var profileEditRevision = 0
     var hasOnboarded = false
     var sites: [TargetSite] = SeedSites.all
     var siteMemory = SiteMemoryRepository()
@@ -986,6 +994,11 @@ final class AppStore {
     /// Start over and sign-out; callers decide how it is persisted.
     private func resetLocalState() {
         profile = EarningsProfile()
+        profilePhotoData = nil
+        pendingProfileEdit = false
+        profileEditRevision += 1
+        hyggeEmailAddress = nil
+        filedEmailSummaries = []
         hasOnboarded = false
         sites = SeedSites.all
         siteMemory = SiteMemoryRepository()
@@ -1219,7 +1232,10 @@ final class AppStore {
         guard isBackendFirst, !isSyncing else { return false }
         isSyncing = true
         defer { isSyncing = false }
+        if pendingProfileEdit { await pushStateNow() }
+        let revisionBeforePull = profileEditRevision
         guard let export = try? await backend.exportState() else { return false }
+        guard revisionBeforePull == profileEditRevision else { return false }
         applyServerExport(export)
         if let refs = try? await backend.listCredentialRefs() { credentialRefs = refs }
         if let memory = try? await backend.listSiteMemory(), !memory.memories.isEmpty {
@@ -1233,7 +1249,7 @@ final class AppStore {
     }
 
     func applyServerExport(_ export: ServerExport) {
-        if let state = export.profile?.data {
+        if let state = export.profile?.data, !pendingProfileEdit {
             profile = state.profile
             hasOnboarded = state.hasOnboarded
             isPaused = state.isPaused
@@ -1282,11 +1298,18 @@ final class AppStore {
     }
 
     private func pushStateNow() async {
+        let revision = profileEditRevision
         do {
             let result = try await backend.importState(currentImport())
+            guard revision == profileEditRevision, !Task.isCancelled else { return }
             hasRealServerFeedItem = result.hasRealFeedItem
-            lastSyncError = nil
+            if revision == profileEditRevision {
+                pendingProfileEdit = false
+                lastSyncError = nil
+                writeCache()
+            }
         } catch {
+            guard revision == profileEditRevision, !Task.isCancelled else { return }
             let outcome = OfflineWritePolicy.outcome(reachable: false, requireCloud: BackendClient.requireCloud)
             if outcome == .failedUnreachable {
                 lastSyncError = "Couldn't reach Hygge just now, so that last change is only on this phone for now. It hasn't been saved anywhere else yet."
@@ -1297,11 +1320,32 @@ final class AppStore {
         }
     }
 
+    /// Called on each valid profile edit. The cache updates immediately; cloud
+    /// sync is debounced and a pending edit cannot be replaced by a stale pull.
+    func editProfile(_ edit: (inout EarningsProfile) -> Void) {
+        edit(&profile)
+        profileEditRevision += 1
+        pendingProfileEdit = true
+        lastSyncError = nil
+        save()
+    }
+
+    func setProfilePhoto(_ data: Data?) {
+        profilePhotoData = data
+        writeCache()
+    }
+
+    func retryProfileSync() async { await pushStateNow() }
+
     // MARK: - Persistence
 
     private var storeURL: URL? {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("hygge.json")
+        var filename = "hygge.json"
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--settings-preview") { filename = "hygge-settings-preview.json" }
+        #endif
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent(filename)
     }
 
     /// Every local change lands in the cache, then pushes (Brief 01).
@@ -1312,11 +1356,13 @@ final class AppStore {
 
     private func writeCache() {
         guard let url = storeURL else { return }
-        let snapshot = StoreSnapshot(profile: profile, hasOnboarded: hasOnboarded, sites: sites,
+        var snapshot = StoreSnapshot(profile: profile, hasOnboarded: hasOnboarded, sites: sites,
                                      siteMemory: siteMemory, credentialRefs: credentialRefs,
                                      opportunities: opportunities, tasks: tasks, applications: applications,
                                      proposals: proposals, accountStates: accountStates,
                                      chatTranscript: chatTranscript, activityEvents: activityEvents, isPaused: isPaused, lastVisitAt: lastVisitAt, beliefs: beliefs, searchEvidence: searchEvidence, feedbackEvents: feedbackEvents, learningProfile: learningProfile)
+        snapshot.profilePhotoData = profilePhotoData
+        snapshot.pendingProfileEdit = pendingProfileEdit
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)
@@ -1326,6 +1372,8 @@ final class AppStore {
         guard let url = storeURL, let data = try? Data(contentsOf: url),
               let snapshot = try? JSONDecoder().decode(StoreSnapshot.self, from: data) else { return false }
         profile = snapshot.profile
+        profilePhotoData = snapshot.profilePhotoData
+        pendingProfileEdit = snapshot.pendingProfileEdit
         hasOnboarded = snapshot.hasOnboarded
         sites = snapshot.sites
         siteMemory = snapshot.siteMemory
