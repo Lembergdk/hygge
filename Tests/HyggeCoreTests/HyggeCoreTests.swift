@@ -529,6 +529,13 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertTrue(OnboardingStep.firstMessage.contains("enjoy"))
     }
 
+    func testPasswordConfirmationAdoptsChangedOrUnknownAccount() {
+        XCTAssertTrue(AccountSessionTransition.requiresAdoption(wasSignedIn: false, previousUserID: nil, nextUserID: "a"))
+        XCTAssertTrue(AccountSessionTransition.requiresAdoption(wasSignedIn: true, previousUserID: "expired-account", nextUserID: "b"))
+        XCTAssertTrue(AccountSessionTransition.requiresAdoption(wasSignedIn: true, previousUserID: nil, nextUserID: "b"))
+        XCTAssertFalse(AccountSessionTransition.requiresAdoption(wasSignedIn: true, previousUserID: "a", nextUserID: "a"))
+    }
+
     func testReturningAccountRoutesHomeWithoutLocalOnboardingCache() {
         for introDone in [false, true] {
             for onboarded in [false, true] {

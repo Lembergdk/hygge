@@ -193,3 +193,11 @@ public enum SessionTokenStorage {
         return !BackendAddress.isStaleLocal(stored: storedBaseURL)
     }
 }
+
+/// A confirmation link can authenticate after an old session expired. The UI
+/// must adopt the returned account before exposing any previously cached state.
+public enum AccountSessionTransition {
+    public static func requiresAdoption(wasSignedIn: Bool, previousUserID: String?, nextUserID: String?) -> Bool {
+        !wasSignedIn || previousUserID == nil || previousUserID != nextUserID
+    }
+}

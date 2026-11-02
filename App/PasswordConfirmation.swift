@@ -17,8 +17,12 @@ extension AppStore {
         passwordFlow = PasswordConfirmationState(phase: .confirming)
         do {
             let wasSignedIn = isSignedIn
+            let previousUserID = backend.sessionUserID
             try await backend.confirmPassword(token: token)
-            if !wasSignedIn { await finishSignIn() }
+            if AccountSessionTransition.requiresAdoption(wasSignedIn: wasSignedIn,
+                previousUserID: previousUserID, nextUserID: backend.sessionUserID) {
+                await finishSignIn()
+            }
             else { refreshAuthState() }
             passwordFlow = PasswordConfirmationState(phase: .saved)
         } catch {
