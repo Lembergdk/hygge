@@ -42,6 +42,11 @@ struct BackendClient {
     }
 
     var baseURL: URL {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--settings-preview") {
+            return URL(string: "http://127.0.0.1:9")!
+        }
+        #endif
         let raw = BackendAddress.effective(
             stored: UserDefaults.standard.string(forKey: "backendBaseURL"),
             fallback: Self.defaultBaseURLString)
@@ -54,6 +59,9 @@ struct BackendClient {
     /// removed from UserDefaults. Debug may still fall back to a
     /// baked staging token; Release requires a real session.
     var apiToken: String {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--settings-preview") { return "" }
+        #endif
         if let token = KeychainTokenStore.read() { return token }
         let legacy = UserDefaults.standard.string(forKey: SessionTokenStorage.legacyUserDefaultsKey)
         let storedURL = UserDefaults.standard.string(forKey: "backendBaseURL")

@@ -497,10 +497,10 @@ extension HomeFeedView {
         switch reason {
         case "too far":
             store.proposeBelief(sentence: "Prefers work close to home", source: .learnedFromWork, confidence: 0.6)
-            store.appendChat(fromAgent: true, text: "Noted — that one was too far. If you prefer work close to home, confirm it in your profile and I'll weight distance more.")
+            store.appendChat(fromAgent: true, text: "Noted — that one was too far. If you prefer work close to home, tell me in chat and I'll weight distance more.")
         case "not their thing":
             store.proposeBelief(sentence: "Turns down \(store.siteName(id: task.siteID)) work that isn't their thing", source: .learnedFromWork, confidence: 0.55)
-            store.appendChat(fromAgent: true, text: "Noted — not your thing. I may have a belief to check with you in your profile.")
+            store.appendChat(fromAgent: true, text: "Noted — not your thing. I'll check with you before saving a new preference.")
         default:
             store.appendChat(fromAgent: true, text: "Noted — \(task.title) was \(reason).")
         }

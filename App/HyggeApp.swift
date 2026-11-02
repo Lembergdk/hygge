@@ -18,12 +18,18 @@ struct HyggeApp: App {
                 // cache renders instantly either way. Push arrivals
                 // (token / tapped route) drain right after the pull.
                 .task {
+                    #if DEBUG
+                    guard !ProcessInfo.processInfo.arguments.contains("--settings-preview") else { return }
+                    #endif
                     await store.syncOnLaunch()
                     await store.refreshPushState()
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
                         Task {
+                            #if DEBUG
+                            guard !ProcessInfo.processInfo.arguments.contains("--settings-preview") else { return }
+                            #endif
                             await store.pullFromServer()
                             await store.refreshPushState()
                         }

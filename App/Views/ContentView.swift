@@ -9,6 +9,16 @@ struct ContentView: View {
     @AppStorage("hasSeenIntroCarousel") private var hasSeenCarousel = false
 
     var body: some View {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--settings-preview") {
+            SettingsPreviewHost()
+        } else { appContent }
+        #else
+        appContent
+        #endif
+    }
+
+    @ViewBuilder private var appContent: some View {
         switch AuthGate.resolve(hasSeenCarousel: hasSeenCarousel,
                                 hasOnboarded: store.hasOnboarded,
                                 isSignedIn: store.isSignedIn,

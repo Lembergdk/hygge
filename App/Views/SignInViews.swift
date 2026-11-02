@@ -180,76 +180,56 @@ struct LoginMethodsContent: View {
     @State private var currentNonce: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 22) {
+            Text("Connected").font(.title3.weight(.bold)).foregroundStyle(HyggeTheme.ink)
             if methods.isEmpty {
-                Text("Sign in to see your login methods.")
-                    .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                Text("No login methods loaded yet.").font(.subheadline).foregroundStyle(HyggeTheme.secondary)
             }
             ForEach(methods) { method in
-                HStack(spacing: 10) {
+                HStack(spacing: 14) {
                     Image(systemName: method.method == .apple ? "applelogo" : "envelope")
-                        .foregroundStyle(HyggeTheme.sageDeep)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(method.method.label).font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
-                        if let email = method.email {
-                            Text(email).font(.caption).foregroundStyle(HyggeTheme.secondary)
-                        }
+                        .font(.title2).foregroundStyle(HyggeTheme.ink).frame(width: 40)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(method.method.label).font(.headline).foregroundStyle(HyggeTheme.ink)
+                        if let email = method.email { Text(email).font(.caption).foregroundStyle(HyggeTheme.secondary) }
                     }
-                    Spacer()
-                    Button("Remove", role: .destructive) {
-                        Task { await remove(method) }
+                    Spacer(minLength: 0)
+                    if HyggeAuth.canRemoveLoginMethod(methodCount: methods.count) {
+                        Menu {
+                            Button("Remove login", role: .destructive) { Task { await remove(method) } }
+                        } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
+                        .disabled(isWorking).accessibilityLabel("Manage \(method.method.label) login")
+                    } else {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(HyggeTheme.sageDeep)
+                            .accessibilityLabel("Connected")
                     }
-                    .font(.caption.weight(.semibold))
-                    .disabled(!HyggeAuth.canRemoveLoginMethod(methodCount: methods.count) || isWorking)
-                    .opacity(HyggeAuth.canRemoveLoginMethod(methodCount: methods.count) ? 1 : 0.4)
-                    .accessibilityLabel("Remove \(method.method.label) sign-in")
-                }
+                }.settingsSurface()
             }
-            if methods.count == 1 {
-                Text("Add another way to sign in before removing this one — an account always keeps a way back in.")
-                    .font(.caption).foregroundStyle(HyggeTheme.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            Text("Add another way").font(.title3.weight(.bold)).foregroundStyle(HyggeTheme.ink).padding(.top, 12)
+            if !methods.contains(where: { $0.method == .apple }) {
+                SignInWithAppleButton(.signIn) { request in
+                    let nonce = SignInCard.makeNonce()
+                    currentNonce = nonce
+                    request.requestedScopes = [.email]
+                    request.nonce = nonce
+                } onCompletion: { result in handleAppleLink(result) }
+                .signInWithAppleButtonStyle(.black).frame(height: 48).clipShape(Capsule())
+                .accessibilityLabel("Add Sign in with Apple").disabled(isWorking)
             }
-
-            Divider()
-            Text("Add a login method").font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
-            SignInWithAppleButton(.signIn) { request in
-                let nonce = SignInCard.makeNonce()
-                currentNonce = nonce
-                request.requestedScopes = [.email]
-                request.nonce = nonce
-            } onCompletion: { result in
-                handleAppleLink(result)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Email address").font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                TextField("you@example.com", text: $linkEmail)
+                    .textContentType(.emailAddress).keyboardType(.emailAddress)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .settingsField().accessibilityLabel("Email to add")
             }
-            .signInWithAppleButtonStyle(.black)
-            .frame(height: 46)
-            .clipShape(Capsule())
-            .accessibilityLabel("Add Sign in with Apple")
-
-            TextField("Email", text: $linkEmail)
-                .textContentType(.emailAddress)
-                .keyboardType(.emailAddress)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .accessibilityLabel("Email to add")
-            Button("Email me a sign-in link") { Task { await sendLink() } }
-                .font(.subheadline.weight(.semibold))
+            Button { Task { await sendLink() } } label: {
+                if isWorking { ProgressView() } else { Text("Send sign-in link") }
+            }.buttonStyle(SettingsActionStyle())
                 .disabled(!HyggeAuth.isPlausibleEmail(linkEmail) || isWorking)
-            Text("Open the link on this phone and the email joins this account.")
-                .font(.caption).foregroundStyle(HyggeTheme.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let magicError = store.magicLinkError {
-                Text(magicError).font(.caption).foregroundStyle(HyggeTheme.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let message {
-                Text(message).font(.caption).foregroundStyle(HyggeTheme.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Button("Sign out") { Task { await store.signOut() } }
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(HyggeTheme.emberDeep)
+                .opacity(HyggeAuth.isPlausibleEmail(linkEmail) && !isWorking ? 1 : 0.5)
+            if let magicError = store.magicLinkError { Text(magicError).font(.caption).foregroundStyle(HyggeTheme.secondary) }
+            if let message { Text(message).font(.caption).foregroundStyle(HyggeTheme.secondary) }
         }
         .task {
             await load()
@@ -269,7 +249,14 @@ struct LoginMethodsContent: View {
     }
 
     private func load() async {
-        if let loaded = try? await store.backend.fetchLoginMethods() { methods = loaded }
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--settings-preview") {
+            methods = [LinkedLoginMethod(id: "preview", method: .apple, email: "m@example.com")]
+            return
+        }
+        #endif
+        do { methods = try await store.backend.fetchLoginMethods() }
+        catch { message = "Your logins couldn’t be loaded. Try again when you’re connected." }
     }
 
     private func sendLink() async {
