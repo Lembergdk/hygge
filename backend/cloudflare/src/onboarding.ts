@@ -5,6 +5,7 @@
 // conversation. Suggestions (categories, skills) are tailored to what the
 // user has said so far — never a static preset list when a model is live.
 import { parseDecision } from "./llm.ts";
+import { withSpan, agentAttrs } from "./tracing.ts";
 
 export const CATEGORY_IDS = ["petCare", "freelance", "localGig", "delivery",
   "creative", "tutoring", "homeServices", "remoteJob", "community"];
@@ -95,7 +96,15 @@ function capTranscriptText(transcript: any[] = []): string {
   return kept.join("\n");
 }
 
-export async function onboardingMessage({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "" }: any) {
+export async function onboardingMessage(args: any) {
+  return withSpan("invoke_agent hygge-onboarding", {
+    "gen_ai.operation.name": "invoke_agent",
+    ...agentAttrs(args.client?.cfg?.agentName ?? "hygge-onboarding", args.client?.cfg?.agentId ?? "hygge-dev"),
+    "hygge.onboarding.step": String(args.step ?? "welcome"),
+  }, () => onboardingMessageInner(args));
+}
+
+async function onboardingMessageInner({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "" }: any) {
   const objective = OBJECTIVES[step] ?? OBJECTIVES.welcome;
   const transcriptText = capTranscriptText(transcript);
   if (!client.configured) {
@@ -192,7 +201,15 @@ function normalizeParsed(parsed: any, simulated: boolean) {
  * then emit({type:"final",data}) with the full normalized turn. Simulated
  * mode streams the fallback reply word-by-word so the UI behaves identically.
  */
-export async function onboardingMessageStream({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "" }: any, emit: (e: unknown) => void) {
+export async function onboardingMessageStream(args: any, emit: (e: unknown) => void) {
+  return withSpan("invoke_agent hygge-onboarding", {
+    "gen_ai.operation.name": "invoke_agent",
+    ...agentAttrs(args.client?.cfg?.agentName ?? "hygge-onboarding", args.client?.cfg?.agentId ?? "hygge-dev"),
+    "hygge.onboarding.step": String(args.step ?? "welcome"),
+  }, () => onboardingMessageStreamInner(args, emit));
+}
+
+async function onboardingMessageStreamInner({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "" }: any, emit: (e: unknown) => void) {
   const objective = OBJECTIVES[step] ?? OBJECTIVES.welcome;
   const transcriptText = capTranscriptText(transcript);
   const fallback = () => ({ reply: FALLBACK_REPLIES[step] ?? FALLBACK_REPLIES.welcome,

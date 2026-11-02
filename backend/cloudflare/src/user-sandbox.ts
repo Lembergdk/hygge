@@ -307,12 +307,15 @@ export class UserSandbox extends DurableObject<Env> {
     return result;
   }
 
-  private llmConfig(): LLMConfig {
+  private llmConfig(agentName = "hygge-browser-agent"): LLMConfig {
     return {
       apiKey: this.env.HYGGE_LLM_API_KEY,
       baseUrl: this.env.HYGGE_LLM_BASE_URL,
       modelFast: this.env.HYGGE_LLM_MODEL_FAST,
       modelStrong: this.env.HYGGE_LLM_MODEL_STRONG,
+      agentName,
+      agentId: `hygge-${this.env.HYGGE_ENV}`,
+      tracePayloads: this.env.HYGGE_TRACE_PAYLOADS === "1",
     };
   }
 
@@ -738,6 +741,8 @@ export class UserSandbox extends DurableObject<Env> {
     const result = await runMission({
       browser,
       task,
+      traceAgentId: `hygge-${this.env.HYGGE_ENV}`,
+      tracePayloads: this.env.HYGGE_TRACE_PAYLOADS === "1",
       hints,
       decider,
       fillCredentialValue,
@@ -1326,7 +1331,7 @@ export class UserSandbox extends DurableObject<Env> {
 
       // Onboarding conversation
       if (request.method === "POST" && parts.join("/") === "onboarding/stream") {
-        const client = new LLMClient(this.llmConfig());
+        const client = new LLMClient(this.llmConfig("hygge-onboarding"));
         const { readable, writable } = new TransformStream();
         const writer = writable.getWriter();
         const encoder = new TextEncoder();
@@ -1347,7 +1352,7 @@ export class UserSandbox extends DurableObject<Env> {
         });
       }
       if (request.method === "POST" && parts.join("/") === "onboarding/message") {
-        return json(await onboardingMessage({ client: new LLMClient(this.llmConfig()), ...(body as object) }));
+        return json(await onboardingMessage({ client: new LLMClient(this.llmConfig("hygge-onboarding")), ...(body as object) }));
       }
       if (request.method === "POST" && parts.join("/") === "site-proposals") {
         return json({ proposals: await this.proposeSites(body) });
