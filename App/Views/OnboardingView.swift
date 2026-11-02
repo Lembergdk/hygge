@@ -49,13 +49,11 @@ struct OnboardingView: View {
         NavigationStack {
             ZStack {
                 GPTheme.paper.ignoresSafeArea()
-                if conversation.step == .welcome && !signInOnly {
-                    welcomeHero
-                } else {
-                    VStack(spacing: 0) {
-                        header
-                        feed
-                    }
+                // The 3-screen intro is the welcome now; this view
+                // is always the chat itself.
+                VStack(spacing: 0) {
+                    header
+                    feed
                 }
             }
             .onAppear {
@@ -67,42 +65,13 @@ struct OnboardingView: View {
                         entries.append(FeedEntry(kind: .agent, text: OnboardingStep.signIn.prompt))
                         appendInputCard()
                     } else {
+                        // Straight into the first real question: the
+                        // intro carousel already did the welcoming.
+                        if conversation.step == .welcome { conversation.step = .enjoyWork }
                         Task { await agentTurn() }
                     }
                 }
             }
-        }
-    }
-
-    private var welcomeHero: some View {
-        VStack(spacing: 0) {
-            Spacer()
-            AnimatedFlame(size: 150)
-            Text("Hi, I'm Hygge,")
-                .font(.system(size: 36, weight: .bold, design: .rounded))
-                .foregroundStyle(GPTheme.ink)
-                .padding(.top, 26)
-            Text("hoo-gah").font(.headline).foregroundStyle(GPTheme.amber).padding(.top, 6)
-            Text("I find work you like and handle\nthe boring parts.")
-                .font(.body).foregroundStyle(GPTheme.ink)
-                .multilineTextAlignment(.center).lineSpacing(3)
-                .padding(.top, 14)
-            Spacer()
-            Button {
-                submitUser("Ready", value: "")
-            } label: {
-                Text("Get started")
-                    .font(.body.weight(.semibold))
-                    .frame(maxWidth: .infinity).padding(.vertical, 17)
-                    .background(GPTheme.amber, in: Capsule()).foregroundStyle(.white)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 22)
-            Button("I already have an account") { store.wantsSignIn = true }
-                .font(.subheadline)
-                .foregroundStyle(GPTheme.secondary)
-                .buttonStyle(.plain)
-                .padding(.top, 10).padding(.bottom, 14)
         }
     }
 
