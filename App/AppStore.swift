@@ -309,9 +309,8 @@ final class AppStore {
         // it may be imported or pushed. Onboarding answers handed
         // in by this run of the flow are the one exception — they
         // belong to the person who just answered them.
-        let differentAccount = backend.previousSessionUserID != nil
-            && backend.sessionUserID != nil
-            && backend.previousSessionUserID != backend.sessionUserID
+        let differentAccount = AccountSessionTransition.requiresAdoption(wasSignedIn: true,
+            previousUserID: backend.previousSessionUserID, nextUserID: backend.sessionUserID)
         if differentAccount {
             pushTask?.cancel()
             pushTask = nil

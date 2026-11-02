@@ -103,6 +103,8 @@ struct BackendClient {
         if let userID {
             if let current = sessionUserID {
                 UserDefaults.standard.set(current, forKey: Self.previousSessionUserIDKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.previousSessionUserIDKey)
             }
             UserDefaults.standard.set(userID, forKey: Self.sessionUserIDKey)
         }
