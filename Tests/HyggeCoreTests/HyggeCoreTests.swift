@@ -331,6 +331,121 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertTrue(book.beliefs.isEmpty)
     }
 
+    // MARK: - Brief 06: profile learning
+
+    func testFeedbackReasonsMatchFeedStrings() {
+        XCTAssertEqual(FeedbackReason.from(uiString: "too low"), .tooLow)
+        XCTAssertEqual(FeedbackReason.from(uiString: "too far"), .tooFar)
+        XCTAssertEqual(FeedbackReason.from(uiString: "not their thing"), .notMyThing)
+        XCTAssertEqual(FeedbackReason.from(uiString: "just busy"), .justBusy)
+        XCTAssertNil(FeedbackReason.from(uiString: nil))
+    }
+
+    func testLearningDeltasAndFloorPromptOnly() {
+        var learning = LearningProfile()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        for i in 0..<5 {
+            learning.apply(FeedbackEvent(subjectType: .opportunity, subjectId: "o\(i)",
+                                         action: .declined, reason: .tooLow,
+                                         category: .petCare, occurredAt: now))
+        }
+        XCTAssertEqual(learning.tooLowDeclines, 5)
+        XCTAssertEqual(learning.rateSensitivity, 1, accuracy: 1e-9)
+        XCTAssertEqual(learning.affinity(for: .petCare), -0.25, accuracy: 1e-9)
+        XCTAssertTrue(learning.shouldPromptRateFloorReview, "prompt only — LearningProfile cannot move the floor")
+
+        var mixed = LearningProfile()
+        mixed.apply(FeedbackEvent(subjectType: .opportunity, subjectId: "a", action: .accepted,
+                                  category: .petCare, requiredSkills: ["Dog walking"], occurredAt: now))
+        mixed.apply(FeedbackEvent(subjectType: .opportunity, subjectId: "i", action: .ignored,
+                                  category: .freelance, occurredAt: now))
+        mixed.apply(FeedbackEvent(subjectType: .opportunity, subjectId: "d", action: .declined,
+                                  reason: .other, category: .creative, occurredAt: now))
+        XCTAssertEqual(mixed.affinity(for: .petCare), 0.20, accuracy: 1e-9)
+        XCTAssertEqual(mixed.affinity(for: .freelance), -0.05, accuracy: 1e-9, "ignored is weaker than declined")
+        XCTAssertEqual(mixed.affinity(for: .creative), -0.20, accuracy: 1e-9)
+    }
+
+    func testServerProfileJSONExtendsSingleAffinityBucket() throws {
+        // Golden fixture in the exact shape the server writes
+        // (learning.ts: lowercase affinity keys). A local apply must
+        // extend that bucket, never start a parallel mixed-case one.
+        let json = #"{"id":"learning","affinities":{"petcare":{"score":-0.3,"accepts":0,"declines":2,"ignores":0,"updatedAt":"2026-11-10T07:00:00.000Z"}},"skillAffinities":{},"rateSensitivity":0,"distanceSensitivity":0,"reasonCounts":{"notMyThing":1},"tooLowDeclines":0,"eventCount":2,"updatedAt":"2026-11-10T07:00:00.000Z"}"#
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = HyggeISO8601.dateDecodingStrategy
+        var profile = try decoder.decode(LearningProfile.self, from: Data(json.utf8))
+        XCTAssertEqual(profile.affinity(for: .petCare), -0.3, accuracy: 1e-9)
+        profile.apply(FeedbackEvent(subjectType: .opportunity, subjectId: "local-1",
+                                    action: .declined, reason: .other, category: .petCare,
+                                    occurredAt: Date(timeIntervalSince1970: 1_800_000_000)))
+        XCTAssertEqual(profile.affinities.count, 1, "one bucket per category across server and device")
+        XCTAssertNotNil(profile.affinities["petcare"])
+        XCTAssertNil(profile.affinities["petCare"])
+        XCTAssertEqual(profile.affinity(for: .petCare), -0.5, accuracy: 1e-9, "server score and local decline accumulate")
+        XCTAssertEqual(profile.affinities["petcare"]?.declines, 3)
+    }
+
+    func testBeliefKindsStatedNeverDecaysInferredExpires() {
+        var book = BeliefBook()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let old = now.addingTimeInterval(-90 * 86_400)
+        book.beliefs.append(Belief(sentence: "Has a car", source: .youSaidIt, learnedAt: old, confidence: 0.9))
+        book.pending.append(Belief(sentence: "Prefers close work", source: .learnedFromWork, learnedAt: old, confidence: 0.8))
+        XCTAssertEqual(book.kind(of: book.beliefs[0]), .stated)
+        XCTAssertEqual(book.kind(of: book.pending[0]), .inferred)
+        XCTAssertEqual(book.effectiveConfidence(of: book.beliefs[0], at: now), 0.9, accuracy: 1e-9)
+        XCTAssertEqual(book.effectiveConfidence(of: book.pending[0], at: now), 0.1, accuracy: 1e-9)
+        XCTAssertTrue(book.isExpired(book.pending[0], at: now))
+        book.pruneExpired(at: now)
+        XCTAssertTrue(book.pending.isEmpty)
+        XCTAssertEqual(book.beliefs.count, 1, "stated beliefs are never pruned")
+
+        // Confirming a belief makes it stated (confirmed in the hub).
+        book.propose(sentence: "Likes mornings", source: .guessedFromChat, confidence: 0.6)
+        let pending = book.pending[0]
+        XCTAssertEqual(book.kind(of: pending), .inferred)
+        book.confirm(proposalID: pending.id)
+        XCTAssertEqual(book.kind(of: book.beliefs.last!), .stated)
+    }
+
+    func testServerRankOrderIgnoresLocalScore() {
+        func opp(_ title: String, category: OpportunityCategory, rank: Double?) -> Opportunity {
+            Opportunity(siteID: "rover", title: title, summary: "", category: category,
+                        payLabel: "", estimatedHourly: 60, locationLabel: "Leeds",
+                        isRemote: true, requiredSkills: [], urlString: "", rankScore: rank)
+        }
+        // The locally stronger match (the pet-care one) has the lower
+        // server score: feed order must follow the server score only.
+        let lowLocalHighServer = opp("Server first", category: .freelance, rank: 0.9)
+        let highLocalLowServer = opp("Server second", category: .petCare, rank: 0.5)
+        let ordered = MatchEngine.inServerRankOrder(
+            profile: petProfile(), opportunities: [highLocalLowServer, lowLocalHighServer])
+        XCTAssertEqual(ordered.map { $0.0.title }, ["Server first", "Server second"])
+        XCTAssertGreaterThan(ordered[1].1.score, ordered[0].1.score,
+                             "display scores may disagree with feed order — that is the point")
+    }
+
+    func testFeedbackAndLearningRoundTripThroughExport() throws {
+        let event = FeedbackEvent(subjectType: .opportunity, subjectId: "ignored only ids are strings",
+                                  action: .ignored, category: .petCare,
+                                  occurredAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let ignored = FeedbackEvent(id: "ignored:abc-123", subjectType: .opportunity,
+                                    subjectId: "abc-123", action: .ignored, category: .petCare,
+                                    occurredAt: event.occurredAt)
+        let rebuilt = LearningProfile.rebuilt(from: [ignored])
+        let export = ServerExport(
+            feedbackEvents: [StateRow(id: ignored.id, updatedAt: "2026-11-01T00:00:00Z", data: ignored)],
+            learningProfiles: [StateRow(id: "learning", updatedAt: "2026-11-01T00:00:00Z", data: rebuilt)])
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(ServerExport.self, from: encoder.encode(export))
+        XCTAssertEqual(decoded.feedbackEvents.first?.data, ignored)
+        XCTAssertEqual(decoded.learningProfiles.first?.data.affinity(for: .petCare) ?? -999, -0.05, accuracy: 1e-9)
+        // Older exports without the learning sections still decode.
+        let legacy = try decoder.decode(ServerExport.self, from: Data(#"{"counts":{},"hasRealFeedItem":false}"#.utf8))
+        XCTAssertTrue(legacy.feedbackEvents.isEmpty && legacy.learningProfiles.isEmpty)
+    }
+
     /// Chat commands are structured and strict: a sentence merely mentioning
     /// the word "pause" must not pause anything.
     func testChatActionParserIsStrict() {

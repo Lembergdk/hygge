@@ -7,7 +7,8 @@ struct StoreSnapshot: Codable {
          opportunities: [Opportunity], tasks: [AgentTask], applications: [ApplicationRecord],
          proposals: [ProposedSite], accountStates: [String: SiteAccountState],
          chatTranscript: [ChatEntry], activityEvents: [ActivityEvent], isPaused: Bool,
-         lastVisitAt: Date?, beliefs: BeliefBook = BeliefBook(), searchEvidence: [SearchEvidence] = []) {
+         lastVisitAt: Date?, beliefs: BeliefBook = BeliefBook(), searchEvidence: [SearchEvidence] = [],
+         feedbackEvents: [FeedbackEvent] = [], learningProfile: LearningProfile = LearningProfile()) {
         self.profile = profile; self.hasOnboarded = hasOnboarded; self.sites = sites
         self.siteMemory = siteMemory; self.credentialRefs = credentialRefs
         self.opportunities = opportunities; self.tasks = tasks; self.applications = applications
@@ -15,6 +16,7 @@ struct StoreSnapshot: Codable {
         self.chatTranscript = chatTranscript; self.activityEvents = activityEvents
         self.isPaused = isPaused; self.lastVisitAt = lastVisitAt
         self.beliefs = beliefs; self.searchEvidence = searchEvidence
+        self.feedbackEvents = feedbackEvents; self.learningProfile = learningProfile
     }
     var profile: EarningsProfile
     var hasOnboarded: Bool
@@ -32,6 +34,8 @@ struct StoreSnapshot: Codable {
     var lastVisitAt: Date?
     var beliefs: BeliefBook = BeliefBook()
     var searchEvidence: [SearchEvidence] = []
+    var feedbackEvents: [FeedbackEvent] = []
+    var learningProfile: LearningProfile = LearningProfile()
 
     /// Tolerant decode: fields added in later versions default instead of
     /// failing the whole snapshot (which would wipe the user's state).
@@ -53,6 +57,8 @@ struct StoreSnapshot: Codable {
         lastVisitAt = try c.decodeIfPresent(Date.self, forKey: .lastVisitAt)
         beliefs = try c.decodeIfPresent(BeliefBook.self, forKey: .beliefs) ?? BeliefBook()
         searchEvidence = try c.decodeIfPresent([SearchEvidence].self, forKey: .searchEvidence) ?? []
+        feedbackEvents = try c.decodeIfPresent([FeedbackEvent].self, forKey: .feedbackEvents) ?? []
+        learningProfile = try c.decodeIfPresent(LearningProfile.self, forKey: .learningProfile) ?? LearningProfile()
     }
 }
 
@@ -73,6 +79,10 @@ final class AppStore {
     var isPaused = false
     var beliefs = BeliefBook()
     var searchEvidence: [SearchEvidence] = []
+    /// Brief 06: every decision, structured. Synced per user; the
+    /// server derives the ranking model from these events.
+    var feedbackEvents: [FeedbackEvent] = []
+    var learningProfile = LearningProfile()
     var lastVisitAt: Date?
     /// Captured at launch: journal grouping is 'since' this moment.
     var visitMarker: Date = .distantPast
@@ -146,9 +156,31 @@ final class AppStore {
         StateSync.visibleOpportunities(opportunities, serverHasReal: hasRealServerFeedItem)
     }
 
+    /// Feed order is the server ranker's (Brief 06); MatchResult here
+    /// is display evidence only.
     var rankedOpportunities: [(Opportunity, MatchResult)] {
-        MatchEngine.ranked(profile: profile,
-                           opportunities: visibleOpportunities.filter { $0.status != .dismissed })
+        MatchEngine.inServerRankOrder(profile: profile,
+                                      opportunities: visibleOpportunities.filter { $0.status != .dismissed })
+    }
+
+    // MARK: - Feedback recording (Brief 06)
+
+    /// Append one decision and fold it into the local learning copy.
+    /// The save()/push that follows at each call site carries it to
+    /// the server, where the same events rebuild the ranking model.
+    func recordFeedback(_ event: FeedbackEvent) {
+        guard !feedbackEvents.contains(where: { $0.id == event.id }) else { return }
+        feedbackEvents.append(event)
+        learningProfile.apply(event)
+    }
+
+    /// For outcomes that must only ever be learned from once per
+    /// subject (accepted / sent / booked / completed).
+    func recordFeedbackOnce(_ event: FeedbackEvent) {
+        guard !feedbackEvents.contains(where: {
+            $0.subjectType == event.subjectType && $0.subjectId == event.subjectId && $0.action == event.action
+        }) else { return }
+        recordFeedback(event)
     }
 
     func site(id: String) -> TargetSite? { sites.first { $0.id == id } }
@@ -213,6 +245,9 @@ final class AppStore {
         guard let index = proposals.firstIndex(where: { $0.id == proposalID }),
               let site = site(id: proposals[index].siteID) else { return }
         proposals[index].status = alreadyHasAccount ? .approvedHasAccount : .approvedSignup
+        recordFeedback(FeedbackEvent(subjectType: .siteProposal,
+                                     subjectId: proposalID.uuidString.lowercased(),
+                                     action: .approved, category: site.category))
         accountStates[site.id] = .joining
         // Brief 04 email choice: a Hygge address the user chose in
         // the profile hub is used for new site signups (Hygge then
@@ -268,6 +303,10 @@ final class AppStore {
     func dismissProposal(proposalID: UUID) {
         guard let index = proposals.firstIndex(where: { $0.id == proposalID }) else { return }
         proposals[index].status = .dismissed
+        recordFeedback(FeedbackEvent(subjectType: .siteProposal,
+                                     subjectId: proposalID.uuidString.lowercased(),
+                                     action: .dismissed,
+                                     category: site(id: proposals[index].siteID)?.category))
         save()
     }
 
@@ -487,6 +526,16 @@ final class AppStore {
             recordEvent(ActivityEvent(kind: .booked, sentence: "Booked: \(applications[index].title).",
                                       detail: "Confirmed on \(siteName(id: applications[index].siteID)).",
                                       siteID: applications[index].siteID, applicationID: applicationID))
+            recordFeedbackOnce(FeedbackEvent(
+                subjectType: .application, subjectId: applicationID.uuidString.lowercased(),
+                action: .booked,
+                category: opportunities.first { $0.id == applications[index].opportunityID }?.category))
+        }
+        if stage == .completed && was != .completed {
+            recordFeedbackOnce(FeedbackEvent(
+                subjectType: .application, subjectId: applicationID.uuidString.lowercased(),
+                action: .completed,
+                category: opportunities.first { $0.id == applications[index].opportunityID }?.category))
         }
         if stage == .completed && was != .completed && applications[index].agreedGross == nil {
             // No witnessed amount: the journal records completion without money claims.
@@ -508,6 +557,10 @@ final class AppStore {
             detail: "Amount confirmed by you at completion.",
             siteID: applications[index].siteID, applicationID: applicationID,
             grossAmount: grossAmount, currencyCode: applications[index].currencyCode))
+        recordFeedbackOnce(FeedbackEvent(
+            subjectType: .application, subjectId: applicationID.uuidString.lowercased(),
+            action: .completed,
+            category: opportunities.first { $0.id == applications[index].opportunityID }?.category))
         save()
     }
 
@@ -528,9 +581,29 @@ final class AppStore {
                                       siteID: task.siteID, listingsChecked: max(survey.listingsRead, listings)))
         case .signup:
             recordEvent(ActivityEvent(kind: .joinedSite, sentence: "Set you up on \(site).", siteID: task.siteID))
+            recordFeedbackOnce(FeedbackEvent(subjectType: .signup, subjectId: task.siteID,
+                                             action: .signupApproved,
+                                             category: self.site(id: task.siteID)?.category))
         case .buildProfile:
             recordEvent(ActivityEvent(kind: .profileLive, sentence: "Your \(site) profile is live.", siteID: task.siteID))
+            recordFeedbackOnce(FeedbackEvent(subjectType: .signup, subjectId: task.siteID,
+                                             action: .profileConfirmed,
+                                             category: self.site(id: task.siteID)?.category))
         case .apply:
+            if let oppID = task.opportunityID,
+               let opp = opportunities.first(where: { $0.id == oppID }) {
+                recordFeedbackOnce(FeedbackEvent(
+                    subjectType: .opportunity, subjectId: oppID.uuidString.lowercased(),
+                    action: .accepted, category: opp.category,
+                    requiredSkills: opp.requiredSkills, estimatedHourly: opp.estimatedHourly,
+                    distanceKm: opp.distanceKm))
+            }
+            if let app = applications.first(where: { $0.opportunityID == task.opportunityID }) {
+                recordFeedbackOnce(FeedbackEvent(
+                    subjectType: .application, subjectId: app.id.uuidString.lowercased(),
+                    action: .sent,
+                    category: opportunities.first { $0.id == task.opportunityID }?.category))
+            }
             recordEvent(ActivityEvent(kind: .applicationSent,
                                       sentence: "Sent your application: \(task.title.replacingOccurrences(of: "Apply: ", with: "")).",
                                       siteID: task.siteID,
@@ -642,9 +715,23 @@ final class AppStore {
         save()
     }
 
-    func reject(taskID: UUID) {
+    /// "Not now" lands here with its reason (Brief 06): the reason was
+    /// previously discarded; now it is recorded as a declined feedback
+    /// event so future suggestions learn from it. Learning never
+    /// changes the rate floor — a "too low" decline only feeds the
+    /// review prompt in the profile hub.
+    func reject(taskID: UUID, reason: String? = nil) {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        let task = tasks[index]
         try? tasks[index].reject()
+        let opp = task.opportunityID.flatMap { id in opportunities.first { $0.id == id } }
+        recordFeedback(FeedbackEvent(
+            subjectType: .opportunity,
+            subjectId: (task.opportunityID ?? taskID).uuidString.lowercased(),
+            action: .declined, reason: FeedbackReason.from(uiString: reason),
+            category: opp?.category ?? site(id: task.siteID)?.category,
+            requiredSkills: opp?.requiredSkills ?? [],
+            estimatedHourly: opp?.estimatedHourly, distanceKm: opp?.distanceKm))
         save()
     }
 
@@ -676,6 +763,8 @@ final class AppStore {
         activityEvents = []
         beliefs = BeliefBook()
         searchEvidence = []
+        feedbackEvents = []
+        learningProfile = LearningProfile()
         isPaused = false
     }
 
@@ -846,7 +935,8 @@ final class AppStore {
                      credentialRefs: credentialRefs, opportunities: opportunities, tasks: tasks,
                      applications: applications, proposals: proposals, accountStates: accountStates,
                      chatTranscript: chatTranscript, activityEvents: activityEvents,
-                     beliefs: beliefs, searchEvidence: searchEvidence)
+                     beliefs: beliefs, searchEvidence: searchEvidence,
+                     feedbackEvents: feedbackEvents)
     }
 
     /// Launch entry point: migrate once if needed, otherwise pull.
@@ -931,6 +1021,12 @@ final class AppStore {
         } else {
             beliefs = export.beliefs
         }
+        beliefs.pruneExpired(at: Date())
+        // Brief 06: the server is the learning truth. Adopt its events
+        // and derived profile (rebuilding locally only when the server
+        // has no derived row yet).
+        if !export.feedbackEvents.isEmpty { feedbackEvents = export.feedbackEvents.map(\.data) }
+        learningProfile = export.learningProfiles.first?.data ?? LearningProfile.rebuilt(from: feedbackEvents)
         hasRealServerFeedItem = export.hasRealFeedItem
     }
 
@@ -979,7 +1075,7 @@ final class AppStore {
                                      siteMemory: siteMemory, credentialRefs: credentialRefs,
                                      opportunities: opportunities, tasks: tasks, applications: applications,
                                      proposals: proposals, accountStates: accountStates,
-                                     chatTranscript: chatTranscript, activityEvents: activityEvents, isPaused: isPaused, lastVisitAt: lastVisitAt, beliefs: beliefs, searchEvidence: searchEvidence)
+                                     chatTranscript: chatTranscript, activityEvents: activityEvents, isPaused: isPaused, lastVisitAt: lastVisitAt, beliefs: beliefs, searchEvidence: searchEvidence, feedbackEvents: feedbackEvents, learningProfile: learningProfile)
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)
@@ -1003,6 +1099,8 @@ final class AppStore {
         isPaused = snapshot.isPaused
         beliefs = snapshot.beliefs
         searchEvidence = snapshot.searchEvidence
+        feedbackEvents = snapshot.feedbackEvents
+        learningProfile = snapshot.learningProfile
         lastVisitAt = snapshot.lastVisitAt
         return true
     }

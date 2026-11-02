@@ -41,6 +41,10 @@ export const STATE_TABLES: Record<string, string> = {
   journalEvents: "journal_events",
   beliefs: "beliefs",
   searchEvidence: "search_evidence",
+  // Brief 06: per-user learning (feedback events + the derived
+  // learning profile). Per-user DO only; never fleet-shared.
+  feedbackEvents: "feedback_events",
+  learningProfiles: "learning_profiles",
 };
 
 /// URL path segment -> entity key. `/site-proposals` (LLM generation)
@@ -57,6 +61,8 @@ export const STATE_ROUTES: Record<string, string> = {
   "journal-events": "journalEvents",
   beliefs: "beliefs",
   "search-evidence": "searchEvidence",
+  "feedback-events": "feedbackEvents",
+  "learning-profiles": "learningProfiles",
 };
 
 export const PROFILE_ROW_ID = "profile";
@@ -305,6 +311,19 @@ export class StateStore {
       if (id) this.upsert("searchEvidence", id, evidence, now);
     }
 
+    // Brief 06 feedback events arrive with the app's push; the
+    // learning profile itself is server-derived from them
+    // (learning.ts ensureLearningProfile). Imported learning-profile
+    // rows (export round-trips) are kept but lose to a rebuild.
+    for (const ev of asArray(snapshot.feedbackEvents)) {
+      const id = idOf(ev);
+      if (id) this.upsert("feedbackEvents", id, ev, now);
+    }
+    for (const lp of asArray(snapshot.learningProfiles)) {
+      const id = idOf(lp);
+      if (id) this.upsert("learningProfiles", id, lp, now);
+    }
+
     const siteMemory = (snapshot.siteMemory ?? {}) as Record<string, unknown>;
     const memories = Array.isArray(siteMemory) ? asArray(siteMemory) : asArray(siteMemory.memories);
     const tasks = asArray(snapshot.tasks);
@@ -345,6 +364,8 @@ export class StateStore {
       },
       beliefRows: this.list("beliefs"),
       searchEvidence: this.list("searchEvidence"),
+      feedbackEvents: this.list("feedbackEvents"),
+      learningProfiles: this.list("learningProfiles"),
       counts: this.counts(),
       hasRealFeedItem: this.hasRealFeedItem(),
     };

@@ -118,12 +118,20 @@ public struct Opportunity: Codable, Identifiable, Equatable, Sendable {
     public var urlString: String
     public var isDemo: Bool
     public var status: OpportunityStatus
+    /// Brief 06: score from the one server ranker when this listing was
+    /// surfaced by a scheduled scan. Feed order follows this score;
+    /// local match code is display evidence only. Nil for listings
+    /// that did not come through the server ranker.
+    public var rankScore: Double?
+    /// Distance in km when the listing stated it. Nil means unknown.
+    public var distanceKm: Double?
 
     public init(id: UUID = UUID(), siteID: String, title: String, summary: String,
                 category: OpportunityCategory, payLabel: String, estimatedHourly: Double?,
                 locationLabel: String, isRemote: Bool, requiredSkills: [String],
                 urlString: String, estimatedGross: Double? = nil, currencyCode: String = "USD",
-                isDemo: Bool = false, status: OpportunityStatus = .new) {
+                isDemo: Bool = false, status: OpportunityStatus = .new,
+                rankScore: Double? = nil, distanceKm: Double? = nil) {
         self.id = id
         self.siteID = siteID
         self.title = title
@@ -139,6 +147,8 @@ public struct Opportunity: Codable, Identifiable, Equatable, Sendable {
         self.urlString = urlString
         self.isDemo = isDemo
         self.status = status
+        self.rankScore = rankScore
+        self.distanceKm = distanceKm
     }
 }
 

@@ -88,6 +88,9 @@ public struct ServerExport: Codable, Equatable, Sendable {
     public var beliefs: BeliefBook
     public var beliefRows: [StateRow<BeliefRow>]
     public var searchEvidence: [StateRow<SearchEvidence>]
+    // Brief 06: per-user learning (feedback events + derived profile).
+    public var feedbackEvents: [StateRow<FeedbackEvent>]
+    public var learningProfiles: [StateRow<LearningProfile>]
     public var counts: [String: Int]
     public var hasRealFeedItem: Bool
 
@@ -97,6 +100,8 @@ public struct ServerExport: Codable, Equatable, Sendable {
                 proposals: [StateRow<ProposedSite>] = [], accountStates: [String: SiteAccountState] = [:],
                 journalEvents: [StateRow<ActivityEvent>] = [], beliefs: BeliefBook = BeliefBook(),
                 beliefRows: [StateRow<BeliefRow>] = [], searchEvidence: [StateRow<SearchEvidence>] = [],
+                feedbackEvents: [StateRow<FeedbackEvent>] = [],
+                learningProfiles: [StateRow<LearningProfile>] = [],
                 counts: [String: Int] = [:], hasRealFeedItem: Bool = false) {
         self.profile = profile
         self.feedItems = feedItems
@@ -110,6 +115,8 @@ public struct ServerExport: Codable, Equatable, Sendable {
         self.beliefs = beliefs
         self.beliefRows = beliefRows
         self.searchEvidence = searchEvidence
+        self.feedbackEvents = feedbackEvents
+        self.learningProfiles = learningProfiles
         self.counts = counts
         self.hasRealFeedItem = hasRealFeedItem
     }
@@ -129,6 +136,8 @@ public struct ServerExport: Codable, Equatable, Sendable {
         beliefs = try c.decodeIfPresent(BeliefBook.self, forKey: .beliefs) ?? BeliefBook()
         beliefRows = try c.decodeIfPresent([StateRow<BeliefRow>].self, forKey: .beliefRows) ?? []
         searchEvidence = try c.decodeIfPresent([StateRow<SearchEvidence>].self, forKey: .searchEvidence) ?? []
+        feedbackEvents = try c.decodeIfPresent([StateRow<FeedbackEvent>].self, forKey: .feedbackEvents) ?? []
+        learningProfiles = try c.decodeIfPresent([StateRow<LearningProfile>].self, forKey: .learningProfiles) ?? []
         counts = try c.decodeIfPresent([String: Int].self, forKey: .counts) ?? [:]
         hasRealFeedItem = try c.decodeIfPresent(Bool.self, forKey: .hasRealFeedItem) ?? false
     }
@@ -155,13 +164,17 @@ public struct ServerImport: Codable, Equatable, Sendable {
     public var activityEvents: [ActivityEvent]
     public var beliefs: BeliefBook
     public var searchEvidence: [SearchEvidence]
+    /// Brief 06 decisions; the server derives the learning profile
+    /// from these, so no profile is uploaded.
+    public var feedbackEvents: [FeedbackEvent]
 
     public init(profile: EarningsProfile, hasOnboarded: Bool, isPaused: Bool, lastVisitAt: Date?,
                 sites: [TargetSite], siteMemory: SiteMemoryRepository, credentialRefs: [CredentialRef],
                 opportunities: [Opportunity], tasks: [AgentTask], applications: [ApplicationRecord],
                 proposals: [ProposedSite], accountStates: [String: SiteAccountState],
                 chatTranscript: [ChatEntry], activityEvents: [ActivityEvent],
-                beliefs: BeliefBook, searchEvidence: [SearchEvidence]) {
+                beliefs: BeliefBook, searchEvidence: [SearchEvidence],
+                feedbackEvents: [FeedbackEvent] = []) {
         self.profile = profile
         self.hasOnboarded = hasOnboarded
         self.isPaused = isPaused
@@ -179,6 +192,7 @@ public struct ServerImport: Codable, Equatable, Sendable {
         self.activityEvents = activityEvents
         self.beliefs = beliefs
         self.searchEvidence = searchEvidence
+        self.feedbackEvents = feedbackEvents
     }
 }
 
@@ -238,6 +252,8 @@ public enum StateSync {
         .init("activityEvents", "GET/POST/PUT /journal-events", "journal_events"),
         .init("beliefs", "GET/POST/PUT /beliefs", "beliefs"),
         .init("searchEvidence", "GET/POST/PUT /search-evidence", "search_evidence"),
+        .init("feedbackEvents", "GET/POST/PUT /feedback-events", "feedback_events"),
+        .init("learningProfile", "GET /learning-profiles (server-derived)", "learning_profiles"),
     ]
 
     /// All StoreSnapshot field names, for the completeness test.
@@ -245,7 +261,7 @@ public enum StateSync {
         "profile", "hasOnboarded", "sites", "siteMemory", "credentialRefs",
         "opportunities", "tasks", "applications", "proposals", "accountStates",
         "chatTranscript", "activityEvents", "isPaused", "lastVisitAt",
-        "beliefs", "searchEvidence",
+        "beliefs", "searchEvidence", "feedbackEvents", "learningProfile",
     ]
 
     public static var unmappedSnapshotFields: [String] {
@@ -315,6 +331,7 @@ public enum StateSync {
             "journalEvents": Set(payload.activityEvents.map { $0.id.uuidString.lowercased() }).count,
             "beliefs": Set((payload.beliefs.beliefs + payload.beliefs.pending).map { $0.id.uuidString.lowercased() }).count,
             "searchEvidence": Set(payload.searchEvidence.map { $0.id.uuidString.lowercased() }).count,
+            "feedbackEvents": Set(payload.feedbackEvents.map { $0.id.lowercased() }).count,
         ]
     }
 

@@ -120,10 +120,12 @@ struct ProfileHubView: View {
         }
     }
 
-    /// Beliefs about YOU: quoted, sourced, dated — and only ever added with
-    /// your confirmation. Website know-how lives in its own section below.
+    /// What Hygge has learned about you (Brief 06): beliefs plus the
+    /// strongest learned leanings. Beliefs you said yourself never
+    /// fade; Hygge's own guesses are shown as guesses and fade unless
+    /// you confirm them.
     private var beliefsSection: some View {
-        sectionCard("What Hygge has saved about you", badge: "heart.fill", badgeTint: HyggeTheme.butterTint) {
+        sectionCard("What Hygge has learned about you", badge: "heart.fill", badgeTint: HyggeTheme.butterTint) {
             if !store.profile.skills.isEmpty {
                 beliefRow("Skills: \(store.profile.skills.joined(separator: ", "))", deletable: {
                     store.clearProfileSkills()
@@ -149,7 +151,7 @@ struct ProfileHubView: View {
             }
             ForEach(store.beliefs.pending) { proposal in
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("New belief to check").font(.caption.weight(.bold)).foregroundStyle(HyggeTheme.ember)
+                    Text("My guess — check me").font(.caption.weight(.bold)).foregroundStyle(HyggeTheme.ember)
                     Text("\"\(proposal.sentence)\"")
                         .font(.subheadline).foregroundStyle(HyggeTheme.ink)
                     HStack(spacing: 9) {
@@ -165,6 +167,27 @@ struct ProfileHubView: View {
             if store.beliefs.beliefs.isEmpty && store.beliefs.pending.isEmpty && store.profile.skills.isEmpty {
                 Text("Nothing yet. I'll learn as we go — and I'll always check with you before saving a new belief.")
                     .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+            }
+            if !store.learningProfile.topAffinities.isEmpty {
+                Divider()
+                Text("How your choices shape what I suggest")
+                    .font(.caption.weight(.bold)).foregroundStyle(HyggeTheme.secondary)
+                ForEach(Array(store.learningProfile.topAffinities.prefix(4).enumerated()), id: \.offset) { _, pair in
+                    HStack(spacing: 8) {
+                        Image(systemName: pair.1 >= 0 ? "arrow.up.circle" : "arrow.down.circle")
+                            .font(.caption).foregroundStyle(HyggeTheme.sageDeep)
+                        Text(pair.1 >= 0
+                             ? "More \(pair.0.label.lowercased()) — you keep saying yes to it"
+                             : "Less \(pair.0.label.lowercased()) — you keep turning it down")
+                            .font(.subheadline).foregroundStyle(HyggeTheme.ink)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            if store.learningProfile.shouldPromptRateFloorReview {
+                Divider()
+                Text("You have turned down \(store.learningProfile.tooLowDeclines) jobs for low pay. Your lowest rate is still $\(Int(store.profile.hourlyRateFloor))/hr — it only changes if you tell me a new one in chat.")
+                    .font(.subheadline).foregroundStyle(HyggeTheme.ink)
             }
             Text("To correct anything: edit it here, delete it, or just tell me in chat.")
                 .font(.caption).foregroundStyle(HyggeTheme.secondary)

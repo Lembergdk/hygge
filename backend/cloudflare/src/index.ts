@@ -28,6 +28,9 @@ const USER_ROUTES = [
   "/journal-events",
   "/beliefs",
   "/search-evidence",
+  // Brief 06 per-user learning state.
+  "/feedback-events",
+  "/learning-profiles",
   // Brief 05 scheduled scanning (manual tick + status; the cron
   // sweeper below calls the same per-user tick).
   "/scheduled-scan",

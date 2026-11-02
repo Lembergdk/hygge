@@ -6,7 +6,7 @@ import { onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { BrowserRunBrowser } from "./browser.ts";
 import { makeDecider, runMission, distillHints, emailCodeAllowedForTask } from "./agent.ts";
 import * as vault from "./vault.ts";
-import { PROFILE_ROW_ID, STATE_ROUTES, StateStore, createSqliteStateDb, ensureStateSchema } from "./state.ts";
+import { PROFILE_ROW_ID, STATE_ROUTES, StateStore, createSqliteStateDb, ensureStateSchema, normalizeId } from "./state.ts";
 import {
   D1SkillRepository, applySkillOutcome, outcomeForTaskKind, promoteCandidate,
   requiresApprovalForKind, shouldPromote, skillImplicatedByFailure,
@@ -26,10 +26,15 @@ import {
 } from "./session-profile.ts";
 import {
   CRON_SLOTS_UTC, ScanStore, categoriesToReopen, clearStaleEpisode,
-  createSqliteScanDb, effectiveTickNow, ensureScanSchema, extractProfile, runScheduledTick,
-  scanSiteFromRow, type ScanDeps, type ScanMissionInput, type ScanMissionOutcome,
-  type ScanProfile,
+  createSqliteScanDb, domainOfUrl, effectiveTickNow, ensureScanSchema, extractProfile, runScheduledTick,
+  scanSiteFromRow, type ProbeMissionInput, type ScanDeps, type ScanMissionInput, type ScanMissionOutcome,
+  type ScanProfile, type ScanSite,
 } from "./scan.ts";
+import { ensureLearningProfile, rankSiteProposals } from "./learning.ts";
+import {
+  applyProbeOutcome, consumeUnknownCycle, eligibilityOf, reprobeDue,
+  unknownAccessRecord, withdrawProposalsForSite, type Eligibility, type ProbeOutcome, type SiteAccessRecord,
+} from "./web-access.ts";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const CONTAINER_IMAGE = "cloudflare/debian-trixie";
@@ -802,6 +807,9 @@ export class UserSandbox extends DurableObject<Env> {
       ...(done.browser_trace ?? []).map((t: any) => String(t.summary ?? "")),
     ].join("\n");
     const needsHuman = done.status === "needsHuman";
+    // Brief 06: a mobile-app wall is its own signal (not the generic
+    // human-check path) and triggers a catalog re-probe in scan.ts.
+    const appWall = /continue in (the )?app|open in the app|download (our|the) app|only in (the|our) app|app[- ]only|use our app to/i.test(traceText);
     // An expired trusted sign-in logs "had expired" and falls back
     // to the saved login inside the mission; if the mission still
     // fails on sign-in, the saved login itself is the problem.
@@ -813,6 +821,7 @@ export class UserSandbox extends DurableObject<Env> {
       items: Array.isArray(done.extracted_items) ? done.extracted_items : [],
       loginFailure,
       needsHuman,
+      appWall,
       skillPath: skillLine,
       taskId: done.id,
       errorReason: done.status === "succeeded" ? null
@@ -820,6 +829,129 @@ export class UserSandbox extends DurableObject<Env> {
         : loginFailure ? "saved login was rejected"
         : "scan did not finish",
     };
+  }
+
+  // ---- Brief 06 web-access catalog (D1, fleet-level, no user data) --
+
+  // Catalog errors (e.g. migration 0005 not applied yet) throw on
+  // purpose: callers fail closed (unknownBlocked) instead of
+  // mistaking them for a fresh unknown site with a free cycle.
+  private async siteAccessRecord(domain: string): Promise<SiteAccessRecord | null> {
+    const row = await this.env.DB.prepare(
+      "SELECT host, display_name, web_accessible, probed_at, probe_evidence, unknown_cycles_used, app_wall_strikes FROM site_catalog WHERE host = ?1",
+    ).bind(domain).first<Row>();
+    if (!row) return null;
+    const v = String(row.web_accessible ?? "unknown");
+    return {
+      domain: String(row.host),
+      displayName: row.display_name ? String(row.display_name) : null,
+      webAccessible: v === "true" || v === "false" ? v : "unknown",
+      probedAt: row.probed_at ? String(row.probed_at) : null,
+      probeEvidence: row.probe_evidence ? String(row.probe_evidence) : null,
+      unknownCyclesUsed: Number(row.unknown_cycles_used ?? 0),
+      appWallStrikes: Number(row.app_wall_strikes ?? 0),
+    };
+  }
+
+  private async saveSiteAccessRecord(rec: SiteAccessRecord): Promise<void> {
+    // display_name is seeded from the domain, never a user-typed
+    // site name: this catalog is fleet-level and holds no user data.
+    await this.env.DB.prepare(
+      `INSERT INTO site_catalog (host, display_name, web_accessible, probed_at, probe_evidence, unknown_cycles_used, app_wall_strikes, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+       ON CONFLICT(host) DO UPDATE SET web_accessible = excluded.web_accessible,
+         probed_at = excluded.probed_at, probe_evidence = excluded.probe_evidence,
+         unknown_cycles_used = excluded.unknown_cycles_used,
+         app_wall_strikes = excluded.app_wall_strikes, updated_at = datetime('now')`,
+    ).bind(rec.domain, rec.displayName ?? rec.domain, rec.webAccessible,
+      rec.probedAt, rec.probeEvidence, rec.unknownCyclesUsed, rec.appWallStrikes).run();
+  }
+
+  /// Withdraw open proposals whose site is proven web-ineligible.
+  /// Runs on app state pushes: onboarding-generated suggestions are
+  /// created on-device without catalog access, so this server-side
+  /// sweep is where "ineligible is never proposed" is enforced for
+  /// them. Verdicts are only read here — probing stays in the
+  /// scheduled-scan and backend-proposal paths.
+  private async sweepIneligibleProposals(store: StateStore): Promise<void> {
+    const sites = new Map<string, ScanSite>();
+    for (const row of store.list("sites")) {
+      const site = scanSiteFromRow(row.id, row.data);
+      if (site) sites.set(normalizeId(site.siteID), site);
+    }
+    if (!sites.size || !store.list("proposals").length) return;
+    const checked = new Set<string>();
+    const nowIso = new Date().toISOString();
+    for (const row of store.list("proposals")) {
+      const site = sites.get(normalizeId((row.data as Record<string, unknown>)?.siteID ?? (row.data as Record<string, unknown>)?.siteId));
+      if (!site || checked.has(site.domain)) continue;
+      checked.add(site.domain);
+      let rec: SiteAccessRecord | null = null;
+      try { rec = await this.siteAccessRecord(site.domain); } catch { continue; }
+      if (rec?.webAccessible === "false") {
+        withdrawProposalsForSite(store, { siteID: site.siteID, name: site.name },
+          rec.probeEvidence ?? "This site can only be used in its phone app.",
+          nowIso, () => crypto.randomUUID());
+      }
+    }
+  }
+
+  /// The probe reuses the ordinary discover mission path on desktop
+  /// web and only reads: it checks that signup (page + form), profile
+  /// editing, and starting an application are reachable without a
+  /// phone app. It never submits, signs up, or applies.
+  private async runWebProbe(input: ProbeMissionInput, browser: BrowserRunBrowser): Promise<ProbeOutcome> {
+    const site: ScanSite = input.site;
+    const task = {
+      id: crypto.randomUUID(),
+      kind: "discover",
+      target_url: site.startURLString,
+      goal: `Check whether ${site.name} fully works in a desktop web browser. Look for: (1) a signup page you can open, (2) a signup form on it, (3) a way to reach profile editing (a sign-in page on the way is fine), and (4) a way to start applying for work. If any step says to continue in a phone app with no web alternative, extract exactly that text. Extract one JSON object like {"signupReachable":true,"signupFormPresent":true,"profileEditReachable":true,"applyStartable":true,"appWallText":""}. Only look: do not sign up, do not submit any form, do not apply, do not send anything.`,
+      title: `Web check for ${site.name}`,
+      drafted_payload: {},
+      credential_id: null,
+      requires_approval: false,
+      status: "approved",
+      web_probe: true,
+      memory_id: null,
+      session_id: null,
+      browser_trace: [] as any[],
+      extracted_items: [] as string[],
+      information_requests: [] as string[],
+      log: [`Web check on ${site.name}: looking only — nothing will be sent or submitted.`],
+    };
+    this.saveTask(task);
+    const done = await this.runTask(task, browser);
+    const items: string[] = Array.isArray(done.extracted_items) ? done.extracted_items : [];
+    const text = [...(done.log ?? []), ...items,
+      ...(done.browser_trace ?? []).map((t: any) => String(t.summary ?? ""))].join("\n");
+    const appWall = /continue in (the )?app|open in the app|download (our|the) app|only in (the|our) app|app[- ]only|use our app to/i.test(text);
+    let checks: ProbeOutcome["checks"] = null;
+    for (const item of items) {
+      try {
+        const obj = JSON.parse(String(item));
+        if (obj && typeof obj === "object" && "signupReachable" in obj) {
+          checks = {
+            signupReachable: obj.signupReachable === true,
+            signupFormPresent: obj.signupFormPresent === true,
+            profileEditReachable: obj.profileEditReachable === true,
+            applyStartable: obj.applyStartable === true,
+          };
+        }
+      } catch { /* free-text extraction: checks stay undecided */ }
+    }
+    return {
+      status: done.status === "succeeded" ? "succeeded" : done.status === "needsHuman" ? "needs_human" : "failed",
+      appWall, checks,
+      evidence: appWall ? "A key step can only be done in the site's phone app."
+        : checks ? "Checked signup, profile editing, and starting an application on the web."
+        : "The web check could not finish, so nothing was decided yet.",
+    };
+  }
+
+  private refreshLearning(store: StateStore) {
+    try { ensureLearningProfile(store, new Date().toISOString()); }
+    catch { /* learning upkeep must never fail a state write */ }
   }
 
   private scanDeps(browser: BrowserRunBrowser): ScanDeps {
@@ -842,6 +974,9 @@ export class UserSandbox extends DurableObject<Env> {
         };
       },
       runDiscoverMission: (input) => this.runScanMission(input, browser),
+      siteAccessForDomain: (domain) => this.siteAccessRecord(domain),
+      saveSiteAccess: (record) => this.saveSiteAccessRecord(record),
+      runProbeMission: (input) => this.runWebProbe(input, browser),
       idFactory: () => crypto.randomUUID(),
       log: (message) => {
         this.ctx.storage.sql.exec(
@@ -852,24 +987,70 @@ export class UserSandbox extends DurableObject<Env> {
     };
   }
 
+  /// Proposals call site of the one ranker (Brief 06): candidates are
+  /// probe-checked for web eligibility by domain, ineligible and
+  /// spent-unknown sites are never proposed, and the survivors are
+  /// ordered by learning.ts rankItem — the same function scan
+  /// surfacing uses. Proposing never signs anyone up.
   private async proposeSites(body: any) {
     const { category = "petCare", locationLabel = "", interests = [] } = body ?? {};
     const fallback = STATIC_PROPOSALS[String(category)] ?? [];
+    let candidates = fallback;
     const client = new LLMClient(this.llmConfig());
-    if (!client.configured) return fallback;
-    try {
-      const text = await client.complete({
-        model: client.cfg.modelFast,
-        system: "Reply with ONLY a JSON array, no prose.",
-        user: `List up to 6 real, currently operating websites where someone ${locationLabel ? `based in ${locationLabel} ` : ""}can sign up to earn money in category "${category}" (interests: ${(interests as string[]).join(", ") || category}). Each item: {"name":"...","url":"https://...","rationale":"one clause why this site suits them"}. Only real sites with correct URLs.`,
-      });
-      const match = String(text).match(/\[[\s\S]*\]/);
-      const parsed = match ? JSON.parse(match[0]) : null;
-      const valid = (parsed ?? []).filter((x: any) => x?.name && /^https:\/\//.test(x?.url ?? ""));
-      return valid.length ? valid.slice(0, 6) : fallback;
-    } catch {
-      return fallback;
+    if (client.configured) {
+      try {
+        const text = await client.complete({
+          model: client.cfg.modelFast,
+          system: "Reply with ONLY a JSON array, no prose.",
+          user: `List up to 6 real, currently operating websites where someone ${locationLabel ? `based in ${locationLabel} ` : ""}can sign up to earn money in category "${category}" (interests: ${(interests as string[]).join(", ") || category}). Each item: {"name":"...","url":"https://...","rationale":"one clause why this site suits them"}. Only real sites with correct URLs.`,
+        });
+        const match = String(text).match(/\[[\s\S]*\]/);
+        const parsed = match ? JSON.parse(match[0]) : null;
+        const valid = (parsed ?? []).filter((x: any) => x?.name && /^https:\/\//.test(x?.url ?? ""));
+        if (valid.length) candidates = valid.slice(0, 6);
+      } catch { /* fall through to the static candidates */ }
     }
+
+    const store = this.stateStore();
+    const { profile } = extractProfile(store.get("profile", PROFILE_ROW_ID)?.data);
+    const learning = ensureLearningProfile(store, new Date().toISOString());
+    const now = new Date();
+    const eligibility = new Map<string, Eligibility>();
+    for (const c of candidates) {
+      const domain = domainOfUrl(c.url);
+      // Fail closed per candidate: any catalog read/write failure
+      // blocks this suggestion instead of minting a fresh unknown.
+      let verdict: Eligibility = "unknownBlocked";
+      try {
+        let rec = (await this.siteAccessRecord(domain)) ?? unknownAccessRecord(domain);
+        if (reprobeDue(rec, now)) {
+          const site: ScanSite = {
+            id: domain, siteID: domain, name: c.name,
+            startURLString: c.url, domain, category: String(category),
+          };
+          let outcome: ProbeOutcome;
+          try {
+            outcome = await this.runWebProbe({ site, profile }, this.browser());
+          } catch (e) {
+            outcome = { status: "failed", evidence: String((e as Error)?.message ?? e).slice(0, 200) };
+          }
+          rec = applyProbeOutcome(rec, outcome, now.toISOString());
+          await this.saveSiteAccessRecord(rec);
+        }
+        verdict = eligibilityOf(rec, domain);
+        if (verdict === "unknownAllowed") {
+          await this.saveSiteAccessRecord(consumeUnknownCycle(rec));
+        }
+      } catch { /* catalog unavailable: verdict stays unknownBlocked */ }
+      eligibility.set(domain, verdict);
+    }
+    const ranked = rankSiteProposals(
+      candidates.map((c) => ({ ...c, category: String(category) })),
+      profile, learning, eligibility, domainOfUrl, now,
+    );
+    return ranked.map((r) => ({
+      name: r.candidate.name, url: r.candidate.url, rationale: r.candidate.rationale,
+    }));
   }
 
   // ---- routes ---------------------------------------------------
@@ -1190,6 +1371,11 @@ export class UserSandbox extends DurableObject<Env> {
           this.importMemories(result.memories);
           this.importSnapshotTasks(result.tasks);
           this.applyCategoryReopen(reopenBefore, store);
+          // Brief 06: feedback events in the push refresh the model.
+          this.refreshLearning(store);
+          // Brief 06: onboarding suggestions are created on-device;
+          // withdraw any whose site is proven web-ineligible.
+          try { await this.sweepIneligibleProposals(store); } catch { /* never fail a state push */ }
           return json({
             ok: true,
             counts: result.counts,
@@ -1230,6 +1416,10 @@ export class UserSandbox extends DurableObject<Env> {
           try {
             const result = store.upsert(stateEntity, id, data, updatedAt);
             if (result.applied) this.applyCategoryReopen(reopenBefore, store);
+            if (result.applied && stateEntity === "feedbackEvents") this.refreshLearning(store);
+            if (result.applied && (stateEntity === "proposals" || stateEntity === "sites")) {
+              try { await this.sweepIneligibleProposals(store); } catch { /* never fail a state write */ }
+            }
             return json(result, result.applied ? 200 : 409);
           } catch (e: any) {
             return json({ error: String(e?.message ?? e) }, 400);
