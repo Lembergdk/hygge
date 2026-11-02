@@ -67,7 +67,11 @@ const CHECKPOINT_PATTERNS: { pattern: RegExp; why: string }[] = [
   { pattern: /re?captcha|hcaptcha|turnstile/i, why: "CAPTCHA check" },
   { pattern: /are you (a )?(robot|human)|prove you('| a)re (human|not a robot)|not a robot|human verification/i, why: "bot check" },
   { pattern: /two[- ]factor|\b2fa\b|authenticator (app|code)|one[- ]time (code|passcode)|verification code|enter (the )?\d? ?code (we|sent)|check your (phone|email|authenticator)/i, why: "two-factor check" },
-  { pattern: /verify your identity|identity verification|government[- ]issued id|photo id check|background check/i, why: "identity check" },
+  // No bare "background check": gig homepages advertise background-
+  // checked workers in ordinary marketing copy (Rover's fired this
+  // guard on its front page). The check must be demanded of the
+  // visitor, in action language, to pause a mission.
+  { pattern: /verify your identity|identity verification|government[- ]issued id|photo id check|complete (a |your )?background check|background check (is )?required|submit to a background check|pass a background check to/i, why: "identity check" },
   { pattern: /security check|unusual (sign[- ]?in|activity)/i, why: "security check" },
 ];
 
