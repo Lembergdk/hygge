@@ -960,9 +960,16 @@ export class UserSandbox extends DurableObject<Env> {
           if (verdict) {
             checks = verdict.checks;
             appWall = appWall || verdict.appWall;
+            done.log.push(`Web check judging: signup=${checks.signupReachable} form=${checks.signupFormPresent} profile=${checks.profileEditReachable} apply=${checks.applyStartable} appWall=${appWall}`);
+          } else {
+            done.log.push("Web check judging: evidence too thin to decide");
           }
+          this.saveTask(done);
         }
-      } catch { /* judge unavailable: the probe stays undecided */ }
+      } catch {
+        done.log.push("Web check judging: judge unavailable");
+        this.saveTask(done);
+      }
     }
     return {
       status: done.status === "succeeded" ? "succeeded" : done.status === "needsHuman" ? "needs_human" : "failed",
