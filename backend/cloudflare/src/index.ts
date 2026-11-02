@@ -127,6 +127,7 @@ async function handleOnboardingPreview(
   if (!PREVIEW_STEPS.has(step)) return json({ error: "not found" }, 404);
   const transcript = Array.isArray(body.transcript) ? body.transcript.slice(0, 40) : [];
   const profile = typeof body.profile === "object" && body.profile ? body.profile : {};
+  const conversationId = typeof body.conversationId === "string" ? body.conversationId : undefined;
   const client = new LLMClient({
     apiKey: env.HYGGE_LLM_API_KEY,
     baseUrl: env.HYGGE_LLM_BASE_URL,
@@ -140,7 +141,7 @@ async function handleOnboardingPreview(
   });
   const url = new URL(request.url);
   if (url.pathname.endsWith("/message")) {
-    return json(await onboardingMessage({ client, step, transcript, profile, contextSummary: "" }));
+    return json(await onboardingMessage({ client, step, transcript, profile, contextSummary: "", conversationId }));
   }
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -151,7 +152,7 @@ async function handleOnboardingPreview(
   ctx.waitUntil(
     (async () => {
       try {
-        await onboardingMessageStream({ client, step, transcript, profile, contextSummary: "" }, emit);
+        await onboardingMessageStream({ client, step, transcript, profile, contextSummary: "", conversationId }, emit);
       } finally {
         await writer.close().catch(() => {});
       }

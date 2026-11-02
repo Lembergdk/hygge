@@ -96,15 +96,36 @@ function capTranscriptText(transcript: any[] = []): string {
   return kept.join("\n");
 }
 
-export async function onboardingMessage(args: any) {
-  return withSpan("invoke_agent hygge-onboarding", {
-    "gen_ai.operation.name": "invoke_agent",
-    ...agentAttrs(args.client?.cfg?.agentName ?? "hygge-onboarding", args.client?.cfg?.agentId ?? "hygge-dev"),
-    "hygge.onboarding.step": String(args.step ?? "welcome"),
-  }, () => onboardingMessageInner(args));
+function traceIdentity(args: any) {
+  const suppliedConversation = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
+  const cfg = args.client?.cfg ?? {};
+  const conversationId = (suppliedConversation || cfg.conversationId || crypto.randomUUID()).slice(0, 128);
+  const suppliedSession = typeof args.sessionId === "string" ? args.sessionId.trim() : "";
+  const sessionId = (suppliedSession || cfg.sessionId || conversationId).slice(0, 128);
+  const sessionName = typeof args.sessionName === "string" && args.sessionName.trim()
+    ? args.sessionName.trim().slice(0, 128)
+    : cfg.sessionName;
+  return {
+    conversationId,
+    attrs: agentAttrs(
+      cfg.agentName ?? "hygge-onboarding",
+      cfg.agentId ?? "hygge-dev",
+      conversationId,
+      { id: sessionId, name: sessionName },
+    ),
+  };
 }
 
-async function onboardingMessageInner({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "" }: any) {
+export async function onboardingMessage(args: any) {
+  const trace = traceIdentity(args);
+  return withSpan("invoke_agent hygge-onboarding", {
+    "gen_ai.operation.name": "invoke_agent",
+    ...trace.attrs,
+    "hygge.onboarding.step": String(args.step ?? "welcome"),
+  }, () => onboardingMessageInner({ ...args, conversationId: trace.conversationId }));
+}
+
+async function onboardingMessageInner({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "", conversationId }: any) {
   const objective = OBJECTIVES[step] ?? OBJECTIVES.welcome;
   const transcriptText = capTranscriptText(transcript);
   if (!client.configured) {
@@ -113,7 +134,7 @@ async function onboardingMessageInner({ client, step = "welcome", transcript = [
   }
   try {
     const text = await client.complete({
-      model: client.cfg.modelFast, system: SYSTEM,
+      model: client.cfg.modelFast, system: SYSTEM, conversationId,
       user: JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary, conversation: transcriptText }),
     });
     const parsed = parseDecision(text) as any;
@@ -202,14 +223,15 @@ function normalizeParsed(parsed: any, simulated: boolean) {
  * mode streams the fallback reply word-by-word so the UI behaves identically.
  */
 export async function onboardingMessageStream(args: any, emit: (e: unknown) => void) {
+  const trace = traceIdentity(args);
   return withSpan("invoke_agent hygge-onboarding", {
     "gen_ai.operation.name": "invoke_agent",
-    ...agentAttrs(args.client?.cfg?.agentName ?? "hygge-onboarding", args.client?.cfg?.agentId ?? "hygge-dev"),
+    ...trace.attrs,
     "hygge.onboarding.step": String(args.step ?? "welcome"),
-  }, () => onboardingMessageStreamInner(args, emit));
+  }, () => onboardingMessageStreamInner({ ...args, conversationId: trace.conversationId }, emit));
 }
 
-async function onboardingMessageStreamInner({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "" }: any, emit: (e: unknown) => void) {
+async function onboardingMessageStreamInner({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "", conversationId }: any, emit: (e: unknown) => void) {
   const objective = OBJECTIVES[step] ?? OBJECTIVES.welcome;
   const transcriptText = capTranscriptText(transcript);
   const fallback = () => ({ reply: FALLBACK_REPLIES[step] ?? FALLBACK_REPLIES.welcome,
@@ -223,7 +245,7 @@ async function onboardingMessageStreamInner({ client, step = "welcome", transcri
   try {
     const extractor = new ReplyStreamExtractor();
     const full = await client.completeStream({
-      model: client.cfg.modelFast, system: SYSTEM,
+      model: client.cfg.modelFast, system: SYSTEM, conversationId,
       user: JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary, conversation: transcriptText }),
     }, (delta: string) => {
       const out = extractor.push(delta);
