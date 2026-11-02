@@ -928,7 +928,22 @@ export class UserSandbox extends DurableObject<Env> {
     let homepageEvidence = "";
     try {
       const snap = await browser.createSession(site.startURLString);
-      homepageEvidence = snapshotEvidence(snap);
+      const parts = [snapshotEvidence(snap)];
+      // One generic step deeper: follow a signup/join element so
+      // the judge can see whether a real form exists. Label-based
+      // and site-agnostic; anything found is evidence, and a failed
+      // click simply leaves the homepage snapshot as the evidence.
+      const signupEl = snap.elements.find(
+        (e) => e.kind === "click" && /sign up|join|register|create account|get started|become a/i.test(e.label));
+      if (signupEl) {
+        try {
+          await browser.act(snap.sessionID, { action: "click", target: signupEl.label });
+          await new Promise((r) => setTimeout(r, 1500));
+          const after = await browser.snapshot(snap.sessionID);
+          if (after) parts.push(snapshotEvidence(after));
+        } catch { /* homepage evidence only */ }
+      }
+      homepageEvidence = parts.filter(Boolean).join("\n");
       await browser.closeSession(snap.sessionID).catch(() => {});
     } catch { /* mission evidence only */ }
     const done = await this.runTask(task, browser);
