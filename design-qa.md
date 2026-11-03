@@ -57,3 +57,19 @@ P3: Add verified site/listing image fields in a separate data-contract change if
 - [x] Swipe reveal/commit, Undo and public-action review
 - [x] Build, targeted tests and native interaction checks
 - [x] Preserve production/release ownership with the user
+
+## Follow-up: live-first feed and incoming entries
+
+The user's follow-up supersedes the original board's ordering: active work is first; finished sessions become compact Journal rows; arrivals wait while the reader is scrolled away.
+
+Native checks use an isolated iPhone 18 Pro, iOS 27.2, named Hygge Feed QA so concurrent app work cannot replace the test build. The local fixture inserts an opportunity after 30 seconds and completes a browser task after 45 seconds.
+
+- [P1, resolved] The first geometry-preference observer could report the default position while the feed was scrolled. Use actual scroll geometry on iOS 18+, with the content-local preference fallback for iOS 17.
+- [P1, resolved] Nested row collections mixed UUID and string scroll identities, so removing the offscreen browser could lose the reading anchor. Render one flat collection with stable string row identities. The same visible review/question/earnings rows now remain in place through both arrivals and completion.
+- Confirmed the “New updates” control appears while the arriving opportunity and completion row remain absent. Tapping it scrolls to the header, admits the queued items, and clears the indicator.
+- A separate run confirmed manual scrolling back to the top admits the same pending data without tapping the pill. Arrivals while already at the top were admitted automatically. The combined `outputs/feed-redesign/arrival-comparison.jpg` places the before/queued native captures side by side at the same 368 × 800 size: card positions are unchanged; only the indicator has appeared.
+- Confirmed the finished browser no longer appears at the top and its witnessed profile event appears as a compact Journal entry (`outputs/feed-redesign/completed-session-journal.jpg`). No synthetic historical events are reconstructed from mutable task state.
+- Active cards have no dismiss gesture/action; human-help sessions remain active and route to chat. Unit tests cover terminal tasks retaining stale session IDs, pending withdrawals, repeat updates, reordering, return-to-top admission, and Undo without unrelated arrivals.
+- All 90 core tests and the unsigned simulator build passed. Existing broad accessibility/landscape limitations still apply; the iOS 17 runtime fallback has not been exercised on an iOS 17 device.
+
+final result: passed
