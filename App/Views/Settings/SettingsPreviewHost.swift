@@ -8,7 +8,8 @@ struct SettingsPreviewHost: View {
     @State private var presented = true
     @AppStorage("settingsPreviewScreen") private var screen = "main"
     var body: some View {
-        if screen == "login" { LoginView() } else {
+        if ProcessInfo.processInfo.arguments.contains("--browser-preview") { BrowserPreviewHost() }
+        else if screen == "login" { LoginView() } else {
         ZStack {
             HyggeTheme.paper.ignoresSafeArea()
             Button("Open settings preview") { presented = true }

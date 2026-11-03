@@ -1,3 +1,4 @@
+import { BrowserControlInterrupted } from "./browser-control.ts";
 import { help, informationHelp, actionFingerprint, needsActionApproval } from "./task-help.ts";
 // The mission loop — the ONLY way browsing happens.
 //
@@ -286,6 +287,7 @@ export async function runMission(opts: {
   decider: any; fillCredentialValue?: any; maxSteps?: number;
   skill?: SharedSkill | null; skillCandidate?: { body: SkillBody } | null;
   existingSessionID?: string | null; restoreState?: any;
+  onSession?: (id: string) => void;
   traceAgentId?: string; traceSessionId?: string; traceSessionName?: string;
   tracePayloads?: boolean;
 }): Promise<any> {
@@ -313,7 +315,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
                                    skill = null, skillCandidate = null,
                                    existingSessionID = null, restoreState = null,
                                    traceAgentId = "hygge-dev", traceSessionId, traceSessionName,
-                                   tracePayloads = false }: {
+                                   tracePayloads = false, onSession }: {
   browser: any; task: any; hints?: string[]; hasCredential?: boolean;
   hasEmailCode?: boolean; fillEmailCodeValue?: any;
   hasProfilePhoto?: boolean; uploadProfilePhoto?: any;
@@ -322,6 +324,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
   existingSessionID?: string | null; restoreState?: any;
   traceAgentId?: string; traceSessionId?: string; traceSessionName?: string;
   tracePayloads?: boolean;
+  onSession?: (id: string) => void;
 }): Promise<any> {
   if (!profilePhotoAllowedForTask(task)) {
     hasProfilePhoto = false;
@@ -357,6 +360,14 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
   if (!snap) {
     snap = (await browser.createSession(task.target_url, restoreState)) as Snapshot;
   }
+  onSession?.(snap.sessionID);
+  const epoch = browser.controlState?.(snap.sessionID)?.epoch ?? 0;
+  const interrupted = () => {
+    const control = browser.controlState?.(snap!.sessionID);
+    return control && (control.human || control.epoch !== epoch);
+  };
+  const paused = () => ({ status: "needs_human", trace, extractedItems, log,
+    sessionID: snap!.sessionID, help: help("verification", "You're in control of the browser. Let me continue when you're ready.", [], "Open browser"), ...routing() });
   // Health probe for a restored trusted sign-in: a visible password
   // field means the saved sign-in expired -> fall through to the
   // normal vault login; the caller refreshes the profile on success.
@@ -385,6 +396,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
   });
 
   for (let step = 1; step <= maxSteps; step++) {
+    if (interrupted()) return paused();
     const snapshot = await browser.snapshot(snap.sessionID);
     // Human checkpoint guard: CAPTCHA / 2FA / ID checks pause for the
     // user with the session kept open. Enforced here — before the
@@ -430,6 +442,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       if (failures >= 3) return { status: "failed", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
       continue;
     }
+    if (interrupted()) return paused();
     const tierLabel = decision.tier ? `${decision.tier.model} (${decision.tier.reason})` : null;
     const stamp = { modelTier: tierLabel, model: decision.tier?.model ?? null,
                     skillId: skill?.id ?? null, skillVersion: skill?.version ?? null };
@@ -505,14 +518,17 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
           "gen_ai.tool.call.arguments": clip(JSON.stringify({ target: decision.target ?? "", valueRef: decision.valueRef ?? null, reason: decision.reason ?? "" })),
         } : {}),
       }, async (toolSpan) => {
-        const r = await execute({ browser, sessionID: snap.sessionID, decision, task, fillCredentialValue, fillEmailCodeValue, uploadProfilePhoto });
+        const operation = () => execute({ browser, sessionID: snap!.sessionID, decision, task, fillCredentialValue, fillEmailCodeValue, uploadProfilePhoto });
+        const r = browser.agentStep ? await browser.agentStep(snap!.sessionID, epoch, operation) : await operation();
         toolSpan.setAttribute("hygge.tool.succeeded", Boolean(r?.succeeded));
         if (tracePayloads) toolSpan.setAttribute("gen_ai.tool.call.result", clip(String(r?.summary ?? "")));
         return r;
       });
     } catch (e: any) {
+      if (e instanceof BrowserControlInterrupted || interrupted()) return paused();
       result = { succeeded: false, summary: `Action failed (deviation): ${e.message.slice(0, 140)}` };
     }
+    if (interrupted()) return paused();
     if (result.items?.length) extractedItems.push(...result.items);
     if (!result.succeeded) failures += 1;
     const key = `${decision.action}|${decision.target}|${snapshot.currentURLString}`;

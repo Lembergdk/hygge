@@ -69,7 +69,7 @@ struct TaskDetailView: View {
                     // Reopen the very session that paused, so a finished
                     // check counts when the work resumes.
                     CloudBrowserView(urlString: task.targetURLString,
-                                     existingSessionID: task.browserSessionID)
+                                     existingSessionID: task.browserSessionID, taskID: task.id)
                         .navigationTitle("Browser")
                 }
             }

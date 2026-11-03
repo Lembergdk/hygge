@@ -11,6 +11,7 @@ struct ConversationView: View {
     @State private var pendingAction: ChatAction?
     @State private var replyTarget: TaskReplyTarget?
     @State private var credentialRequest: AppStore.CredentialSaveRequest?
+    @State private var takeBrowserControl = false
     @State private var browserTask: AgentTask?
     @FocusState private var composerFocused: Bool
     @AppStorage("preferredMailAppScheme") private var preferredMailApp = "message://"
@@ -27,6 +28,11 @@ struct ConversationView: View {
             ZStack {
                 HyggeTheme.paper.ignoresSafeArea()
                 VStack(spacing: 0) {
+                    HStack(spacing: 10) {
+                        AnimatedFlame(animation: avatarAnimation, size: 36)
+                        Text("Hygge").font(.title3.weight(.bold))
+                        Spacer()
+                    }.foregroundStyle(HyggeTheme.ink).padding(.horizontal, 20).padding(.top, 18)
                     ScrollViewReader { proxy in
                         ScrollView {
                             VStack(alignment: .leading, spacing: 13) {
@@ -36,6 +42,10 @@ struct ConversationView: View {
                                         if let taskID = entry.taskID,
                                            let task = store.tasks.first(where: { $0.id == taskID }),
                                            entry.helpID != nil {
+                                            if task.browserSessionID != nil,
+                                               store.chatTranscript.last(where: { $0.taskID == task.id })?.id == entry.id {
+                                                BrowserLiveAttachment(task: task) { takeBrowserControl = false; browserTask = task }.padding(.leading, 33)
+                                            }
                                             if task.needsChatHelp, let help = task.help, help.id == entry.helpID {
                                                 taskHelpCard(task, help: help)
                                             } else if task.status == .running || task.status == .approved {
@@ -49,7 +59,7 @@ struct ConversationView: View {
                                 }
                                 if isThinking && streamingText == nil {
                                     HStack(alignment: .bottom, spacing: 7) {
-                                        FlameMark(size: 26)
+                                        AnimatedFlame(animation: avatarAnimation, size: 26)
                                         ThinkingDotsShared()
                                         Spacer()
                                     }
@@ -103,21 +113,15 @@ struct ConversationView: View {
             }.presentationDragIndicator(.visible)
         }
         .sheet(item: $browserTask) { task in
-            NavigationStack {
-                CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID)
-                    .navigationTitle(store.siteName(id: task.siteID))
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Continue setup") {
-                                browserTask = nil
-                                if let help = task.help {
-                                    Task { await store.replyToTask(taskID: task.id, helpID: help.id) }
-                                }
-                            }
-                        }
-                    }
-            }.presentationDragIndicator(.visible)
+            CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID,
+                             taskID: task.id, takeControlOnOpen: takeBrowserControl)
         }
+        .task { await store.observeBrowserTasks() }
+    }
+
+    private var avatarAnimation: FlameAnimation {
+        if !store.chatHelpTasks.isEmpty { return .notify }
+        return store.isAgentWorking || isThinking ? .laptop : .walk
     }
 
     private var composer: some View {
@@ -175,7 +179,7 @@ struct ConversationView: View {
 
     private func agentBubble(_ text: String) -> some View {
         HStack(alignment: .bottom, spacing: 7) {
-            FlameMark(size: 26)
+            AnimatedFlame(animation: avatarAnimation, size: 26)
             Text(text.isEmpty ? " " : text)
                 .font(.body).foregroundStyle(HyggeTheme.ink).lineSpacing(3)
                 .padding(.horizontal, 15).padding(.vertical, 12)
@@ -258,6 +262,10 @@ struct ConversationView: View {
                                                       answers: [question.text: suggestion]) }
                     }.buttonStyle(SettingsActionStyle())
                 }
+                if task.browserSessionID != nil {
+                    Button("Do it myself") { takeBrowserControl = true; browserTask = task }
+                        .buttonStyle(SettingsActionStyle(filled: false))
+                }
                 Button(question.suggestions.isEmpty ? "Reply" : "Something else") {
                     replyTarget = TaskReplyTarget(taskID: task.id, helpID: help.id, question: question.text)
                     composerFocused = true
@@ -271,7 +279,7 @@ struct ConversationView: View {
                     case .verification:
                         if task.kind == .bookCalendar {
                             Task { await store.replyToTask(taskID: task.id, helpID: help.id) }
-                        } else { browserTask = task }
+                        } else { takeBrowserControl = true; browserTask = task }
                     case .approval:
                         Task { await store.replyToTask(taskID: task.id, helpID: help.id, approved: true) }
                     case .recovery:

@@ -10,6 +10,7 @@ private struct HomeScrollOffsetKey: PreferenceKey {
 /// journal. No tab bar anywhere in the app.
 struct HomeFeedView: View {
     @Environment(AppStore.self) private var store
+    @State private var browserTask: AgentTask?
     @State private var showConversation = false
     @State private var showProfile = false
     @State private var showYourWork = false
@@ -50,7 +51,7 @@ struct HomeFeedView: View {
                         pinnedZone
                     }
                     journal
-                    Color.clear.frame(height: 100) // the flame never covers the last action
+                    Color.clear.frame(height: 150) // the flame never covers the last action
                 }
                 .background(GeometryReader { geo in
                     Color.clear.preference(key: HomeScrollOffsetKey.self,
@@ -75,12 +76,11 @@ struct HomeFeedView: View {
             }
             .padding(.trailing, 18).padding(.bottom, 14)
         }
-        .task(id: store.tasks.contains(where: { $0.status == .running })) {
-            // Reconcile a run whose response was interrupted, without starting it again.
-            while store.tasks.contains(where: { $0.status == .running }) && !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                if store.activeRunCount == 0 { _ = await store.pullFromServer() }
-            }
+        .task { await store.observeBrowserTasks() }
+        .sheet(item: $browserTask, onDismiss: {
+            if store.conversationTaskID != nil { showConversation = true }
+        }) { task in
+            CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id)
         }
         .confirmationDialog(store.isPaused ? "Resume Hygge?" : "Pause Hygge?",
                             isPresented: $showPauseConfirm, titleVisibility: .visible) {
@@ -204,8 +204,8 @@ struct HomeFeedView: View {
     }
 
     private var flameState: FlameState {
-        if store.isAgentWorking { return .working }
-        return store.needsYouCount > 0 ? .needsYou(store.needsYouCount) : .asleep
+        if store.needsYouCount > 0 { return .needsYou(store.needsYouCount) }
+        return store.isAgentWorking ? .working : .asleep
     }
 
     // MARK: Header
@@ -293,15 +293,14 @@ struct HomeFeedView: View {
     }
 
     private var setupActivity: some View {
-        ForEach(store.tasks.filter { $0.isSiteSetup && ($0.status == .running || $0.status == .approved) }) { task in
-            HStack(spacing: 12) {
-                AnimatedFlame(animation: .laptop, size: 40)
+        ForEach(store.tasks.filter { ($0.isSiteSetup || $0.browserSessionID != nil) && ($0.status == .running || $0.status == .approved) }) { task in
+            VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(store.siteName(id: task.siteID)).font(.headline)
                     Text(task.connectsExistingAccount ? "Connecting your account…" : "Setting things up…")
                         .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
                 }
-                Spacer()
+                BrowserLiveAttachment(task: task) { browserTask = task }
             }.padding(16).hyggeCard(radius: 22)
         }
     }
@@ -310,14 +309,7 @@ struct HomeFeedView: View {
 
     private var pinnedZone: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if store.needsYouCount == 0 {
-                if store.proposals.allSatisfy({ $0.status != .proposed }) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(HyggeTheme.sage)
-                        Text("Nothing needs you right now.").font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-                    }
-                }
-            } else {
+            if store.needsYouCount > 0 {
                 HStack {
                     Text("Needs you").font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
                     Text("\(store.needsYouCount)")
