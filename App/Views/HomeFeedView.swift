@@ -1,28 +1,24 @@
 import SwiftUI
 
-private struct HomeScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-/// Home is a feed — the only destination. Fixed order: calm header, pinned
-/// needs-you (never scrolls away conceptually — it sits on top), then the
-/// journal. No tab bar anywhere in the app.
+/// A quiet overview. Details live in sheets; live questions stay in chat.
 struct HomeFeedView: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var browserTask: AgentTask?
+    @State private var proposalDetail: ProposedSite?
+    @State private var opportunityDetail: Opportunity?
+    @State private var eventDetail: ActivityEvent?
+    @State private var reviewTask: AgentTask?
     @State private var showConversation = false
     @State private var showProfile = false
     @State private var showYourWork = false
-    @State private var moneyApplication: ApplicationRecord?
-    @State private var earlierExpanded = false
-    @State private var expandedWhy: Set<String> = []
-    @State private var needsExpanded = false
-    @State private var consentsExpanded = false
+    @State private var showNotifications = false
+    @State private var showPaused = false
     @State private var showPauseConfirm = false
-    @State private var editingTask: AgentTask?
-    @State private var reviewQueue: [AgentTask] = []
-    @State private var reviewTotal = 0
+    @State private var earlierExpanded = false
+    @State private var morePlaces = false
+    @State private var openCardID: String?
+    @State private var undo: FeedUndo?
     @State private var flameDimmed = false
     @State private var dimTask: Task<Void, Never>?
 
@@ -30,678 +26,298 @@ struct HomeFeedView: View {
         ZStack(alignment: .bottomTrailing) {
             HyggeTheme.paper.ignoresSafeArea()
             ScrollView {
-                VStack(alignment: .leading, spacing: 26) {
-                    header
-                    if store.dismissedProposalID != nil {
-                        HStack {
-                            Text("Site dismissed").foregroundStyle(HyggeTheme.secondary)
-                            Spacer()
-                            Button("Undo") { store.undoSiteDismissal() }.foregroundStyle(HyggeTheme.sageDeep)
-                        }
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    header.padding(.bottom, 12)
+                    if store.isPaused {
+                        Button { showPaused = true } label: {
+                            FeedSummary(title: "Hygge is paused", subtitle: "Your work is here when you’re ready", icon: "pause")
+                        }.buttonStyle(.plain)
+                    } else {
+                        suggestions
+                        opportunities
+                        activeTasks
+                        decisions
                     }
                     if store.notificationPrimerVisible {
-                        notificationPrimer
+                        card(id: "notifications", title: "A heads-up when you need it", subtitle: "New work and things that need your OK", icon: "bell", primaryTitle: "Permissions", open: { showNotifications = true }, primary: { showNotifications = true }, dismiss: {
+                            store.dismissNotificationPrimer()
+                            showUndo("Reminder dismissed") { store.undoNotificationDismissal() }
+                        })
                     }
-                    if store.isPaused {
-                        pausedCard
-                    } else {
-                        consentZone
-                        setupActivity
-                        highlightedWork
-                        pinnedZone
+                    updates
+                    earlier
+                    if isEmpty {
+                        Text("You’re all caught up.")
+                            .font(.system(.title3, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
+                            .padding(.top, 32)
                     }
-                    journal
-                    Color.clear.frame(height: 150) // the flame never covers the last action
+                    Button("Your work") { showYourWork = true }
+                        .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
+                        .frame(minHeight: 44).padding(.top, 8)
+                    Color.clear.frame(height: 145)
                 }
-                .background(GeometryReader { geo in
-                    Color.clear.preference(key: HomeScrollOffsetKey.self,
-                                           value: geo.frame(in: .named("homeScroll")).minY)
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: FeedScrollOffset.self, value: geometry.frame(in: .named("feedScroll")).minY)
                 })
-                .padding(.horizontal, 20).padding(.top, 8)
+                .padding(.horizontal, 20).padding(.top, 12)
             }
-            .coordinateSpace(name: "homeScroll")
-            .onPreferenceChange(HomeScrollOffsetKey.self) { _ in
-                // While scrolling, the flame fades back so it never hides text.
-                flameDimmed = true
-                dimTask?.cancel()
+            .coordinateSpace(name: "feedScroll")
+            .onPreferenceChange(FeedScrollOffset.self) { _ in
+                flameDimmed = true; dimTask?.cancel()
                 dimTask = Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 650_000_000)
+                    try? await Task.sleep(for: .milliseconds(650))
                     if !Task.isCancelled { flameDimmed = false }
                 }
             }
-            FloatingFlame(state: flameState, dimmed: flameDimmed) {
-                showConversation = true
-            } onLongPress: {
-                showPauseConfirm = true
+            FloatingFlame(state: flameState, dimmed: flameDimmed) { showConversation = true } onLongPress: { showPauseConfirm = true }
+                .padding(.trailing, 18).padding(.bottom, 14)
+        }
+        .safeAreaInset(edge: .bottom) {
+            if let undo {
+                HStack(spacing: 12) {
+                    Image(systemName: "leaf").foregroundStyle(HyggeTheme.sageDeep)
+                    Text(undo.message).font(.subheadline).foregroundStyle(HyggeTheme.ink)
+                    Spacer(minLength: 4)
+                    Button("Undo") { undo.action(); self.undo = nil }
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
+                }.padding(.horizontal, 16).hyggeCard(radius: 18).padding(.horizontal, 20).padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            .padding(.trailing, 18).padding(.bottom, 14)
         }
         .task { await store.observeBrowserTasks() }
-        .sheet(item: $browserTask, onDismiss: {
-            if store.conversationTaskID != nil { showConversation = true }
-        }) { task in
+        .sheet(item: $proposalDetail, onDismiss: openPendingChat) { FeedProposalDetail(proposalID: $0.id) }
+        .sheet(item: $opportunityDetail) { FeedOpportunityDetail(opportunityID: $0.id) }
+        .sheet(item: $eventDetail) { FeedEventDetail(event: $0) }
+        .sheet(item: $reviewTask, onDismiss: openPendingChat) { FeedTaskReview(taskID: $0.id) }
+        .sheet(item: $browserTask, onDismiss: openPendingChat) { task in
             CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id)
         }
-        .confirmationDialog(store.isPaused ? "Resume Hygge?" : "Pause Hygge?",
-                            isPresented: $showPauseConfirm, titleVisibility: .visible) {
-            Button(store.isPaused ? "Resume" : "Pause everything", role: store.isPaused ? .none : .destructive) {
-                store.setPaused(!store.isPaused)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(store.isPaused ? "Hygge will start looking again right away." : "Hygge stops searching, sending and booking until you resume. Nothing is lost.")
-        }
-        .sheet(isPresented: $showConversation) { ConversationView().presentationDragIndicator(.visible) }
+        .sheet(isPresented: $showConversation, onDismiss: { store.conversationTaskID = nil }) { ConversationView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showProfile) { ProfileHubView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showYourWork) { YourWorkView().presentationDragIndicator(.visible) }
-        .sheet(item: $moneyApplication) { application in
-            MoneyConfirmationView(application: application)
-        }
-        .sheet(item: $editingTask, onDismiss: {
-            if store.conversationTaskID != nil { showConversation = true }
-        }) { task in
-            NavigationStack { TaskDetailView(taskID: task.id) }
-        }
-        // Process interruptions always open the conversation, including pushes.
-        .onChange(of: store.pendingTaskOpenID, initial: true) { _, taskID in
-            guard let taskID else { return }
-            store.surfaceTaskHelp(taskID: taskID)
-            store.conversationTaskID = taskID
-            store.pendingTaskOpenID = nil
-            showConversation = true
-        }
-        .onChange(of: store.conversationTaskID) { _, taskID in
-            if taskID != nil {
-                if editingTask != nil { editingTask = nil }
-                else { showConversation = true }
+        .sheet(isPresented: $showNotifications) { NavigationStack { SettingsPermissionsView() }.presentationDragIndicator(.visible) }
+        .sheet(isPresented: $showPaused) {
+            FeedSheet {
+                Text("Hygge is paused").font(.system(.title, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
+                Text("Searching, sending and booking will wait until you resume.").foregroundStyle(HyggeTheme.secondary)
+                FeedPrimaryButton(title: "Resume Hygge") { store.setPaused(false); showPaused = false }
             }
         }
-        .sheet(item: Binding(get: { reviewQueue.first },
-                             set: { if $0 == nil, !reviewQueue.isEmpty { reviewQueue.removeFirst() } })) { task in
-            NavigationStack {
-                TaskDetailView(taskID: task.id)
-                    .toolbar {
-                        ToolbarItem(placement: .principal) {
-                            Text("Reviewing \(reviewTotal - reviewQueue.count + 1) of \(reviewTotal)")
-                                .font(.caption.weight(.semibold)).foregroundStyle(HyggeTheme.secondary)
-                        }
-                    }
-            }
+        .confirmationDialog(store.isPaused ? "Resume Hygge?" : "Pause Hygge?", isPresented: $showPauseConfirm, titleVisibility: .visible) {
+            Button(store.isPaused ? "Resume" : "Pause everything") { store.setPaused(!store.isPaused) }
+            Button("Cancel", role: .cancel) {}
+        }
+        .onChange(of: store.pendingTaskOpenID, initial: true) { _, id in
+            guard let id else { return }; store.pendingTaskOpenID = nil
+            openChat(store.tasks.first { $0.id == id })
+        }
+        .onChange(of: store.conversationTaskID) { _, id in
+            guard id != nil else { return }
+            if proposalDetail != nil { proposalDetail = nil }
+            else if reviewTask != nil { reviewTask = nil }
+            else if browserTask == nil { showConversation = true }
         }
     }
 
-    /// The one permission ask (Brief 07): it appears only once
-    /// something worth telling the user about exists, and either
-    /// answer retires it for good.
-    private var notificationPrimer: some View {
+    private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                FlameMark(size: 30)
-                Text("Want a word when something needs you?")
-                    .font(.system(.headline, design: .rounded, weight: .semibold))
-                    .foregroundStyle(HyggeTheme.ink)
-            }
-            Text("Hygge can let you know when something needs your OK, or when new work turns up while you are away. Nothing else, ever.")
-                .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
             HStack(spacing: 12) {
-                Button("Yes, let me know") { Task { await store.allowNotifications() } }
-                    .font(.subheadline.weight(.semibold))
-                    .padding(.horizontal, 18).padding(.vertical, 11)
-                    .background(HyggeTheme.emberDeep, in: Capsule()).foregroundStyle(.white)
-                Button("Not now") { store.dismissNotificationPrimer() }
-                    .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
-            }
-        }
-        .padding(17).hyggeCard(radius: 24)
-    }
-
-    /// Where a tapped "New work found" push lands: the listing it
-    /// named, lifted to the top until the user acts on it.
-    @ViewBuilder
-    private var highlightedWork: some View {
-        if let id = store.highlightedOpportunityID,
-           let opportunity = store.opportunities.first(where: { $0.id == id && !$0.isDemo }) {
-            VStack(alignment: .leading, spacing: 12) {
-                tagLabel("New work", color: HyggeTheme.sageDeep)
-                HStack(alignment: .top, spacing: 13) {
-                    iconTile(categoryIcon(opportunity.category))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(opportunity.title)
-                            .font(.system(.headline, design: .rounded, weight: .semibold))
-                            .foregroundStyle(HyggeTheme.ink).lineLimit(2)
-                        Text("\(store.siteName(id: opportunity.siteID)) · \(opportunity.payLabel)")
-                            .font(.subheadline).foregroundStyle(HyggeTheme.secondary).lineLimit(2)
+                Text(greeting).font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button { showProfile = true } label: {
+                    if store.profilePhotoData != nil { ProfileAvatar(size: 44) }
+                    else {
+                        Text(String(store.profile.displayName.first ?? "Y").uppercased())
+                            .font(.system(.body, design: .rounded, weight: .semibold))
+                            .foregroundStyle(HyggeTheme.ink).frame(width: 44, height: 44).background(HyggeTheme.sageTint, in: Circle())
                     }
-                    Spacer(minLength: 0)
-                }
-                approveButton("Draft an application") {
-                    store.draftApplication(for: opportunity)
-                    store.highlightedOpportunityID = nil
-                }
-                quietButton("Leave it in my feed") { store.highlightedOpportunityID = nil }
+                }.buttonStyle(.plain).accessibilityLabel("Your profile")
             }
-            .padding(20).hyggeCard(radius: 26)
+            if let error = store.lastSyncError {
+                Label(error, systemImage: "wifi.slash").font(.caption).foregroundStyle(HyggeTheme.ember)
+            }
         }
     }
-
-    /// The full paused home state: nothing asks for attention, resume is one tap.
-    private var pausedCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                FlameMark(size: 30)
-                Text("Hygge is paused")
-                    .font(.system(.headline, design: .rounded, weight: .semibold))
-                    .foregroundStyle(HyggeTheme.ink)
-            }
-            Text("No searching, sending, or booking until you say so. Your work and drafts are exactly as you left them.")
-                .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-            Button("Resume Hygge") { store.setPaused(false) }
-                .font(.subheadline.weight(.semibold))
-                .padding(.horizontal, 18).padding(.vertical, 11)
-                .background(HyggeTheme.emberDeep, in: Capsule()).foregroundStyle(.white)
-        }
-        .padding(17).hyggeCard(radius: 24)
+    private var greeting: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        let name = store.profile.displayName.split(separator: " ").first.map(String.init) ?? ""
+        let time = hour < 12 ? "Morning" : hour < 18 ? "Afternoon" : "Evening"
+        return name.isEmpty ? "Good \(time.lowercased())" : "\(time), \(name)"
     }
-
     private var flameState: FlameState {
         if store.needsYouCount > 0 { return .needsYou(store.needsYouCount) }
         return store.isAgentWorking ? .working : .asleep
     }
+    private var pendingProposals: [ProposedSite] { store.proposals.filter { $0.status == .proposed } }
+    private var listings: [Opportunity] {
+        store.opportunities.filter { !$0.isDemo && ($0.status == .new || $0.status == .saved) }
+            .filter { opportunity in !store.applications.contains { $0.opportunityID == opportunity.id } }
+            .sorted { lhs, rhs in
+                if lhs.id == store.highlightedOpportunityID { return true }
+                if rhs.id == store.highlightedOpportunityID { return false }
+                return (lhs.rankScore ?? 0) > (rhs.rankScore ?? 0)
+            }
+    }
+    private var decisionTasks: [AgentTask] {
+        store.tasks.filter { $0.needsChatHelp || $0.status == .awaitingApproval || $0.status == .draft }
+    }
+    private var runningTasks: [AgentTask] { store.tasks.filter { $0.status == .running || $0.status == .approved } }
+    private var events: [ActivityEvent] { store.activityEvents.sorted { $0.occurredAt > $1.occurredAt } }
+    private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && !store.isPaused }
+    private func taskKey(_ task: AgentTask) -> String { "task-\(task.id)-\(task.status.rawValue)-\(task.help?.id.uuidString ?? "")" }
+    private func eventKey(_ event: ActivityEvent) -> String { "event-\(event.id)" }
+    private func isArchived(_ id: String) -> Bool { store.archivedFeedIDs.contains(id) }
 
-    // MARK: Header
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(greeting)
-                        .font(.system(size: 38, weight: .bold, design: .rounded))
-                        .foregroundStyle(HyggeTheme.ink)
-                        .lineLimit(2).minimumScaleFactor(0.8)
-                    Text(store.isPaused ? "Hygge is paused. Everything is as you left it."
-                                        : "Here's what needs your attention today")
-                        .font(.body).foregroundStyle(HyggeTheme.sageDeep)
-                }
-                Spacer()
-                Button { showProfile = true } label: {
-                    ZStack {
-                        Circle().fill(HyggeTheme.sageTint).frame(width: 62, height: 62)
-                        Text(initials).font(.system(.title3, design: .rounded, weight: .bold))
-                            .foregroundStyle(HyggeTheme.ink)
-                    }
-                }
-                .accessibilityLabel("Profile")
+    private var suggestions: some View {
+        Group {
+            ForEach(pendingProposals.prefix(morePlaces ? pendingProposals.count : 1)) { proposal in
+                card(id: "proposal-\(proposal.id)", title: store.siteName(id: proposal.siteID), subtitle: proposal.rationale,
+                     icon: "link", primaryTitle: "Start setup", primaryIcon: "sparkles",
+                     open: { proposalDetail = proposal },
+                     primary: { store.approveProposal(proposalID: proposal.id, alreadyHasAccount: false) },
+                     dismiss: {
+                        store.dismissProposal(proposalID: proposal.id)
+                        showUndo("Suggestion dismissed") { store.undoSiteDismissal(proposalID: proposal.id) }
+                     })
             }
-            if store.pendingValue > 0 {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("FOUND FOR YOU").font(.caption2.weight(.bold)).foregroundStyle(HyggeTheme.sageDeep)
-                        Text(JournalBuilder.money(store.pendingValue))
-                            .font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                        Text("In drafts ready below — nothing sent yet.")
-                            .font(.caption).foregroundStyle(HyggeTheme.secondary)
-                    }
-                    Spacer()
-                    FlameMark(size: 26)
-                }
-                .padding(16).hyggeCard(radius: 20)
-            }
-            if let message = store.lastMessage {
-                Text(message).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-            }
-            if let syncError = store.lastSyncError, syncError != store.lastMessage {
-                // Honest offline write state: cached here, not saved yet.
-                Label(syncError, systemImage: "wifi.slash")
-                    .font(.caption).foregroundStyle(HyggeTheme.emberDeep)
+            if pendingProposals.count > 1 {
+                Button(morePlaces ? "Fewer suggestions" : "\(pendingProposals.count - 1) more places") { withAnimation { morePlaces.toggle() } }
+                    .font(.caption.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
             }
         }
     }
-
-    private var greeting: String {
-        let hour = Calendar.current.component(.hour, from: Date())
-        let name = store.profile.displayName.split(separator: " ").first.map(String.init) ?? ""
-        let base = hour < 12 ? "Good morning" : (hour < 18 ? "Good afternoon" : "Good evening")
-        return name.isEmpty ? base : "\(base), \(name)"
-    }
-
-    private var initials: String {
-        let parts = store.profile.displayName.split(separator: " ")
-        let letters = parts.prefix(2).compactMap { $0.first.map(String.init) }.joined()
-        return letters.isEmpty ? "You" : letters.uppercased()
-    }
-
-    // MARK: A place to start (at most one suggestion up front)
-
-    @ViewBuilder
-    private var consentZone: some View {
-        let pending = store.proposals.filter { $0.status == .proposed }
-        if !pending.isEmpty {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("A place to start")
-                    .font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                if let first = pending.first { consentCard(first) }
-                if pending.count > 1 {
-                    if consentsExpanded {
-                        ForEach(pending.dropFirst()) { consentCard($0) }
-                    } else {
-                        Button("More places when you're ready (\(pending.count - 1))") { consentsExpanded = true }
-                            .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
-                    }
-                }
-            }
+    private var opportunities: some View {
+        ForEach(listings) { opportunity in
+            card(id: "opportunity-\(opportunity.id)", title: opportunity.title,
+                 subtitle: "\(opportunity.payLabel) · \(opportunity.isRemote ? "Remote" : opportunity.locationLabel)",
+                 icon: "briefcase", primaryTitle: "Prepare draft", primaryIcon: "square.and.pencil",
+                 open: { opportunityDetail = opportunity }, primary: { store.draftApplication(for: opportunity) },
+                 dismiss: {
+                    store.setStatus(.dismissed, for: opportunity.id)
+                    showUndo("Opportunity dismissed") { store.setStatus(opportunity.status, for: opportunity.id) }
+                 })
         }
     }
-
-    private var setupActivity: some View {
-        ForEach(store.tasks.filter { ($0.isSiteSetup || $0.browserSessionID != nil) && ($0.status == .running || $0.status == .approved) }) { task in
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(store.siteName(id: task.siteID)).font(.headline)
-                    Text(task.connectsExistingAccount ? "Connecting your account…" : "Setting things up…")
-                        .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-                }
-                BrowserLiveAttachment(task: task) { browserTask = task }
-            }.padding(16).hyggeCard(radius: 22)
-        }
-    }
-
-    // MARK: Pinned needs-you
-
-    private var pinnedZone: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if store.needsYouCount > 0 {
-                HStack {
-                    Text("Needs you").font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                    Text("\(store.needsYouCount)")
-                        .font(.caption.weight(.bold)).foregroundStyle(.white)
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(HyggeTheme.emberDeep, in: Capsule())
-                    Spacer()
-                }
-                let cards = needsYouCards
-                ForEach(cards.prefix(needsExpanded ? cards.count : 3)) { card in AnyView(card.content()) }
-                if cards.count > 3 && !needsExpanded {
-                    Button("Show \(cards.count - 3) more") { needsExpanded = true }
-                        .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
-                }
-            }
-        }
-    }
-
-    private var needsYouCards: [NeedsYouCard] {
-        var cards: [NeedsYouCard] = []
-        for task in store.chatHelpTasks {
-            cards.append(NeedsYouCard(id: "chat-\(task.id)") {
-                Button {
-                    store.surfaceTaskHelp(taskID: task.id)
-                    store.conversationTaskID = task.id
-                    showConversation = true
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "bubble.left.and.bubble.right")
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(store.siteName(id: task.siteID)).font(.headline)
-                            Text("Needs your help in chat").font(.subheadline)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                    }.foregroundStyle(HyggeTheme.ink).padding(16).hyggeCard(radius: 22)
-                }.buttonStyle(.plain)
-            })
-        }
-        let awaiting = store.tasks.filter { $0.status == .awaitingApproval }
-        for batch in TaskBatching.groups(awaiting) {
-            if batch.count > 1 {
-                cards.append(NeedsYouCard(id: "batch-\(batch.map(\.id.uuidString).joined(separator: ","))") { batchCard(batch) })
-            } else if let task = batch.first {
-                cards.append(NeedsYouCard(id: "task-\(task.id)") { taskCard(task) })
-            }
-        }
-        return cards
-    }
-
-}
-
-private struct NeedsYouCard: Identifiable {
-    var id: String
-    @ViewBuilder var content: () -> any View
-}
-
-extension HomeFeedView {
-    // MARK: Cards
-
-    private func consentCard(_ proposal: ProposedSite) -> some View {
-        let site = store.site(id: proposal.siteID)
-        return VStack(alignment: .leading, spacing: 15) {
-            tagLabel("New place to find work", color: HyggeTheme.sageDeep)
-            HStack(alignment: .top, spacing: 13) {
-                iconTile(categoryIcon(site?.category))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(site?.name ?? proposal.siteID)
-                        .font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                    Text(proposal.rationale)
-                        .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-                        .lineLimit(3).fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
-            Divider().overlay(HyggeTheme.hairline)
-            VStack(alignment: .leading, spacing: 11) {
-                factRow("banknote", proposal.payPattern)
-                factRow("person.crop.rectangle", "Shared: \(proposal.dataShared.lowercased())")
-                factRow("checkmark.shield", "Checks: \(proposal.verification.lowercased())")
-            }
-            approveButton("Create my account") { store.approveProposal(proposalID: proposal.id, alreadyHasAccount: false) }
-            HStack {
-                quietButton("I have one") { store.approveProposal(proposalID: proposal.id, alreadyHasAccount: true) }
-                Spacer()
-                quietButton("Not this site") { store.dismissProposal(proposalID: proposal.id) }
-            }
-            Text("One yes is all it takes — I'll handle the signup and only stop for things only you can do.")
-                .font(.caption).foregroundStyle(HyggeTheme.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .multilineTextAlignment(.center)
-        }
-        .padding(20).hyggeCard(radius: 26)
-    }
-
-    private func taskCard(_ task: AgentTask) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            tagLabel(task.status == .needsHuman ? "Pinned · Needs you" : "Draft · nothing sent yet",
-                     color: task.status == .needsHuman ? HyggeTheme.emberDeep : HyggeTheme.sageDeep,
-                     foreground: task.status == .needsHuman ? .white : HyggeTheme.onSage)
-            HStack(alignment: .top, spacing: 13) {
-                iconTile(categoryIcon(opportunity(for: task)?.category))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(task.title)
-                        .font(.system(.headline, design: .rounded, weight: .semibold))
-                        .foregroundStyle(HyggeTheme.ink).lineLimit(2)
-                    if let take = hyggesTake(task) {
-                        Text(take).font(.subheadline).foregroundStyle(HyggeTheme.sageDeep).lineLimit(3)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-            if !evidenceLines(task).isEmpty {
-                Divider().overlay(HyggeTheme.hairline)
+    private var activeTasks: some View {
+        ForEach(runningTasks.filter { !isArchived(taskKey($0)) }) { task in
+            if task.browserSessionID != nil {
+                SwipeFeedCard(id: taskKey(task), primaryTitle: "Watch", primaryIcon: "arrow.up.left.and.arrow.down.right", openCardID: $openCardID, open: { browserTask = task }, primary: { browserTask = task }, dismiss: { archive(taskKey(task)) }) {
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(evidenceLines(task).prefix(3).enumerated()), id: \.offset) { _, line in
-                        factRow(evidenceIcon(line), line)
-                    }
+                    Text(task.connectsExistingAccount ? "Connecting your account" : task.isSiteSetup ? "Setting up your account" : task.title)
+                        .font(.system(.subheadline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
+                    BrowserLiveAttachment(task: task) { browserTask = task }
+                }.padding(14).hyggeCard(radius: 22)
                 }
-            }
-            if !task.informationRequests.isEmpty {
-                ForEach(task.informationRequests, id: \.self) { question in
-                    Label(question, systemImage: "questionmark.circle")
-                        .font(.subheadline).foregroundStyle(HyggeTheme.ink)
-                }
-            } else if let draft = mainDraft(task) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Your message").font(.caption).foregroundStyle(HyggeTheme.secondary)
-                    Text(draft).font(.subheadline).foregroundStyle(HyggeTheme.ink).lineLimit(4)
-                }
-            }
-            if task.status == .needsHuman {
-                approveButton("Answer / take over") { editingTask = task }
             } else {
-                approveButton("Approve") { Task { await store.approveAndRun(taskID: task.id) } }
-                HStack {
-                    quietButton("Edit") { editingTask = task }
-                    Spacer()
-                    Menu("Not now") {
-                        Button("Too low") { notNow(task, reason: "too low") }
-                        Button("Too far") { notNow(task, reason: "too far") }
-                        Button("Not my thing") { notNow(task, reason: "not their thing") }
-                        Button("Just busy") { notNow(task, reason: "just busy") }
-                    }
-                    .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
-                }
+                card(id: taskKey(task), title: "\(store.siteName(id: task.siteID)) · Working", subtitle: task.title,
+                     icon: "sparkles", primaryTitle: "Details", open: { reviewTask = task }, primary: { reviewTask = task })
             }
         }
-        .padding(20).hyggeCard(radius: 26)
     }
-
-    private func opportunity(for task: AgentTask) -> Opportunity? {
-        guard let id = task.opportunityID else { return nil }
-        return store.opportunities.first { $0.id == id }
+    private var decisions: some View {
+        ForEach(decisionTasks.filter { !isArchived(taskKey($0)) }) { task in taskCard(task) }
     }
-
-    private func evidenceIcon(_ line: String) -> String {
-        if line.hasPrefix("$") || line.hasPrefix("Pay") { return "dollarsign" }
-        if line.contains("Remote") || line.contains("In person") { return "mappin" }
-        return "calendar"
+    private func taskCard(_ task: AgentTask) -> some View {
+        let chat = task.needsChatHelp
+        let approval = task.help?.kind == .approval
+        return card(id: taskKey(task), title: taskTitle(task),
+                    subtitle: store.siteName(id: task.siteID), icon: chat && !approval ? "bubble.left.and.bubble.right" : "doc.text",
+                    primaryTitle: chat && !approval ? "Open chat" : "Review", primaryIcon: chat ? "bubble.left" : "doc.text.magnifyingglass",
+                    open: { if chat { openChat(task) } else { reviewTask = task } },
+                    primary: { if chat { openChat(task) } else { reviewTask = task } })
     }
-
-    private func batchCard(_ batch: [AgentTask]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            tagLabel("Drafts — nothing sent yet", color: HyggeTheme.sageDeep)
-            Text("\(batch.count) similar applications")
-                .font(.system(.headline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
-            Text("Identical draft, checked word for word, for \(batch.count) listings on \(store.siteName(id: batch.first?.siteID ?? "")). If one stalls, the rest stop too.")
-                .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-            if let draft = batch.first.flatMap(mainDraft) {
-                Text(draft).font(.subheadline).foregroundStyle(HyggeTheme.ink).lineLimit(5)
-            }
-            HStack(spacing: 9) {
-                approveButton("Approve all \(batch.count)") {
-                    Task { await store.approveBatch(taskIDs: batch.map(\.id)) }
-                }
-                Button("Review each") {
-                    reviewQueue = batch
-                    reviewTotal = batch.count
-                }
-                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
+    private func taskTitle(_ task: AgentTask) -> String {
+        if task.needsChatHelp {
+            switch task.help?.kind {
+            case .approval: return "Ready for your review"
+            case .verification: return "A quick check needs you"
+            case .credentials: return "Connect your login"
+            case .recovery: return "Let’s get this moving"
+            case .information: return "One quick question"
+            case nil: return "Your help is needed"
             }
         }
-        .padding(20).hyggeCard(radius: 26)
+        return task.kind == .buildProfile ? "Profile ready to review" : task.title
     }
-
-    private func consentFact(_ icon: String, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: icon).font(.caption).foregroundStyle(HyggeTheme.sageDeep).frame(width: 16)
-            Text(text).font(.caption).foregroundStyle(HyggeTheme.ink)
-        }
+    private var updates: some View {
+        ForEach(events.filter { $0.occurredAt > store.visitMarker && !isArchived(eventKey($0)) }) { event in eventCard(event) }
     }
-
-    /// A recommendation only when confidence clears the bar; below it, the
-    /// card shows evidence and stays neutral.
-    private func hyggesTake(_ task: AgentTask) -> String? {
-        if let oppID = task.opportunityID,
-           let opp = store.opportunities.first(where: { $0.id == oppID }) {
-            return MatchEngine.recommendation(for: MatchEngine.evaluate(profile: store.profile, opportunity: opp))
-        }
-        switch task.kind {
-        case .signup: return "A new place to find work you enjoy. I'll figure out the signup and ask about anything I don't know."
-        case .buildProfile: return "Your profile, written from what I know about you. Worth a quick read before it goes live."
-        case .discover: return "A fresh look for work at or above your floor. Nothing leaves the app."
-        default: return nil
-        }
-    }
-
-    private func evidenceLines(_ task: AgentTask) -> [String] {
-        guard let oppID = task.opportunityID,
-              let opp = store.opportunities.first(where: { $0.id == oppID }) else { return [] }
-        return MatchEngine.evaluate(profile: store.profile, opportunity: opp).evidence
-    }
-
-    private func mainDraft(_ task: AgentTask) -> String? {
-        task.draftedPayload["coverLetter"] ?? task.draftedPayload["profileBio"] ?? task.draftedPayload["checklist"]
-    }
-
-    private func notNow(_ task: AgentTask, reason: String) {
-        // The reason is recorded as structured feedback (Brief 06) so
-        // what Hygge suggests next learns from this "not now".
-        store.reject(taskID: task.id, reason: reason)
-        switch reason {
-        case "too far":
-            store.proposeBelief(sentence: "Prefers work close to home", source: .learnedFromWork, confidence: 0.6)
-            store.appendChat(fromAgent: true, text: "Noted — that one was too far. If you prefer work close to home, tell me in chat and I'll weight distance more.")
-        case "not their thing":
-            store.proposeBelief(sentence: "Turns down \(store.siteName(id: task.siteID)) work that isn't their thing", source: .learnedFromWork, confidence: 0.55)
-            store.appendChat(fromAgent: true, text: "Noted — not your thing. I'll check with you before saving a new preference.")
-        default:
-            store.appendChat(fromAgent: true, text: "Noted — \(task.title) was \(reason).")
-        }
-    }
-
-    /// Tags come in contrast-safe pairs: sage fills take onSage text,
-    /// ember fills are always the deep ember (white passes 5.1:1).
-    private func tagLabel(_ text: String, color: Color, foreground: Color = HyggeTheme.onSage) -> some View {
-        Text(text)
-            .font(.caption.weight(.bold)).foregroundStyle(foreground)
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(color, in: Capsule())
-    }
-
-    /// The one primary action per card: full-width ember capsule (mocks).
-    private func approveButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.body.weight(.semibold))
-                .frame(maxWidth: .infinity).padding(.vertical, 15)
-                .background(HyggeTheme.emberDeep, in: Capsule()).foregroundStyle(.white)
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func factRow(_ icon: String, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 16, weight: .medium)).foregroundStyle(HyggeTheme.ember)
-                .frame(width: 22)
-            Text(text).font(.subheadline).foregroundStyle(HyggeTheme.ink)
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func iconTile(_ icon: String) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 16).fill(HyggeTheme.sageTint).frame(width: 54, height: 54)
-            Image(systemName: icon).font(.system(size: 23)).foregroundStyle(HyggeTheme.sageDeep)
-        }
-    }
-
-    private func categoryIcon(_ category: OpportunityCategory?) -> String {
-        switch category {
-        case .petCare: return "pawprint.fill"
-        case .freelance, .remoteJob: return "laptopcomputer"
-        case .localGig: return "hammer.fill"
-        case .delivery: return "car.fill"
-        case .creative: return "paintpalette.fill"
-        case .tutoring: return "book.fill"
-        case .homeServices: return "house.fill"
-        case .community: return "person.3.fill"
-        case nil: return "sparkles"
-        }
-    }
-
-    private func quietButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
-    }
-
-    // MARK: Journal
-
-    private var journal: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Journal").font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                Spacer()
-                Button("Your work") { showYourWork = true }
-                    .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
-            }
-            let entries = store.journalEntries
-            let since = entries.filter { $0.date > store.visitMarker }
-            let earlier = entries.filter { $0.date <= store.visitMarker }
-            Text("Since your last visit").font(.caption.weight(.semibold)).foregroundStyle(HyggeTheme.secondary)
-            if since.isEmpty && earlier.isEmpty {
-                journalRow(sentence: store.isPaused
-                    ? "Paused. Everything is exactly as you left it."
-                    : "Looking tonight. Nothing to report yet — and that's fine.",
-                           why: "", id: "quiet-first")
-            } else if since.isEmpty {
-                journalRow(sentence: "All quiet — nothing new worth your attention.", why: "", id: "quiet")
-            }
-            ForEach(since) { entry in journalEntryView(entry) }
-            // Honest zero: no witnessed work yet, no claim of time saved.
-            if store.timeSavedMinutes > 0 { timeSavedCard }
-            if !earlier.isEmpty {
-                Button {
-                    withAnimation { earlierExpanded.toggle() }
-                } label: {
+    private var earlier: some View {
+        let older = events.filter { $0.occurredAt <= store.visitMarker || isArchived(eventKey($0)) }
+        let deferred = (decisionTasks + runningTasks).filter { isArchived(taskKey($0)) }
+        return Group {
+            if !older.isEmpty || !deferred.isEmpty {
+                Button { withAnimation { earlierExpanded.toggle() } } label: {
                     HStack {
-                        Text("Earlier").font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
-                        Image(systemName: earlierExpanded ? "chevron.up" : "chevron.down")
-                            .font(.caption).foregroundStyle(HyggeTheme.secondary)
+                        Text("Earlier").font(.subheadline.weight(.semibold))
+                        Image(systemName: earlierExpanded ? "chevron.up" : "chevron.down").font(.caption)
                         Spacer()
-                    }
-                }
+                    }.foregroundStyle(HyggeTheme.secondary).frame(minHeight: 44)
+                }.padding(.top, 8)
                 if earlierExpanded {
-                    ForEach(earlier) { entry in journalEntryView(entry) }
+                    ForEach(deferred) { task in taskCard(task) }
+                    ForEach(older) { event in eventCard(event) }
                 }
             }
         }
     }
-
-    private func journalEntryView(_ entry: JournalEntry) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text(JournalBuilder.dayLabel(for: entry.date))
-                .font(.caption.weight(.bold)).foregroundStyle(HyggeTheme.butterText)
-                .padding(.horizontal, 10).padding(.vertical, 4)
-                .background(HyggeTheme.butterTint, in: Capsule())
-            Text(entry.sentence).font(.body).foregroundStyle(HyggeTheme.ink).lineSpacing(3)
-            if !entry.why.isEmpty {
-                if expandedWhy.contains(entry.id) {
-                    Text(entry.why).font(.caption).foregroundStyle(HyggeTheme.secondary)
-                }
-                Button(expandedWhy.contains(entry.id) ? "Hide why" : "Why did Hygge do this?") {
-                    if expandedWhy.contains(entry.id) { expandedWhy.remove(entry.id) } else { expandedWhy.insert(entry.id) }
-                }
-                .font(.caption.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
-            }
-            if let appID = entry.applicationID,
-               let app = store.applications.first(where: { $0.id == appID }), app.stage == .completed {
-                Button("See the breakdown") { moneyApplication = app }
-                    .font(.caption.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
-            }
+    private func eventCard(_ event: ActivityEvent) -> some View {
+        card(id: eventKey(event), title: FeedEventPresentation.title(event),
+             subtitle: event.siteID.map { store.siteName(id: $0) } ?? JournalBuilder.dayLabel(for: event.occurredAt),
+             icon: FeedEventPresentation.icon(event), asset: event.kind == .workCompleted ? "SettingsEarnings" : nil,
+             primaryTitle: "Details", open: { eventDetail = event }, primary: { eventDetail = event })
+    }
+    private func card(id: String, title: String, subtitle: String, icon: String, asset: String? = nil,
+                      primaryTitle: String, primaryIcon: String = "arrow.right", open: @escaping () -> Void,
+                      primary: @escaping () -> Void, dismiss: (() -> Void)? = nil) -> some View {
+        SwipeFeedCard(id: id, primaryTitle: primaryTitle, primaryIcon: primaryIcon, openCardID: $openCardID,
+                      open: { openCardID = nil; open() }, primary: primary, dismiss: dismiss ?? { archive(id) }) {
+            FeedSummary(title: title, subtitle: subtitle, icon: icon, asset: asset)
         }
-        .padding(18).hyggeCard(radius: 22)
     }
-
-    private func journalRow(sentence: String, why: String, id: String) -> some View {
-        Text(sentence).font(.body).foregroundStyle(HyggeTheme.ink).lineSpacing(3)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(18).hyggeCard(radius: 22)
+    private func archive(_ id: String) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { store.setFeedArchived(id, archived: true) }
+        showUndo("Moved to Earlier") { store.setFeedArchived(id, archived: false) }
     }
-
-    private var cozyLine: String {
-        let afternoons = TimeSaved.cozyAfternoons(minutes: store.timeSavedMinutes)
-        if afternoons >= 1 { return "That's about \(afternoons) cozy afternoon\(afternoons == 1 ? "" : "s") back. The math lives in your profile." }
-        return "Time back for the good stuff. The math lives in your profile."
+    private func showUndo(_ message: String, action: @escaping () -> Void) {
+        withAnimation { undo = FeedUndo(message: message, action: action) }
     }
-
-    private var durationLabel: String {
-        let minutes = store.timeSavedMinutes
-        let h = minutes / 60, m = minutes % 60
-        if h == 0 { return "\(m)m" }
-        return m == 0 ? "\(h)h" : "\(h)h \(m)m"
+    private func openChat(_ task: AgentTask?) {
+        if let task { store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id }
+        showConversation = true
     }
+    private func openPendingChat() { if store.conversationTaskID != nil { showConversation = true } }
+}
 
-    private var timeSavedCard: some View {
-        HStack(spacing: 15) {
-            ZStack {
-                Circle().fill(HyggeTheme.sage.opacity(0.45)).frame(width: 52, height: 52)
-                Image(systemName: "clock").font(.system(size: 21)).foregroundStyle(HyggeTheme.sageDeep)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Time saved so far").font(.subheadline).foregroundStyle(HyggeTheme.ink)
-                Text(durationLabel)
-                    .font(.system(size: 27, weight: .bold, design: .rounded)).foregroundStyle(HyggeTheme.ink)
-                Text(cozyLine).font(.caption).foregroundStyle(HyggeTheme.secondary)
-            }
-            Spacer()
+private struct FeedScrollOffset: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+private struct FeedUndo { let message: String; let action: () -> Void }
+
+enum FeedEventPresentation {
+    static func title(_ event: ActivityEvent) -> String {
+        switch event.kind {
+        case .joinedSite: return "Your account is ready"
+        case .profileLive: return "Your profile is live"
+        case .workCompleted:
+            if let amount = event.grossAmount { return "You earned \(JournalBuilder.money(amount, currencyCode: event.currencyCode))" }
+            return "Work completed"
+        case .applicationSent: return "Application sent"
+        case .messageSent: return "Message sent"
+        case .booked: return "It’s in your calendar"
+        default: return event.sentence
         }
-        .padding(18)
-        .background(HyggeTheme.sageTint, in: RoundedRectangle(cornerRadius: 22))
+    }
+    static func icon(_ event: ActivityEvent) -> String {
+        switch event.kind {
+        case .joinedSite, .profileLive: return "checkmark.circle.fill"
+        case .workCompleted: return "banknote"
+        case .applicationSent, .messageSent: return "paperplane"
+        case .booked: return "calendar"
+        case .filedEmail: return "envelope"
+        default: return "sparkles"
+        }
     }
 }
