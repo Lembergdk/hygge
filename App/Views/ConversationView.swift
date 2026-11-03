@@ -6,6 +6,9 @@ struct ConversationView: View {
     /// Sheet presentations keep the paper background; the feed's speech
     /// bubble passes the card color so it lifts off the feed behind it.
     var background: Color = HyggeTheme.paper
+    /// The speech bubble sits right on top of him — a name header there
+    /// only repeats what the flame below already says.
+    var showsHeader: Bool = true
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var input = ""
@@ -31,11 +34,13 @@ struct ConversationView: View {
             ZStack {
                 background.ignoresSafeArea()
                 VStack(spacing: 0) {
-                    HStack(spacing: 10) {
-                        AnimatedFlame(animation: avatarAnimation, size: 36)
-                        Text("Hygge").font(.title3.weight(.bold))
-                        Spacer()
-                    }.foregroundStyle(HyggeTheme.ink).padding(.horizontal, 20).padding(.top, 18)
+                    if showsHeader {
+                        HStack(spacing: 10) {
+                            AnimatedFlame(animation: avatarAnimation, size: 36)
+                            Text("Hygge").font(.title3.weight(.bold))
+                            Spacer()
+                        }.foregroundStyle(HyggeTheme.ink).padding(.horizontal, 20).padding(.top, 18)
+                    }
                     ScrollViewReader { proxy in
                         ScrollView {
                             VStack(alignment: .leading, spacing: 13) {

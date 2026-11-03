@@ -71,6 +71,24 @@ final class FlamePlayTests: XCTestCase {
             translationX: 3, translationY: -4, predictedX: 5, predictedY: -8))
     }
 
+    func testDragIntentBuffer() {
+        // Fresh touch, barely moved: still deciding — show nothing yet.
+        XCTAssertEqual(FlameGestureClassifier.dragIntent(
+            elapsed: 0.04, magnitude: 6, velocity: 120), .deciding)
+        // Fast early movement: arm as a flick (anticipation, no following).
+        XCTAssertEqual(FlameGestureClassifier.dragIntent(
+            elapsed: 0.07, magnitude: 30, velocity: 1100), .flick)
+        // Slow deliberate movement past the buffer: carry him.
+        XCTAssertEqual(FlameGestureClassifier.dragIntent(
+            elapsed: 0.20, magnitude: 24, velocity: 180), .carry)
+        // Held touch that finally moves a little: carry, not flick.
+        XCTAssertEqual(FlameGestureClassifier.dragIntent(
+            elapsed: 0.42, magnitude: 16, velocity: 60), .carry)
+        // Fast but tiny: not enough travel to call it yet.
+        XCTAssertEqual(FlameGestureClassifier.dragIntent(
+            elapsed: 0.03, magnitude: 9, velocity: 1400), .deciding)
+    }
+
     func testClampedSettings() {
         var settings = FlameInteractionSettings()
         settings.homeFlameSize = 500

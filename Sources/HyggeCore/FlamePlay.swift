@@ -66,6 +66,16 @@ public enum FlameSwipe: Equatable, Sendable {
     case left, right, up, down
 }
 
+/// What an in-progress touch on the flame is turning into. The first
+/// ~100ms are a classification buffer: nothing follows the finger until
+/// the intent is clear, so a flick never starts as a visible mini-drag
+/// and a drag never starts with a jump.
+public enum FlameDragIntent: Equatable, Sendable {
+    case deciding
+    case carry
+    case flick
+}
+
 public enum FlameGestureClassifier {
     /// Classifies a finished drag from its predicted end translation, so
     /// quick flicks count even when the finger travelled a short way.
@@ -78,6 +88,18 @@ public enum FlameGestureClassifier {
         if ax >= ay * 1.35 { return predictedX < 0 ? .left : .right }
         if ay >= ax * 1.35 { return predictedY < 0 ? .up : .down }
         return nil
+    }
+
+    /// Classify an in-progress touch for the drag buffer. Velocity is
+    /// points/sec (smoothed). Fast early travel arms a flick; anything
+    /// slower or later becomes a carry once it has moved enough.
+    public static func dragIntent(elapsed: Double, magnitude: Double,
+                                  velocity: Double) -> FlameDragIntent {
+        guard magnitude.isFinite, velocity.isFinite, elapsed.isFinite else { return .deciding }
+        if magnitude >= 18, velocity >= 750, elapsed < 0.22 { return .flick }
+        if magnitude >= 20, elapsed >= 0.10 { return .carry }
+        if magnitude >= 12, elapsed >= 0.30 { return .carry }
+        return .deciding
     }
 
     /// Was a drag released as a flick? A flick's predicted end flies far

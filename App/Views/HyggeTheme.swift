@@ -123,7 +123,6 @@ struct FloatingFlame: View {
     var state: FlameState
     var dimmed: Bool = false
     var traveling = false
-    var preview: FlamePreviewRequest? = nil
     var onTap: () -> Void
     var onLongPress: (() -> Void)? = nil
     var onDragBegan: (() -> Void)? = nil
@@ -151,7 +150,6 @@ struct FloatingFlame: View {
                    attention: needsYou,
                    movable: onDragEnded != nil,
                    traveling: traveling,
-                   preview: preview,
                    onTap: onTap,
                    onLongPress: onLongPress,
                    onDragBegan: onDragBegan,

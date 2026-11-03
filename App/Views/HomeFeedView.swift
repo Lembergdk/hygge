@@ -17,8 +17,7 @@ struct HomeFeedView: View {
     @State private var centerOverride: CGPoint?
     /// Where he was living before a tap sent him home for chat.
     @State private var returnPlacement: FlamePlacement?
-    @State private var hopRequest: FlamePreviewRequest?
-    @State private var hopCounter = 0
+
     @State private var showProfile = false
     @State private var showYourWork = false
     @State private var showNotifications = false
@@ -45,7 +44,7 @@ struct HomeFeedView: View {
                 // He lives where he was dropped (placement persists in the
                 // flame settings); nil placement is his bottom-right home.
                 FloatingFlame(state: flameState, dimmed: flameDimmed,
-                              traveling: flameTraveling, preview: hopRequest) {
+                              traveling: flameTraveling) {
                     flameTapped()
                 }
                 onDragBegan: { dragStartCenter = flameWindowCenter() }
@@ -251,21 +250,24 @@ struct HomeFeedView: View {
         if showBubbleChat { returnPlacement = placement }
     }
 
-    /// Quick hop: walk cycle + a jump arc while the center animates to
-    /// the target spot, instead of teleporting.
-    private func hop(to target: CGPoint, then: @escaping () -> Void) {
-        let start = flameWindowCenter()
-        if reduceMotion || hypot(target.x - start.x, target.y - start.y) < 8 {
+    /// Quick hop: his limbs crouch, launch and land (see FlameActor's
+    /// travel hops) while the center animates from an EXPLICIT start —
+    /// measuring the start after mutating placement would read the
+    /// target itself and teleport him.
+    private func hop(from start: CGPoint, to target: CGPoint,
+                     then: @escaping () -> Void) {
+        let distance = hypot(target.x - start.x, target.y - start.y)
+        if reduceMotion || distance < 8 {
+            centerOverride = nil
             then()
             return
         }
+        let duration = min(0.85, max(0.45, Double(distance) / 1400 + 0.35))
         centerOverride = start
         flameTraveling = true
-        hopCounter += 1
-        hopRequest = FlamePreviewRequest(id: hopCounter, reaction: .bigJump)
-        withAnimation(.easeInOut(duration: 0.55)) { centerOverride = target }
+        withAnimation(.easeInOut(duration: duration)) { centerOverride = target }
         Task { @MainActor in
-            try? await Task.sleep(for: .seconds(0.55))
+            try? await Task.sleep(for: .seconds(duration))
             flameTraveling = false
             centerOverride = nil
             then()
@@ -277,8 +279,9 @@ struct HomeFeedView: View {
     private func flameTapped() {
         if showBubbleChat { closeBubble(); return }
         returnPlacement = playStore.settings.placement
+        let start = flameWindowCenter()
         playStore.settings.placement = nil
-        hop(to: windowCenter(for: nil)) {
+        hop(from: start, to: windowCenter(for: nil)) {
             withAnimation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.82)) {
                 showBubbleChat = true
             }
@@ -292,8 +295,9 @@ struct HomeFeedView: View {
         }
         guard let back = returnPlacement else { return }
         returnPlacement = nil
+        let start = flameWindowCenter()
         playStore.settings.placement = back
-        hop(to: windowCenter(for: back)) {}
+        hop(from: start, to: windowCenter(for: back)) {}
     }
 
     private func bubbleChat(in geo: GeometryProxy) -> some View {
@@ -311,7 +315,7 @@ struct HomeFeedView: View {
             Color.clear
             VStack(alignment: .trailing, spacing: 0) {
                 ZStack(alignment: .top) {
-                    ConversationView(background: HyggeTheme.card)
+                    ConversationView(background: HyggeTheme.card, showsHeader: false)
                     Capsule()
                         .fill(HyggeTheme.secondary.opacity(0.55))
                         .frame(width: 38, height: 5)
