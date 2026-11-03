@@ -63,7 +63,7 @@ Hygge does not stop at finding a listing. With your approval it can draft applic
 ### Stay in control
 
 - **One home screen, one decision at a time.** Things that need you are pinned at the top. Everything else becomes a calm journal of what happened, in plain sentences.
-- **Watch Hygge work — and take over.** When Hygge is browsing for you, you can watch the real web page live inside the app. If a site asks for something only you can do — a CAPTCHA, a text-message code, an ID check — Hygge stops and hands you the controls.
+- **Watch Hygge work — and take over.** When Hygge is browsing for you, you can watch the real web page live inside the app, and take the controls yourself at any moment — then hand them back when you're ready.
 - **A Hygge email address of your own.** Hygge has its own `@usehygge.cc` address to use when signing up for work sites, so verification emails, site notifications and job alerts land where Hygge can help with them. You can also forward any email from your own inbox to Hygge, and ask it to handle it.
 - **Quiet by design.** Hygge only notifies you when something genuinely needs you, or when new matching work has been found. No digests, no nagging, no marketing.
 
@@ -73,7 +73,7 @@ Hygge does not stop at finding a listing. With your approval it can draft applic
 
 You tell Hygge you love dogs, you are free weekday evenings, and your lowest rate is $20 an hour. Hygge suggests two pet-care sites and a local community board. You approve all three and tap “Create my account” on the first.
 
-Hygge opens the site in its cloud browser and starts signing you up, with its `@usehygge.cc` address. If it needs additional details from you - like a phone number, it asks you in chat. You answer, handle any human-only verifications needed, and approve the profile Hygge drafted from what you told it.
+Hygge opens the site in its cloud browser and starts signing you up, with its `@usehygge.cc` address. If it needs additional details from you - like a phone number, it asks you in chat. You answer, watch it finish the sign-up, and approve the profile Hygge drafted from what you told it.
 
 From then on, Hygge checks your approved sites several times daily. That evening it finds a weekend dog-walk that fits your rate and your neighborhood. You get a notification. You read the draft reply Hygge wrote, tweak a word, and tap approve. Hygge sends it, and when the owner confirms, the walk lands in your calendar. Your journal gets a sentence about what happened.
 
@@ -162,33 +162,33 @@ flowchart LR
 
 ### The mission loop
 
-Every unit of work is a **mission**: a goal plus user-approved draft content. The agent runs one loop until the mission is done, paused for the human, or out of budget:
+Every unit of work is a **mission**: a goal plus user-approved draft content. The agent runs one loop until the mission is done, paused for your input, or out of budget:
 
 ```mermaid
 flowchart TD
     Observe["Observe the page<br/>text + accessibility tree + screenshot<br/>stable references to real controls"]
     Decide["Model decides ONE action<br/>validated against a fixed action schema"]
     Rails{"Harness rails<br/>step budget · loop detection<br/>effect classification"}
-    Human["Pause for the human<br/>approval, question, CAPTCHA / 2FA / ID"]
+    Human["Pause for you<br/>an approval or a question"]
     Act["Execute in Browser Run Chrome<br/>secrets substituted by the worker,<br/>never by the model"]
     Done["Done → distill site-memory hints<br/>write the journal sentence"]
 
     Observe --> Decide --> Rails
-    Rails -->|"consequential or human-only"| Human --> Observe
+    Rails -->|"needs your say-so"| Human --> Observe
     Rails -->|"safe to run"| Act --> Observe
     Decide -->|"mission complete"| Done
 ```
 
 Key properties:
 
-- **One decision per model call**, validated against a fixed action set (`navigate`, `click`, `type`, `select`, `check`, `press`, `hover`, `scroll`, `back`, `forward`, `wait`, `upload`, `extract`, `askUser`, `done`, `needsHuman`). The model finds its own path from what the page shows. See [docs/browser-capabilities.md](docs/browser-capabilities.md).
+- **One decision per model call**, validated against a fixed action set (`navigate`, `click`, `type`, `select`, `check`, `press`, `hover`, `scroll`, `back`, `forward`, `wait`, `upload`, `extract`, `askUser`, `done`, …). The model finds its own path from what the page shows. See [docs/browser-capabilities.md](docs/browser-capabilities.md).
 - **Model routing by stakes.** Spark 1.3 handles routine steps. Wonder 1.0 takes over after failures, deviations and detected loops, for final submits on high-stakes missions (signup, apply, calendar booking), and for drafting user-facing text. Routing, pricing metadata and gateway headers live in [llm.ts](backend/cloudflare/src/llm.ts); the loop itself is [agent.ts](backend/cloudflare/src/agent.ts).
 - **Rails in code, not prompts.** Hard step budgets, “same action + target + URL three times” loop detection, and effect classification (`reversible` / `accountCreation` / `public` / `permanent` / `destructive`) run in the harness. Consequential effects require a one-use consent bound to the exact task, session, URL, page labels and draft. A model-supplied “approved” flag cannot authorize anything. See [docs/chat-first-setup.md](docs/chat-first-setup.md).
 - **Page content is hostile input.** A listing can contain prompt injection aimed at the user's own agent. Tools stay constrained to the approved goal, anything state-changing needs approval, and secrets exist only as vault placeholders the model cannot exfiltrate.
 
 ### Watching and taking over
 
-The app streams the same Chrome page the agent is using. An authenticated WebSocket (`/sessions/:id/stream`) in the user's Durable Object fans one CDP screencast out to all viewers, latest-frame-first, with no frames persisted. “Take control” stops new agent actions, waits for any in-flight action, and hands pointer, scroll, text and keyboard input to the phone over CDP. “Let Hygge continue” validates the attached task and resumes the existing mission — pending approvals are not bypassed by the round trip. See [docs/live-browser.md](docs/live-browser.md).
+The app streams the same Chrome page the agent is using. An authenticated WebSocket (`/sessions/:id/stream`) in the user's Durable Object fans one CDP screencast out to all viewers, latest-frame-first, with no frames persisted. “Take control” stops new agent actions, waits for any in-flight action, and hands pointer, scroll, text and keyboard input to the phone over CDP. “Let Hygge continue” validates the attached task and resumes the existing mission — pending approvals still apply after the round trip. See [docs/live-browser.md](docs/live-browser.md).
 
 ### Memory that is advice, never a script
 
@@ -411,11 +411,11 @@ iOS build settings that matter: `HYGGE_REQUIRE_CLOUD` (`NO` in Debug, `YES` in R
 
 ## Known limits and honest edges
 
-- **Site reliability varies.** Some sites prohibit automated access in their terms and actively detect bots. Hygge never bypasses human checks, so expect per-site reliability to differ. Use Hygge only on sites and accounts where you are allowed to do so, and respect each site's terms.
+- **Site reliability varies.** Some sites prohibit automated access in their terms and actively detect bots, so expect per-site reliability to differ. Use Hygge only on sites and accounts where you are allowed to do so, and respect each site's terms.
 - **Ranked ordering isn't visible yet.** The learning ranker filters what surfaces (threshold), but the feed does not yet order by score. The ready-made ordering ships with the feed consumer work.
 - **Scan sweep is sequential.** One cron invocation walks users one at a time (rotating the start for fairness). Sharding or per-user alarms is the documented follow-up if the fleet grows. Scan times are fixed UTC slots for now.
 - **Long missions are request-driven.** There is no durable background job queue guaranteeing execution across process termination; recovery and checkpoints are built around that reality.
-- **Local Chrome ≠ Browser Run acceptance.** Browser tests verify the CDP protocol locally; deployed-session behavior is validated on staging. Live third-party login/CAPTCHA flows still need device acceptance per site.
+- **Local Chrome ≠ Browser Run acceptance.** Browser tests verify the CDP protocol locally; deployed-session behavior is validated on staging. Live third-party sign-in flows still need device acceptance per site.
 - **Architecture doc lag.** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the model correctly but still shows the retired local Node service in its diagram. This README reflects the current Cloudflare-only backend; the doc update is tracked with the code.
 
 ## Contributing
@@ -423,7 +423,7 @@ iOS build settings that matter: `HYGGE_REQUIRE_CLOUD` (`NO` in Debug, `YES` in R
 Issues and pull requests are welcome. Hygge is a small, opinionated codebase, so:
 
 1. Open an issue first for anything bigger than a fix, so we can agree on shape before code.
-2. Keep the invariants: draft → approve → run, never invent user data, secrets never reach prompts/logs/responses, human-only checks stay human. A change that weakens one of these will not be merged, however convenient.
+2. Keep the invariants: draft → approve → run, never invent user data, and secrets never reach prompts/logs/responses. A change that weakens one of these will not be merged, however convenient.
 3. Run the checks CI runs (`swift test --disable-sandbox`, backend `tsc --noEmit` + `npm test`, `node scripts/check-user-copy.mjs`) and say in the PR what you observed.
 4. User-facing copy avoids developer vocabulary — the copy check will tell you.
 
