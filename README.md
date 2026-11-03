@@ -33,10 +33,10 @@
 
 ## In 30 seconds
 
-- **Tell Hygge what work you enjoy** — dog walking, design, tutoring, handyman jobs, writing, almost anything.
-- **Hygge looks for it for you** on the websites you approve, using a real browser in the cloud. No site is too small or too obscure, because Hygge browses like a person instead of relying on special integrations.
+- **Tell Hygge what work you enjoy** — dog walking, design, tutoring, handyman jobs, writing, engineering, almost anything.
+- **Hygge finds it for you** on the job sites you approve, using a real browser in the cloud. No site is too small or too obscure, because Hygge browses like a person instead of relying on special integrations.
 - **You approve everything.** Sign-ups, applications, messages and bookings are always shown to you first. Nothing is ever sent, posted or booked in your name without your say-so.
-- **Hygge keeps up with the rest:** checking your calendar, adding confirmed work to it, drafting replies, and writing down what happened in a plain, honest journal.
+- **Hygge keeps up with the rest:** checking your calendar, adding confirmed work to it, drafting applications and replies, and logging everything in a plain, work journal.
 
 **Want to try it?** Join the public beta: [TestFlight — Hygge](https://testflight.apple.com/join/VQwBCNSP) (iPhone, iOS 17 or later). The beta is free.
 
@@ -46,7 +46,7 @@ Finding work is itself unpaid work.
 
 Paid opportunities are scattered across dozens of sites, job boards, subreddits and Facebook groups. Nobody has time to watch them all. And finding work is only half of it: managing accounts, filling in profiles, checking calendars, confirming bookings and keeping up messages before and after every gig is a second unpaid job.
 
-Underneath sits a bigger worry — being at the mercy of the next layoff round instead of having some control over your own income.
+Underneath sits a bigger worry — being at the mercy of the next layoff round instead of having some control and diversity of income.
 
 Hygge watches all of it for you, and only asks for your time when there is something worth deciding.
 
@@ -54,7 +54,7 @@ Hygge watches all of it for you, and only asks for your time when there is somet
 
 ### Find work
 
-Hygge builds one earnings profile from your skills and interests, then suggests places where that kind of work is hired. For every place you approve, Hygge can set up your account, help build your profile, and keep looking for work that fits your rate, your area and your time. You can also point Hygge at any website yourself — a local task board, a community group, a page you paste in.
+Hygge builds a work profile from your skills and interests, then suggests places where that kind of jobs is hired. For every place you approve, Hygge can set up your account, help build your profile, and keep looking for work that fits your rate, your area and your time. You can also point Hygge at any website yourself — a local task board, a Facebook group, a Subreddit, any page you paste in.
 
 ### Handle the boring parts
 
@@ -63,10 +63,9 @@ Hygge does not stop at finding a listing. With your approval it can draft applic
 ### Stay in control
 
 - **One home screen, one decision at a time.** Things that need you are pinned at the top. Everything else becomes a calm journal of what happened, in plain sentences.
-- **Watch Hygge work — and take over.** When Hygge is browsing for you, you can watch the real web page live inside the app. If a site asks for something only you can do — a CAPTCHA, a text-message code, an ID check — Hygge stops and hands you the controls. It never tries to sneak past those checks.
-- **A Hygge email address of your own.** Hygge can give you a `@usehygge.cc` address to use when signing up for work sites, so verification emails and sign-in codes land where Hygge can help with them. This address can only receive mail. Hygge never sends email as you.
+- **Watch Hygge work — and take over.** When Hygge is browsing for you, you can watch the real web page live inside the app. If a site asks for something only you can do — a CAPTCHA, a text-message code, an ID check — Hygge stops and hands you the controls.
+- **A Hygge email address of your own.** Hygge has its own `@usehygge.cc` address to use when signing up for work sites, so verification emails, site notifications and job alerts land where Hygge can help with them. You can also forward any email from your own inbox to Hygge, and ask it to handle it.
 - **Quiet by design.** Hygge only notifies you when something genuinely needs you, or when new matching work has been found. No digests, no nagging, no marketing.
-- **Pause any time.** One switch stops all looking and all browsing until you say otherwise.
 
 ## A day with Hygge
 
@@ -74,23 +73,13 @@ Hygge does not stop at finding a listing. With your approval it can draft applic
 
 You tell Hygge you love dogs, you are free weekday evenings, and your lowest rate is $20 an hour. Hygge suggests two pet-care sites and a local community board. You approve all three and tap “Create my account” on the first.
 
-Hygge opens the site in its cloud browser and starts signing you up. It needs your phone number for verification, so it asks you in chat — it would never invent one. You answer, handle one text-message code with Hygge's help, and approve the profile Hygge drafted from what you told it.
+Hygge opens the site in its cloud browser and starts signing you up, with its `@usehygge.cc` address. If it needs additional details from you - like a phone number, it asks you in chat. You answer, handle any human-only verifications needed, and approve the profile Hygge drafted from what you told it.
 
-From then on, Hygge checks your approved sites during the day. That evening it finds a weekend dog-walk that fits your rate and your neighborhood. You get one quiet notification. You read the draft reply Hygge wrote, tweak a word, and tap approve. Hygge sends it, and when the owner confirms, the walk lands in your calendar. Your journal gets one plain sentence about what happened.
+From then on, Hygge checks your approved sites several times daily. That evening it finds a weekend dog-walk that fits your rate and your neighborhood. You get a notification. You read the draft reply Hygge wrote, tweak a word, and tap approve. Hygge sends it, and when the owner confirms, the walk lands in your calendar. Your journal gets a sentence about what happened.
 
 ## Screenshots
 
 Design direction (product visuals):
-
-| Welcome | Getting to know you | Your approval |
-| --- | --- | --- |
-| <img src="docs/screenshots/welcome.png" alt="Welcome screen with the Hygge flame" width="240"> | <img src="docs/screenshots/onboarding.png" alt="Conversational onboarding" width="240"> | <img src="docs/screenshots/approval.png" alt="Approving work Hygge found" width="240"> |
-
-| Home | Conversation |
-| --- | --- |
-| <img src="docs/screenshots/home-feed.png" alt="Home feed with a pinned approval and journal" width="240"> | <img src="docs/screenshots/conversation.png" alt="Chatting with Hygge about found work" width="240"> |
-
-The app today (real captures from the current build, dark appearance):
 
 | Home feed | Watching Hygge work live |
 | --- | --- |
@@ -98,11 +87,11 @@ The app today (real captures from the current build, dark appearance):
 
 ## How it works, step by step
 
-1. **Tell Hygge what you're good at.** Onboarding is a short conversation — what work you enjoy, your lowest rate, roughly where and when. Everything else is learned gradually, and anything Hygge learns about you is shown to you for confirmation, never silently saved.
-2. **Approve where Hygge may look.** Hygge proposes sites that fit your interests, each with a short reason. Per site you can say *create my account*, *I already have an account*, or *not this site*. Sites you have not approved are never visited.
-3. **Hygge browses like a person.** A cloud browser opens the real website and works toward a clear goal — “get me set up here”, “find walks near me this weekend”. Hygge decides each step from what the page actually shows. There are no per-site scripts to break when a site changes its layout.
-4. **Hygge drafts, you approve.** Anything that would change something outside the app — joining a site, publishing a profile, applying, messaging, booking — is drafted first and shown to you with the exact wording. Consequential actions need a fresh, specific yes, every time.
-5. **Hygge remembers how sites work.** After a successful visit, Hygge writes down what worked (“listings are readable from the landing page”, “this button is labelled Join now”) as hints for next time. Hints make repeat visits faster. They are advice, never a rigid script — and shared hints only ever contain facts about websites, never anything about you.
+1. **Tell Hygge what you're good at.** Onboarding is a short conversation — what work you enjoy, your lowest rate, roughly where and when. Everything else is learned gradually, so the more you use it, the better it gets at finding work you love.
+2. **Approve where Hygge may look.** Hygge proposes job- and gig-sites that fit your interests, each with a short reason. For every suggestion, you can either tell Hygge to *create an account*, *Use an existing login*, or *dismiss it*. Hygge only browses sites you confirm.
+4. **Hygge browses like a person.** Your Hygge has its own private computer with internet, and interacts with websites the same way humans do. It doesn't depend on integrations, APIs or MCP servers. And you don't need to mess with connections or complex setup.
+5. **Hygge drafts, you approve.** Anything that would change something outside the Hygge app — joining a site, publishing a profile, applying, messaging, booking — is drafted first and shown to you with the exact wording. Nothing goes out in your name without your approval.
+6. **Hygge remembers how sites work.** After a successful visit, Hygge writes down what worked (“listings are readable from the landing page”, “this button is labelled Join now”) as hints for next time. Hints make repeat visits faster, and improves Hygge's ability to find work you love.
 
 ## Rules Hygge never breaks
 
@@ -110,16 +99,15 @@ These are enforced in code, not just promised in prompts:
 
 - **Nothing acts in your name without your approval.** Every state-changing task is drafted first and runs only after you approve it. Direct, unapproved runs are refused by the backend.
 - **Hygge never invents your information.** If a form needs something Hygge does not know — your phone number, your date of birth — it stops and asks you. It will not guess.
-- **Human-only checks stay human.** CAPTCHAs, two-factor codes, ID checks and payment steps pause the work and hand the live browser to you. They are never bypassed or automated around.
-- **Your site passwords stay secret.** Logins you save are stored encrypted on the server, under a key that belongs to your account alone. They are typed into login forms by the browser worker and never appear in the app, in logs, or in anything the AI models see. No screen or API can show them back.
-- **Honest money and time.** Earnings are counted only from real, witnessed work — never guessed from a listing's pay label. No work yet means “none yet”, not a flattering estimate. Time saved is always “about”, rounded down, with the math visible.
-- **Your data stays yours.** Each account gets its own isolated space on the server. Hygge never trains models on your data, and anything Hygge “learns” lives in your space, where it can be inspected and deleted.
+- **Your site passwords stay secret.** Any logins you save in the app are stored encrypted on the server, and only accessible to you. On your approval, the app's backend can use your password to log into respective job sites, but the actual passwords are never visible to anyone - not even to Hygge.
+- **Quick insights.** Earnings are counted from real, logged work. Time saved gives you an idea how much time you would've spent doing all the legwork Hygge does for you.
+- **Your data stays yours.** Each account gets its own isolated space on the server. Hygge will never sell your data or trains AI models on it, and anything Hygge “learns” lives in your space, where it can be inspected and deleted.
 
 ## Pricing
 
 The beta is free, and Hygge takes no cut of what you earn.
 
-Planned pricing once the beta ends: free until Hygge helps you earn $100 in a month, then **Plus at $9.99/month or $99/year** for unlimited earnings. The long-term goal is never a slice of every paycheck. It is becoming a trusted part of your personal finances, where partnerships, in-house services, member perks and sponsored opportunities do the rest.
+Planned pricing once the beta ends: free until Hygge helps you earn $100 in a month, then **Plus at $9.99/month or $99/year** for unlimited earnings. The long-term goal is never a slice of every paycheck. It is becoming a trusted ally in your personal finances, where partnerships, services, member perks and sponsored opportunities offer future revenue streams for us.
 
 ---
 
@@ -130,7 +118,7 @@ Planned pricing once the beta ends: free until Hygge helps you earn $100 in a mo
 - **Meta models do the real work.** Every browsing decision, onboarding reply, site suggestion and drafted message comes from Meta's Muse models, routed by phase: **Muse Spark 1.3** (`muse-spark-1.3`) for routine per-step decisions and extraction, escalating to **Muse Wonder 1.0** (`muse-wonder-1.0`) after failures or loops, for high-stakes submits, and for composing user-facing text. Both run in production today — check `curl https://api.usehygge.app/health`, which reports `llm: "live"` and the exact model IDs.
 - **It is live, not a demo harness.** Staging (`api-staging.usehygge.app`) and production (`api.usehygge.app`) are both deployed on Cloudflare Workers. The iOS beta is on [TestFlight](https://testflight.apple.com/join/VQwBCNSP). CI runs the Swift and backend test suites on every push and pull request, deploys staging from `main` only after tests pass, and health-checks the result. Production deploys are manual and health-checked the same way.
 - **Verified live, not claimed.** On a cold visit to Remote OK, the agent chose its own actions step by step (Spark 1.3, escalating to Wonder 1.0 after a failed click), extracted real job listings, decided it was done, and only then distilled site-memory hints. The observe → decide → act loop is covered by automated tests on both the Swift and TypeScript stacks, including a page-variant test that no canned navigation script could pass. A staging end-to-end script ([e2e-staging.mjs](backend/cloudflare/e2e-staging.mjs)) checks health, auth, two-user isolation, a vault canary that must never leak, the approval gate, live onboarding over SSE, site proposals and a real Browser Run discovery mission.
-- **Honest about its edges.** This README — and the docs it links to — say plainly what is live, what is built but deployment-gated, and what is still a foundation. See [Status: what is live vs. still cooking](#status-what-is-live-vs-still-cooking). Sample content in a fresh install is flagged as demo in the data model and disappears as soon as real work arrives; it is never uploaded to the server.
+- **Work in progress.** This README — and the docs it links to — say plainly what is live, what is built but deployment-gated, and what is still a foundation. See [Status: what is live vs. still cooking](#status-what-is-live-vs-still-cooking). Sample content in a fresh install is flagged as demo in the data model and disappears as soon as real work arrives; it is never uploaded to the server.
 
 ---
 
