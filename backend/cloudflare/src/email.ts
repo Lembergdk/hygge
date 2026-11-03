@@ -32,7 +32,8 @@ export type EmailKind = "verification" | "security_code" | "other";
 export type RoutingCountKind =
   | "received" | "dropped_unknown" | "dropped_malformed"
   | "verification" | "security_code" | "other"
-  | "link_follow_ok" | "link_follow_failed" | "delivery_failed";
+  | "link_follow_ok" | "link_follow_failed" | "delivery_failed"
+  | "owner_instruction";
 
 // ---- address format ----------------------------------------------------
 
@@ -423,6 +424,16 @@ export function senderDomainOf(from: string): string {
   return at >= 0 ? addr.slice(at + 1).replace(/[>\s]+$/, "") : "";
 }
 
+/// The sender's bare address, normalized. Display names never count
+/// toward identity — only this, plus an aligned authentication pass.
+export function senderEmailOf(from: string): string {
+  const raw = String(from ?? "");
+  const angle = raw.match(/<([^<>]+)>/);
+  const addr = (angle ? angle[1] : raw).trim().toLowerCase().replace(/[>\s]+$/, "");
+  const match = addr.match(/[^\s<>]+@[^\s<>]+/);
+  return match ? match[0] : "";
+}
+
 export function hostOf(url: string): string {
   try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; }
 }
@@ -496,6 +507,81 @@ export function isSafeVerificationLink(url: string): boolean {
   } catch { return false; }
 }
 
+// ---- triage: what the mail mentions, and owner commands ------------------
+
+export type EmailHighlightKind = "job_alert" | "client_message" | "booking" | "payment" | "account_notice";
+
+export interface EmailHighlight {
+  kind: EmailHighlightKind;
+  /// Plain wording for people. Always a mention, never a claim that
+  /// the thing happened — mail text is someone else's words.
+  label: string;
+}
+
+const HIGHLIGHT_RULES: { kind: EmailHighlightKind; label: string; pattern: RegExp }[] = [
+  { kind: "client_message", label: "Someone may have messaged you",
+    pattern: /sent you a message|new message|unread message|message from|wrote to you|you have (a|\d+) new message/ },
+  { kind: "job_alert", label: "Possible new work mentioned",
+    pattern: /new (job|jobs|gig|gigs|listing|listings|request|requests)|jobs? near you|just posted|new .* (job|gig|listing|request)s? (were|was|just)|matching (jobs?|work)/ },
+  { kind: "booking", label: "A booking is mentioned",
+    pattern: /(booking|reservation) (is )?(confirmed|request|updated|cancelled|canceled)|new booking|booking confirmed/ },
+  { kind: "payment", label: "A payment is mentioned",
+    pattern: /you (received|got) a payment|payment (sent|received|processed|on its way)|payout|you'?ve been paid/ },
+  { kind: "account_notice", label: "An account notice",
+    pattern: /password (was )?(changed|reset|updated)|new sign[- ]in|sign[- ]in from|account (suspended|locked|deactivated)/ },
+];
+
+/// Deterministic, keyword-level relevance scan over mail Hygge
+/// already holds. No model in this path: the same mail always
+/// produces the same mentions, and nothing is invented.
+export function extractEmailHighlights(parsed: ParsedEmail): EmailHighlight[] {
+  const hay = `${parsed.subject}\n${parsed.text}`.toLowerCase();
+  return HIGHLIGHT_RULES.filter((r) => r.pattern.test(hay)).map(({ kind, label }) => ({ kind, label }));
+}
+
+export interface OwnerEmailSite { siteID: string; name: string; domain: string }
+
+export type OwnerEmailCommand =
+  | { type: "scan"; siteID: string }
+  | { type: "readd"; siteID: string }
+  | { type: "add"; domain: string }
+  | { type: "pause" }
+  | { type: "resume" };
+
+function ownerCommandFromLine(rawLine: string, sites: OwnerEmailSite[]): OwnerEmailCommand | null {
+  let line = rawLine.trim().toLowerCase().replace(/[.!]+$/, "");
+  if (line.startsWith("please ")) line = line.slice("please ".length);
+  if (!line) return null;
+  if (/\bdon'?t\b|\bdo not\b|\bnever\b|n't\b/.test(line)) return null;
+  if (line === "pause" || line.startsWith("pause ") || line.startsWith("pause,")) return { type: "pause" };
+  if (line === "resume" || line === "unpause" || line.startsWith("resume ") || line.startsWith("start again")) return { type: "resume" };
+  const site = sites.find((s) => (s.name && line.includes(s.name.toLowerCase())) || (s.domain && line.includes(s.domain)));
+  const starts = (...verbs: string[]) => verbs.some((v) => line === v || line.startsWith(`${v} `) || line.startsWith(`${v}:`));
+  if (site && starts("re-add", "readd", "add back", "bring back", "start watching", "watch", "join", "track", "add")) {
+    return { type: "readd", siteID: site.siteID };
+  }
+  if (site && starts("scan", "search", "check", "look")) return { type: "scan", siteID: site.siteID };
+  if (starts("add", "join", "track")) {
+    const m = line.match(/(?:https?:\/\/)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})/);
+    if (m && !m[1].includes("@")) return { type: "add", domain: m[1] };
+  }
+  return null;
+}
+
+/// A strict reading of mail the owner sent Hygge: the subject or
+/// the first body line may carry one plain instruction. Forwarded
+/// mail never counts (its words are someone else's), and anything
+/// that is not an anchored command is just mail. Callers must only
+/// run this for a sender proven to be the owner.
+export function parseOwnerEmailCommand(
+  input: { subject: string; text: string }, sites: OwnerEmailSite[],
+): OwnerEmailCommand | null {
+  const subject = String(input.subject ?? "").trim();
+  if (/^(fwd|fw)\s*:/i.test(subject)) return null;
+  const firstLine = String(input.text ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  return ownerCommandFromLine(firstLine, sites) ?? ownerCommandFromLine(subject, sites);
+}
+
 // ---- summaries (never carry codes or token links) ------------------------
 
 export interface EmailSummary {
@@ -560,6 +646,14 @@ export interface InboundEmailDelivery {
   summary: EmailSummary;
   code: string | null;
   verification: VerificationLinkOutcome | null;
+  /// Sender triage facts for the owning user's object. Owner
+  /// status is already decided here (aligned authentication pass
+  /// + a verified address); the object never re-derives identity.
+  triage?: {
+    senderEmail: string;
+    ownerVerified: boolean;
+    highlights: EmailHighlight[];
+  };
 }
 
 export interface InboundResult {
@@ -574,6 +668,9 @@ export interface InboundDeps {
   deliver: (userId: string, delivery: InboundEmailDelivery) => Promise<void>;
   followLink?: (url: string) => Promise<{ ok: boolean; status: number | null }>;
   now?: () => Date;
+  /// The account owner's verified email addresses. Without this,
+  /// no sender can ever count as the owner (fail closed).
+  verifiedEmailsFor?: (userId: string) => Promise<string[]>;
 }
 
 async function defaultFollowLink(url: string): Promise<{ ok: boolean; status: number | null }> {
@@ -632,12 +729,25 @@ export async function processInboundEmail(
       verification = { followed: false, ok: false, status: null, host: hostOf(link) };
     }
   }
+  // Owner recognition, fail closed: the exact verified address AND
+  // the aligned authentication pass the verification path already
+  // requires. A forged From header alone never counts.
+  const senderEmail = senderEmailOf(parsed.from);
+  let ownerVerified = false;
+  if (parsed.senderAuthenticated && senderEmail && deps.verifiedEmailsFor) {
+    try {
+      const verified = await deps.verifiedEmailsFor(owner.userId);
+      ownerVerified = verified.some((v) => String(v).trim().toLowerCase() === senderEmail);
+    } catch { /* lookup trouble: not the owner */ }
+  }
+  if (ownerVerified) await count("owner_instruction");
   const delivery: InboundEmailDelivery = {
     kind,
     receivedAt: now.toISOString(),
     summary: summarizeEmail(parsed, kind, code),
     code,
     verification,
+    triage: { senderEmail, ownerVerified, highlights: extractEmailHighlights(parsed) },
   };
   await count(kind);
   try {
@@ -773,6 +883,22 @@ export async function handleEmailMessage(message: ForwardableEmailLike, env: Env
     {
       db: d1EmailAddressDb(env.DB),
       domain: emailDomain(env),
+      verifiedEmailsFor: async (userId) => {
+        const out = new Set<string>();
+        try {
+          const user = await env.DB.prepare("SELECT email, contact_email FROM users WHERE id = ?1")
+            .bind(userId).first<Record<string, unknown>>();
+          if (user?.email) out.add(String(user.email).toLowerCase());
+          if (user?.contact_email) out.add(String(user.contact_email).toLowerCase());
+        } catch { /* tables absent in a partial deploy: no owner */ }
+        try {
+          const rows = await env.DB.prepare(
+            "SELECT email FROM linked_methods WHERE user_id = ?1 AND method = 'email' AND email_verified = 1",
+          ).bind(userId).all<Record<string, unknown>>();
+          for (const row of rows.results ?? []) if (row.email) out.add(String(row.email).toLowerCase());
+        } catch { /* as above */ }
+        return [...out];
+      },
       deliver: async (userId, delivery) => {
         const stub = sandboxFor(env, userId);
         const res = await stub.fetch(new Request("https://user-sandbox/email/inbound", {

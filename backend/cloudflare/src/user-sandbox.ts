@@ -21,7 +21,7 @@ import {
   type SharedSkill, type SkillCandidate, type SkillOutcome,
 } from "./skills.ts";
 import {
-  attachEmailToTasks, takeFreshCode,
+  attachEmailToTasks, parseOwnerEmailCommand, takeFreshCode,
   type InboundEmailDelivery,
 } from "./email.ts";
 import {
@@ -34,7 +34,7 @@ import {
 } from "./session-profile.ts";
 import {
   CRON_SLOTS_UTC, ScanStore, categoriesToReopen, clearStaleEpisode,
-  createSqliteScanDb, domainOfUrl, effectiveTickNow, ensureScanSchema, extractProfile, runScheduledTick,
+  createSqliteScanDb, domainOfUrl, effectiveTickNow, ensureScanSchema, extractProfile, isSiteApproved, runScheduledTick,
   scanSiteFromRow, type ProbeMissionInput, type ScanDeps, type ScanMissionInput, type ScanMissionOutcome,
   type ScanProfile, type ScanSite,
 } from "./scan.ts";
@@ -167,7 +167,17 @@ export class UserSandbox extends DurableObject<Env> {
         subject TEXT NOT NULL, mail_date TEXT, kind TEXT NOT NULL,
         summary TEXT NOT NULL, actionable TEXT NOT NULL DEFAULT '[]',
         attachments TEXT NOT NULL DEFAULT '[]',
+        relation TEXT NOT NULL DEFAULT 'unknown',
+        decision TEXT NOT NULL DEFAULT 'none',
+        highlights TEXT NOT NULL DEFAULT '[]',
+        site_id TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      -- The user's remembered answer per sender domain, so unknown
+      -- senders are only ever asked about once.
+      CREATE TABLE IF NOT EXISTS email_sender_rules (
+        sender_domain TEXT PRIMARY KEY, choice TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE TABLE IF NOT EXISTS session_profiles (
         domain TEXT PRIMARY KEY,
@@ -177,6 +187,19 @@ export class UserSandbox extends DurableObject<Env> {
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+    // Existing inboxes gain the triage columns in place; old rows
+    // default to "unknown/none" so history is never re-flagged.
+    const summaryColumns = new Set(
+      ([...ctx.storage.sql.exec("PRAGMA table_info(email_summaries)")] as unknown as { name: unknown }[])
+        .map((c) => String(c.name)));
+    for (const [name, def] of [
+      ["relation", "TEXT NOT NULL DEFAULT 'unknown'"],
+      ["decision", "TEXT NOT NULL DEFAULT 'none'"],
+      ["highlights", "TEXT NOT NULL DEFAULT '[]'"],
+      ["site_id", "TEXT"],
+    ] as const) {
+      if (!summaryColumns.has(name)) ctx.storage.sql.exec(`ALTER TABLE email_summaries ADD COLUMN ${name} ${def}`);
+    }
     // Brief 01: per-user state tables (feed items, messages, profile,
     // sites, opportunities, applications, proposals, account states,
     // journal events, beliefs, search evidence). tasks/credentials/
@@ -560,15 +583,187 @@ export class UserSandbox extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM email_codes WHERE received_at < ?", cutoff);
   }
 
+  /// Sender triage for one delivery: who is this to the user, and
+  /// what happens without asking? Owner status was decided before
+  /// delivery (email.ts); site matching and the user's remembered
+  /// sender choices live here, beside the state they describe.
+  private triageEmail(delivery: InboundEmailDelivery): {
+    relation: "owner" | "site" | "unknown";
+    decision: string;
+    site: ScanSite | null;
+    sites: ScanSite[];
+    accountStates: Record<string, string>;
+  } {
+    const store = this.stateStore();
+    const sites = store.list("sites")
+      .map((row) => scanSiteFromRow(String(row.id), row.data))
+      .filter((s): s is ScanSite => s !== null);
+    const accountStates: Record<string, string> = {};
+    for (const row of store.list("accountStates")) {
+      const data = row.data as Record<string, unknown>;
+      accountStates[String(data.siteID ?? row.id)] = String(data.state ?? "");
+    }
+    const senderDomain = delivery.summary.senderDomain.toLowerCase();
+    const sameSite = (a: string, b: string) => Boolean(a && b) && (a === b || a.endsWith(`.${b}`));
+    const site = sites.find((candidate) => sameSite(senderDomain, domainOfUrl(candidate.startURLString))) ?? null;
+    const tracked = site !== null
+      && ["watching", "profileLive", "hasAccount", "joining", "needsVerification"].includes(accountStates[site.siteID] ?? "");
+    const ruleRows = [...this.ctx.storage.sql.exec(
+      "SELECT choice FROM email_sender_rules WHERE sender_domain = ?", senderDomain)] as Row[];
+    const rule = ruleRows.length ? String(ruleRows[0].choice) : null;
+
+    const relation = delivery.triage?.ownerVerified ? "owner" : tracked ? "site" : "unknown";
+    let decision = "none";
+    if (delivery.kind === "other") {
+      if (relation === "owner") decision = "work";
+      else if (rule) decision = rule;
+      else if (relation === "site") decision = "work";
+      else decision = "pending";
+    }
+    return { relation, decision, site, sites, accountStates };
+  }
+
+  private journalEmail(receivedAt: string, sentence: string, detail: string, siteID: string | null) {
+    const journalId = crypto.randomUUID();
+    this.stateStore().upsert("journalEvents", journalId, {
+      id: journalId,
+      occurredAt: receivedAt,
+      kind: "filedEmail",
+      sentence,
+      detail,
+      siteID, applicationID: null, grossAmount: null,
+      currencyCode: "USD", listingsChecked: 0,
+    }, receivedAt);
+  }
+
+  /// An email-triggered look for work runs the same guarded tick as
+  /// the schedule (consent states, web-access checks, cadence caps),
+  /// never a side channel around them.
+  private scheduleEmailScanTick(after?: (scannedSiteIDs: string[]) => void) {
+    const hour = new Date().getUTCHours();
+    const slot = hour < 13 ? 0 : hour < 19 ? 1 : 2;
+    this.ctx.waitUntil((async () => {
+      try {
+        const summary = await this.exclusive(() =>
+          runScheduledTick(this.scanDeps(this.browser()), { slot, now: new Date() }));
+        this.schedulePush(planTickNotifications(summary));
+        after?.(summary.scanned.map((run: any) => String(run.siteId ?? run.siteID ?? "")));
+      } catch { /* the next scheduled slot still runs */ }
+    })());
+  }
+
+  /// Owner mail carrying an instruction, already sender-proven.
+  /// Reads and pause/resume run at once; joining a place restores
+  /// its Home-screen suggestion (the app owns the signup itself:
+  /// email choice and login asks live there). Returns the journal
+  /// sentence, or null when the mail held no instruction.
+  private runOwnerEmailCommand(
+    delivery: InboundEmailDelivery,
+    triage: ReturnType<UserSandbox["triageEmail"]>,
+  ): string | null {
+    const s = delivery.summary;
+    const store = this.stateStore();
+    const command = parseOwnerEmailCommand(
+      { subject: s.subject, text: s.summary },
+      triage.sites.map((site) => ({ siteID: site.siteID, name: site.name, domain: domainOfUrl(site.startURLString) })),
+    );
+    if (!command) return null;
+    const siteByID = (id: string) => triage.sites.find((site) => site.siteID === id) ?? null;
+    const restoreSuggestion = (site: ScanSite) => {
+      const proposals = store.list("proposals");
+      const existing = proposals.find((row) => String((row.data as any).siteID ?? "") === site.siteID);
+      if (existing) {
+        const data = { ...(existing.data as Record<string, unknown>), status: "proposed" };
+        store.upsert("proposals", String(existing.id), data);
+      } else {
+        const id = crypto.randomUUID();
+        store.upsert("proposals", id, {
+          id, siteID: site.siteID, rationale: "You asked me to add this place.",
+          payPattern: "Paid per job, rates vary by listing",
+          dataShared: "Your name, photo and profile text",
+          verification: "Email confirmation; a bot check may need you",
+          status: "proposed",
+        });
+      }
+      const state = triage.accountStates[site.siteID] ?? "";
+      if (state === "stopped" || state === "disconnected" || state === "") {
+        store.upsert("accountStates", site.siteID, { siteID: site.siteID, state: "proposed" });
+      }
+    };
+
+    switch (command.type) {
+      case "pause":
+      case "resume": {
+        const row = store.get("profile", PROFILE_ROW_ID);
+        const data = { ...((row?.data ?? {}) as Record<string, unknown>), isPaused: command.type === "pause" };
+        store.upsert("profile", PROFILE_ROW_ID, data);
+        return command.type === "pause"
+          ? "You asked by email, so I've paused. Nothing will be searched, sent, or booked until you resume."
+          : "You asked by email, so I'm back on. I'll tell you in the morning — sooner if something needs you.";
+      }
+      case "scan": {
+        const site = siteByID(command.siteID);
+        if (!site) return null;
+        if (!isSiteApproved(triage.accountStates[site.siteID] ?? "")) {
+          return `You asked by email to check ${site.name}, but you're not set up there yet, so there's nothing to search.`;
+        }
+        const receivedAt = delivery.receivedAt;
+        const detail = s.summary;
+        this.scheduleEmailScanTick((scanned) => {
+          this.journalEmail(receivedAt, scanned.includes(site.siteID) || scanned.includes(site.id)
+            ? `You asked by email, so I checked ${site.name} for new work.`
+            : `You asked by email to check ${site.name}; it had already been checked in this slot.`,
+          detail, site.siteID);
+        });
+        return "queued"; // journal written when the look actually happens
+      }
+      case "readd": {
+        const site = siteByID(command.siteID);
+        if (!site) return null;
+        const state = triage.accountStates[site.siteID] ?? "";
+        if (isSiteApproved(state)) return `You asked by email about ${site.name} — you're already set up there.`;
+        restoreSuggestion(site);
+        return `You asked by email to add ${site.name} — it's back on your Home screen to start.`;
+      }
+      case "add": {
+        const existing = triage.sites.find((site) => domainOfUrl(site.startURLString) === command.domain);
+        if (existing) {
+          if (isSiteApproved(triage.accountStates[existing.siteID] ?? "")) {
+            return `You asked by email about ${existing.name} — you're already set up there.`;
+          }
+          restoreSuggestion(existing);
+          return `You asked by email to add ${existing.name} — it's on your Home screen to start.`;
+        }
+        const profileRow = store.get("profile", PROFILE_ROW_ID);
+        const interests = (((profileRow?.data as any)?.profile?.interests ?? []) as unknown[]).map(String);
+        const label = command.domain.split(".")[0] || command.domain;
+        const name = label.charAt(0).toUpperCase() + label.slice(1);
+        const site = {
+          id: command.domain, name,
+          startURLString: `https://${command.domain}`,
+          category: interests[0] ?? "localGig",
+          goalTemplate: "Find current opportunities on this site that match my earnings profile and extract their title, pay, location and link.",
+        };
+        store.upsert("sites", site.id, site);
+        restoreSuggestion({ ...site, siteID: site.id } as unknown as ScanSite);
+        return `You asked by email to add ${name} — it's on your Home screen to start.`;
+      }
+    }
+  }
+
   private async handleEmailInbound(delivery: InboundEmailDelivery) {
     this.pruneExpiredEmailCodes();
     const summaryId = crypto.randomUUID();
     const s = delivery.summary;
+    const triage = this.triageEmail(delivery);
+    const highlightLabels = (delivery.triage?.highlights ?? []).map((h) => h.label);
     this.ctx.storage.sql.exec(
-      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       summaryId, s.sender, s.senderDomain, s.subject, s.date, s.kind,
       s.summary, JSON.stringify(s.actionableItems), JSON.stringify(s.attachments),
+      triage.relation, triage.decision, JSON.stringify(highlightLabels),
+      triage.relation === "site" ? (triage.site?.siteID ?? null) : null,
     );
     if (delivery.code) {
       const blob = await vault.seal(await this.dek(), delivery.code, this.emailCodeAAD(s.senderDomain));
@@ -591,21 +786,42 @@ export class UserSandbox extends DurableObject<Env> {
         this.ctx.waitUntil(this.runInteractiveTask(task, this.browser()));
       }
     }
-    // Other site mail is filed to the journal (Brief 01 state). The
-    // sentence is summary-level only — no body, no code, no link.
-    if (delivery.kind === "other") {
-      const journalId = crypto.randomUUID();
-      this.stateStore().upsert("journalEvents", journalId, {
-        id: journalId,
-        occurredAt: delivery.receivedAt,
-        kind: "filedEmail",
-        sentence: `Filed mail from ${s.senderDomain || "a site"}: ${s.subject || "(no subject)"}`,
-        detail: s.summary,
-        siteID: null, applicationID: null, grossAmount: null,
-        currencyCode: "USD", listingsChecked: 0,
-      }, delivery.receivedAt);
+    // Other mail is journaled summary-level only — no body, no
+    // code, no link — and acted on by relation:
+    // - a watched place mentioning something relevant starts a
+    //   guarded look for work;
+    // - the owner's own mail is read for one plain instruction;
+    // - an unknown sender waits for the user's call (decision
+    //   "pending" drives the Home-screen card), unless a remembered
+    //   choice already answered it. "ignore" files silently.
+    if (delivery.kind === "other" && triage.decision !== "ignore") {
+      const detail = [...highlightLabels, s.summary].filter(Boolean).join(" ");
+      if (triage.relation === "owner") {
+        const sentence = this.runOwnerEmailCommand(delivery, triage);
+        if (sentence && sentence !== "queued") {
+          this.journalEmail(delivery.receivedAt, sentence, detail, null);
+        } else if (!sentence) {
+          this.journalEmail(delivery.receivedAt,
+            `Filed mail from your address: ${s.subject || "(no subject)"}`, detail, null);
+        }
+      } else if (triage.relation === "site" && triage.site) {
+        this.journalEmail(delivery.receivedAt,
+          `Filed mail from ${triage.site.name}: ${s.subject || "(no subject)"}`,
+          detail, triage.site.siteID);
+        if (triage.decision === "work" && highlightLabels.length > 0) {
+          this.scheduleEmailScanTick();
+        }
+      } else if (triage.decision === "pending") {
+        this.journalEmail(delivery.receivedAt,
+          `Mail from ${s.senderDomain || "a new sender"} is waiting for your call: ${s.subject || "(no subject)"}`,
+          detail, null);
+      } else {
+        this.journalEmail(delivery.receivedAt,
+          `Filed mail from ${s.senderDomain || "a site"}: ${s.subject || "(no subject)"}`,
+          detail, null);
+      }
     }
-    return { filed: true, kind: delivery.kind };
+    return { filed: true, kind: delivery.kind, relation: triage.relation, decision: triage.decision };
   }
 
   private recordOutcome(domain: string, kind: string, trace: any[], extractedItems: string[], success: boolean) {
@@ -1456,7 +1672,7 @@ export class UserSandbox extends DurableObject<Env> {
       }
       if (request.method === "GET" && parts.join("/") === "email/messages") {
         const rows = [...this.ctx.storage.sql.exec(
-          "SELECT id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, created_at FROM email_summaries ORDER BY created_at DESC LIMIT 100",
+          "SELECT id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, created_at FROM email_summaries ORDER BY created_at DESC LIMIT 100",
         )] as Row[];
         return json({
           messages: rows.map((r) => ({
@@ -1466,8 +1682,34 @@ export class UserSandbox extends DurableObject<Env> {
             actionableItems: JSON.parse(String(r.actionable)),
             attachments: JSON.parse(String(r.attachments)),
             filedAt: r.created_at,
+            relation: r.relation ?? "unknown",
+            decision: r.decision ?? "none",
+            highlights: JSON.parse(String(r.highlights ?? "[]")),
+            siteID: r.site_id ?? null,
           })),
         });
+      }
+      // The user's call on one sender, remembered where mail
+      // arrives so the same sender is never asked about twice.
+      // Choices: "work" (read for anything relevant), "file"
+      // (journal only), "ignore" (silent). Waiting mail from that
+      // sender takes the choice immediately.
+      if (request.method === "POST" && parts.join("/") === "email/decision") {
+        const senderDomain = String(body?.senderDomain ?? "").trim().toLowerCase();
+        const choice = String(body?.choice ?? "");
+        if (!senderDomain || !["work", "file", "ignore"].includes(choice)) {
+          return json({ error: "senderDomain and a choice of work, file, or ignore are required" }, 400);
+        }
+        this.ctx.storage.sql.exec(
+          `INSERT INTO email_sender_rules (sender_domain, choice) VALUES (?, ?)
+           ON CONFLICT(sender_domain) DO UPDATE SET choice = excluded.choice, updated_at = datetime('now')`,
+          senderDomain, choice,
+        );
+        this.ctx.storage.sql.exec(
+          "UPDATE email_summaries SET decision = ? WHERE sender_domain = ? AND decision = 'pending'",
+          choice, senderDomain,
+        );
+        return json({ remembered: true });
       }
       if (request.method === "GET" && parts.join("/") === "email/codes/pending") {
         this.pruneExpiredEmailCodes();

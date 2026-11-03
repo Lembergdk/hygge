@@ -841,6 +841,39 @@ final class AppStore {
         }
     }
 
+    /// Unknown senders whose mail is waiting for the user's call,
+    /// newest example per sender. Drives the Home screen cards.
+    var pendingEmailDecisions: [FiledEmailSummary] {
+        var seen: Set<String> = []
+        return filedEmailSummaries.filter { mail in
+            guard mail.decision == "pending", !mail.senderDomain.isEmpty,
+                  !seen.contains(mail.senderDomain) else { return false }
+            seen.insert(mail.senderDomain)
+            return true
+        }
+    }
+
+    var pendingEmailSenderDomains: [String] { pendingEmailDecisions.map(\.senderDomain) }
+
+    /// The user's answer for one unknown sender. It is remembered
+    /// where the mail arrives, so the same sender is never asked
+    /// about twice.
+    func decideEmailSender(domain: String, choice: String) async {
+        // The card leaves at tap time; the remembered choice is then
+        // confirmed by a fresh inbox (a failed save brings it back).
+        filedEmailSummaries = filedEmailSummaries.map { mail in
+            guard mail.senderDomain == domain, mail.decision == "pending" else { return mail }
+            var copy = mail
+            copy.decision = choice
+            return copy
+        }
+        if let fresh = await backend.decideEmailSender(domain: domain, choice: choice) {
+            filedEmailSummaries = fresh
+        } else {
+            await refreshHyggeEmail()
+        }
+    }
+
     /// The moment the user chooses a Hygge address: allocated once
     /// by the backend, then shown only to them here for forwarding.
     func chooseHyggeEmailAddress() async {
@@ -1249,6 +1282,7 @@ final class AppStore {
     /// Urgent decisions only. Optional site suggestions never inflate this.
     var needsYouCount: Int {
         tasks.filter { $0.status == .awaitingApproval || $0.needsChatHelp }.count
+            + pendingEmailDecisions.count
     }
 
     /// Value waiting in pending drafts, for the calm header number.
@@ -1282,9 +1316,11 @@ final class AppStore {
 
     // MARK: - Beliefs (propose → confirm; never silent)
 
-    func proposeBelief(sentence: String, source: Belief.Source, confidence: Double) {
-        beliefs.propose(sentence: sentence, source: source, confidence: confidence)
-        save()
+    @discardableResult
+    func proposeBelief(sentence: String, source: Belief.Source, confidence: Double) -> Bool {
+        let added = beliefs.propose(sentence: sentence, source: source, confidence: confidence)
+        if added { save() }
+        return added
     }
     func clearProfileSkills() { profile.skills = []; save() }
     func confirmBelief(id: UUID) { beliefs.confirm(proposalID: id); save() }
@@ -1343,7 +1379,133 @@ final class AppStore {
             }
             let lines = latest.dropped.prefix(5).map { "“\($0.title)” — \($0.reason)" }.joined(separator: "; ")
             return "On \(siteName(id: latest.siteID)) I skipped: \(lines)."
+        case .scanSite(let siteID):
+            return scanSiteFromChat(siteID: siteID)
+        case .joinSite(let siteID):
+            guard let site = site(id: siteID) else { return "I don't have that site yet — tell me its address, like “add pawshake.com”." }
+            return joinSiteFromChat(site)
+        case .addSite(let domain):
+            return addSiteFromChat(domain: domain)
+        case .checkEmail:
+            return await checkEmailFromChat()
         }
+    }
+
+    /// Chat "scan <site>": start a real read-only search now, or say
+    /// plainly why not. The reply is written after the search task
+    /// exists, so it can never promise work that was not started.
+    private func scanSiteFromChat(siteID: String) -> String {
+        guard let site = site(id: siteID) else {
+            return "I don't have that site yet — tell me “add <site address>” and I'll set it up first."
+        }
+        if isPaused {
+            return "I'm paused right now, so I can't look yet. Say “resume”, then ask me again and I'll check \(site.name) straight away."
+        }
+        if tasks.contains(where: { $0.siteID == siteID && $0.kind == .discover && ($0.status == .running || $0.status == .approved) }) {
+            return "I'm already looking on \(site.name) — anything that fits will land on your Home screen."
+        }
+        let state = accountStates[siteID] ?? .unknown
+        if state == .joining || state == .needsVerification {
+            return "I'm still setting up \(site.name). Once that's finished I can look for work there."
+        }
+        guard state.isWatching || state == .hasAccount else {
+            return "You're not set up on \(site.name) yet, so there's nothing to search. Say “add \(site.domain)” and I'll join it first."
+        }
+        var task = AgentTaskFactory.discoverTask(profile: profile, site: site)
+        attachCredential(&task)
+        attachSkill(&task)
+        tasks.append(task)
+        save()
+        let taskID = task.id
+        Task { await approveAndRun(taskID: taskID) }
+        return "Looking on \(site.name) now. Anything that fits will appear on your Home screen, and the check will be in your journal."
+    }
+
+    /// Chat "add <known site>" / "re-add <site>": restore the site's
+    /// suggestion if it was dismissed or stopped, then start joining.
+    /// The user's sentence is the consent for this one site.
+    private func joinSiteFromChat(_ site: TargetSite) -> String {
+        let state = accountStates[site.id] ?? .unknown
+        if state.isWatching || state == .hasAccount {
+            return "You're already set up on \(site.name) — I'm watching it for work."
+        }
+        if state == .joining || state == .needsVerification {
+            return "\(site.name) is already being set up. I'll let you know if I need you."
+        }
+        if proposals.contains(where: { $0.siteID == site.id && ($0.status == .approvedSignup || $0.status == .approvedHasAccount) }),
+           tasks.contains(where: { $0.siteID == site.id && $0.kind == .signup && ($0.status == .running || $0.status == .approved || $0.status == .needsHuman) }) {
+            return "\(site.name) is already being set up. I'll let you know if I need you."
+        }
+        let proposalID: UUID
+        if let index = proposals.firstIndex(where: { $0.siteID == site.id }) {
+            let existing = proposals[index]
+            if existing.status == .dismissed { undoSiteDismissal(proposalID: existing.id) }
+            else if existing.status == .approvedSignup || existing.status == .approvedHasAccount {
+                // An earlier join attempt ended without an account; the
+                // fresh ask reopens the suggestion so joining can restart.
+                proposals[index].status = .proposed
+            }
+            proposalID = existing.id
+        } else {
+            let details = ConsentCatalog.details(for: site)
+            let proposal = ProposedSite(siteID: site.id, rationale: "You asked me to add this place.",
+                                        payPattern: details.pay, dataShared: details.data, verification: details.verification)
+            proposals.append(proposal)
+            proposalID = proposal.id
+        }
+        // A stopped/disconnected site blocks suggestions; the user's own
+        // ask is what unblocks it, and joining re-decides the state.
+        if state.blocksSuggestions || accountStates[site.id] == nil {
+            accountStates[site.id] = .proposed
+        }
+        save()
+        let hasAccount = credential(forDomain: site.domain) != nil
+            || sessionProfile(forDomain: site.domain)?.hasProfile == true
+        approveProposal(proposalID: proposalID, alreadyHasAccount: hasAccount)
+        if let task = tasks.last(where: { $0.siteID == site.id && $0.kind == .signup }),
+           task.status == .needsHuman, task.help?.kind == .credentials {
+            return "One thing first: connect your \(site.name) login in the card above, and I'll carry on from there."
+        }
+        if isPaused {
+            return "Saved for later — I'm paused, so joining \(site.name) will wait until you resume."
+        }
+        return "Joining \(site.name) now. I'll work it out on the live site and let you know if I need you."
+    }
+
+    /// Chat "add <address>": a known address joins that site; a new
+    /// address is added to the site list first, then joined.
+    private func addSiteFromChat(domain: String) -> String {
+        if let existing = sites.first(where: { $0.domain == domain || $0.id == domain }) {
+            return joinSiteFromChat(existing)
+        }
+        let label = domain.split(separator: ".").first.map(String.init) ?? domain
+        let name = label.prefix(1).uppercased() + label.dropFirst()
+        addSite(name: name, urlOrDomain: domain, category: profile.interests.first ?? .localGig)
+        guard let site = sites.first(where: { $0.domain == domain }) else {
+            return lastMessage ?? "That doesn't look like a site address I can use."
+        }
+        return joinSiteFromChat(site)
+    }
+
+    /// Chat "check your email": report only what the inbox actually
+    /// holds, refreshed at ask time.
+    private func checkEmailFromChat() async -> String {
+        await refreshHyggeEmail()
+        guard hyggeEmailAddress != nil else {
+            return "Your Hygge email isn't set up yet. You'll find it in your profile, under Hygge email."
+        }
+        guard let latest = filedEmailSummaries.first else {
+            return "Nothing has arrived in your Hygge inbox yet."
+        }
+        var reply = "Latest in your inbox: “\(latest.subject)” from \(latest.senderDomain)."
+        if filedEmailSummaries.count > 1 {
+            reply += " There are \(filedEmailSummaries.count) filed in all — they're listed under Hygge email in your profile."
+        }
+        let deciding = pendingEmailSenderDomains
+        if !deciding.isEmpty {
+            reply += " \(deciding.count == 1 ? "One sender is" : "\(deciding.count) senders are") new to me — I've put \(deciding.count == 1 ? "it" : "them") on your Home screen for your call."
+        }
+        return reply
     }
 
     /// Full reconciliation: credential, proposals, site memory, pending

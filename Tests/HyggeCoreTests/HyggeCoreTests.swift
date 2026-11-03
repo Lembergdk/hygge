@@ -331,6 +331,16 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertTrue(book.beliefs.isEmpty)
     }
 
+    func testBeliefProposalReportsOnlyNewPendingBeliefs() {
+        var book = BeliefBook()
+        XCTAssertTrue(book.propose(sentence: "Also good at: Dog walking",
+                                   source: .guessedFromChat, confidence: 0.7))
+        XCTAssertFalse(book.propose(sentence: "Also good at: Dog walking",
+                                    source: .guessedFromChat, confidence: 0.7),
+                       "A cumulative model patch must not look like a fresh belief on every chat turn")
+        XCTAssertEqual(book.pending.count, 1)
+    }
+
     // MARK: - Brief 06: profile learning
 
     func testFeedbackReasonsMatchFeedStrings() {
@@ -456,6 +466,38 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertEqual(ChatActionParser.parse("set my floor to $30"), .changeFloor(30))
         XCTAssertEqual(ChatActionParser.parse("what did you skip?"), .explainDropped)
         XCTAssertEqual(ChatActionParser.parse("hello there"), nil)
+    }
+
+    /// Work-starting chat commands parse to structured actions the app
+    /// executes itself — the conversation model only talks, so a work
+    /// request must never fall through to a prose reply that merely
+    /// sounds agreeable.
+    func testChatActionParserWorkCommands() {
+        let rover = TargetSite(id: "rover", name: "Rover", startURLString: "https://www.rover.com",
+                                category: .petCare, goalTemplate: "")
+        let sites = [rover]
+        // Scan a known site (by name or domain, either work verb).
+        XCTAssertEqual(ChatActionParser.parse("scan Rover for jobs", sites: sites), .scanSite(siteID: "rover"))
+        XCTAssertEqual(ChatActionParser.parse("check Rover for new work", sites: sites), .scanSite(siteID: "rover"))
+        XCTAssertEqual(ChatActionParser.parse("search rover.com", sites: sites), .scanSite(siteID: "rover"))
+        XCTAssertEqual(ChatActionParser.parse("please scan Rover", sites: sites), .scanSite(siteID: "rover"))
+        // Unanchored or negated prose stays conversation.
+        XCTAssertEqual(ChatActionParser.parse("don't scan Rover", sites: sites), nil)
+        XCTAssertEqual(ChatActionParser.parse("I was scanning Rover myself earlier", sites: sites), nil)
+        XCTAssertEqual(ChatActionParser.parse("scan the horizon", sites: sites), nil)
+        // Add a new site by its address.
+        XCTAssertEqual(ChatActionParser.parse("add pawshake.com", sites: sites), .addSite(domain: "pawshake.com"))
+        XCTAssertEqual(ChatActionParser.parse("add a new site: https://www.pawshake.com/jobs", sites: sites),
+                       .addSite(domain: "pawshake.com"))
+        XCTAssertEqual(ChatActionParser.parse("don't add pawshake.com", sites: sites), nil)
+        // Join / re-add a known site.
+        XCTAssertEqual(ChatActionParser.parse("add Rover", sites: sites), .joinSite(siteID: "rover"))
+        XCTAssertEqual(ChatActionParser.parse("re-add Rover", sites: sites), .joinSite(siteID: "rover"))
+        XCTAssertEqual(ChatActionParser.parse("watch Rover again", sites: sites), .joinSite(siteID: "rover"))
+        // Check the Hygge inbox.
+        XCTAssertEqual(ChatActionParser.parse("check your email", sites: sites), .checkEmail)
+        XCTAssertEqual(ChatActionParser.parse("check the email I sent you", sites: sites), .checkEmail)
+        XCTAssertEqual(ChatActionParser.parse("did you get my email?", sites: sites), .checkEmail)
     }
 
     /// Every site state the reconciliation model needs exists with a human label.

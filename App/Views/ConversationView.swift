@@ -226,7 +226,9 @@ struct ConversationView: View {
                 pendingAction = action
                 return
             }
+            isThinking = true
             let replyText = await store.performChatAction(action)
+            isThinking = false
             store.appendChat(fromAgent: true, text: replyText)
             return
         }
@@ -320,27 +322,62 @@ struct ConversationView: View {
     }
 
     private func proposeBeliefs(from patch: EarningsProfilePatch) {
-        var proposed = 0
-        if let skills = patch.skills, !skills.isEmpty {
-            store.proposeBelief(sentence: "Also good at: \(skills.joined(separator: ", "))",
-                                source: .guessedFromChat, confidence: 0.7); proposed += 1
+        func normalized(_ value: String) -> String {
+            value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         }
-        if let availability = patch.availabilityNotes, !availability.isEmpty {
-            store.proposeBelief(sentence: "Usually free: \(availability)",
-                                source: .youSaidIt, confidence: 0.85); proposed += 1
+        func existingItems(withPrefix prefix: String) -> Set<String> {
+            Set((store.beliefs.beliefs + store.beliefs.pending)
+                .filter { $0.sentence.hasPrefix(prefix) }
+                .flatMap { $0.sentence.dropFirst(prefix.count).split(separator: ",").map { normalized(String($0)) } })
         }
-        if let location = patch.locationLabel, !location.isEmpty,
-           location != store.profile.locationLabel {
-            store.proposeBelief(sentence: "Now based in \(location)",
-                                source: .youSaidIt, confidence: 0.85); proposed += 1
+
+        // Proposals are reviewed in Profile, never announced in chat.
+        if let skills = patch.skills {
+            let knownSkills = Set(store.profile.skills.map(normalized))
+                .union(existingItems(withPrefix: "Also good at:"))
+            var seenSkills = Set<String>()
+            let newSkills = skills.compactMap { skill -> String? in
+                let trimmed = skill.trimmingCharacters(in: .whitespacesAndNewlines)
+                let key = normalized(trimmed)
+                guard !trimmed.isEmpty, !knownSkills.contains(key),
+                      seenSkills.insert(key).inserted else { return nil }
+                return trimmed
+            }
+            if !newSkills.isEmpty {
+                store.proposeBelief(sentence: "Also good at: \(newSkills.joined(separator: ", "))",
+                                    source: .guessedFromChat, confidence: 0.7)
+            }
         }
-        if let interests = patch.interests, !interests.isEmpty {
-            store.proposeBelief(sentence: "Also enjoys: \(interests.map(\.activityLabel).joined(separator: ", ").lowercased())",
-                                source: .guessedFromChat, confidence: 0.65); proposed += 1
+        if let availability = patch.availabilityNotes {
+            let trimmedAvailability = availability.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedAvailability.isEmpty,
+               normalized(trimmedAvailability) != normalized(store.profile.availabilityNotes) {
+                store.proposeBelief(sentence: "Usually free: \(trimmedAvailability)",
+                                    source: .youSaidIt, confidence: 0.85)
+            }
         }
-        if proposed > 0 {
-            store.appendChat(fromAgent: true,
-                             text: "I've noted \(proposed == 1 ? "that" : "those") as a belief to check — it only counts once you confirm it in your profile.")
+        if let location = patch.locationLabel {
+            let trimmedLocation = location.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedLocation.isEmpty,
+               normalized(trimmedLocation) != normalized(store.profile.locationLabel) {
+                store.proposeBelief(sentence: "Now based in \(trimmedLocation)",
+                                    source: .youSaidIt, confidence: 0.85)
+            }
+        }
+        if let interests = patch.interests {
+            let knownLabels = existingItems(withPrefix: "Also enjoys:")
+            var seenInterests: [OpportunityCategory] = []
+            let newInterests = interests.filter { interest in
+                guard !store.profile.interests.contains(interest),
+                      !knownLabels.contains(normalized(interest.activityLabel)),
+                      !seenInterests.contains(interest) else { return false }
+                seenInterests.append(interest)
+                return true
+            }
+            if !newInterests.isEmpty {
+                store.proposeBelief(sentence: "Also enjoys: \(newInterests.map(\.activityLabel).joined(separator: ", ").lowercased())",
+                                    source: .guessedFromChat, confidence: 0.65)
+            }
         }
     }
 
@@ -357,7 +394,7 @@ struct ConversationView: View {
             return "Approve the first waiting draft?"
         case .bookFirst:
             return "Go ahead with the waiting booking?"
-        case .pause, .resume, .explainDropped:
+        case .pause, .resume, .explainDropped, .scanSite, .joinSite, .addSite, .checkEmail:
             return "Do that now?"
         }
     }

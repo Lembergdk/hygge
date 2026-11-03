@@ -93,7 +93,7 @@ struct HomeFeedView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .task { await store.observeBrowserTasks() }
+        .task { await store.refreshHyggeEmail(); await store.observeBrowserTasks() }
         .onReceive(NotificationCenter.default.publisher(
             for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
@@ -407,9 +407,12 @@ struct HomeFeedView: View {
     private var runningTasks: [AgentTask] { admitted(availableActiveTasks, key: taskKey) }
     private var availableEvents: [ActivityEvent] { store.activityEvents.sorted { $0.occurredAt > $1.occurredAt } }
     private var events: [ActivityEvent] { admitted(availableEvents, key: eventKey) }
+    private var availableEmailDecisions: [FiledEmailSummary] { store.pendingEmailDecisions }
+    private var emailDecisions: [FiledEmailSummary] { admitted(availableEmailDecisions) { "email-decision-\($0.senderDomain)" } }
     private var candidateIDs: [String] {
         var ids = availableActiveTasks.map(taskKey)
         ids += proposedSites.map { "proposal-\($0.id)" }
+        ids += availableEmailDecisions.map { "email-decision-\($0.senderDomain)" }
         ids += availableListings.map { "opportunity-\($0.id)" }
         ids += availableDecisions.map(taskKey)
         if store.notificationPrimerVisible { ids.append("notifications") }
@@ -430,7 +433,7 @@ struct HomeFeedView: View {
             updateGate.receive(candidateIDs, atTop: canInsert)
         }
     }
-    private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && !store.isPaused }
+    private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && emailDecisions.isEmpty && !store.isPaused }
     private func taskKey(_ task: AgentTask) -> String { FeedFocus.taskKey(task) }
     private func eventKey(_ event: ActivityEvent) -> String { "event-\(event.id)" }
     private func isArchived(_ id: String) -> Bool { store.archivedFeedIDs.contains(id) }
@@ -516,10 +519,13 @@ struct HomeFeedView: View {
     // visible card when a live session above the reader finishes.
     private var feedRows: [FeedRow] {
         var rows = runningTasks.map(FeedRow.active)
-        if store.isPaused { rows.append(.paused) }
-        else {
+        if store.isPaused {
+            rows.append(.paused)
+            rows += emailDecisions.map(FeedRow.emailDecision)
+        } else {
             rows += pendingProposals.prefix(morePlaces ? pendingProposals.count : 1).map(FeedRow.proposal)
             if pendingProposals.count > 1 { rows.append(.morePlaces) }
+            rows += emailDecisions.map(FeedRow.emailDecision)
             rows += listings.map(FeedRow.opportunity)
             rows += decisionTasks.filter { !isArchived(taskKey($0)) }.map(FeedRow.decision)
         }
@@ -540,6 +546,7 @@ struct HomeFeedView: View {
     @ViewBuilder private func feedRow(_ row: FeedRow) -> some View {
         switch row {
         case .active(let task): activeTaskCard(task)
+        case .emailDecision(let mail): emailDecisionCard(mail)
         case .proposal(let proposal): proposalCard(proposal)
         case .opportunity(let opportunity): opportunityCard(opportunity)
         case .decision(let task): taskCard(task)
@@ -568,6 +575,43 @@ struct HomeFeedView: View {
                 }.foregroundStyle(HyggeTheme.secondary).frame(minHeight: 44)
             }.padding(.top, 8)
         }
+    }
+    private func emailDecisionCard(_ mail: FiledEmailSummary) -> some View {
+        card(id: "email-decision-\(mail.senderDomain)", title: "Mail from a new place",
+             subtitle: "\(mail.subject.isEmpty ? "(no subject)" : mail.subject) · \(mail.senderDomain)",
+             icon: "envelope", primaryTitle: "Decide", primaryIcon: "envelope.open",
+             open: { openFocus(.emailDecision(mail)) },
+             primary: { openFocus(.emailDecision(mail)) },
+             dismiss: {}, allowsDismissal: false)
+    }
+    /// One call per new sender, remembered: read it for anything
+    /// relevant, just file it, or ignore the sender quietly.
+    private func emailDecisionDetail(_ mail: FiledEmailSummary) -> some View {
+        FeedDetailContent {
+            Text("Mail from \(mail.senderDomain)").font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
+            Text("This place is new to me, so I filed it and waited for your call. Whatever you pick, I'll remember it for this sender.")
+                .foregroundStyle(HyggeTheme.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(mail.subject.isEmpty ? "(no subject)" : mail.subject)
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
+                if !mail.summary.isEmpty {
+                    Text(mail.summary).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                }
+                ForEach(mail.highlights ?? [], id: \.self) { label in
+                    Label(label, systemImage: "sparkles").font(.subheadline).foregroundStyle(HyggeTheme.sageDeep)
+                }
+            }
+            FeedPrimaryButton(title: "Treat as work mail") { decideEmail(mail, choice: "work") }
+            Button("Just file it") { decideEmail(mail, choice: "file") }
+                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
+            Button("Ignore this sender") { decideEmail(mail, choice: "ignore") }
+                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary).frame(minHeight: 44)
+        }
+    }
+    private func decideEmail(_ mail: FiledEmailSummary, choice: String) {
+        let domain = mail.senderDomain
+        Task { await store.decideEmailSender(domain: domain, choice: choice) }
+        closeFocus()
     }
     private func eventCard(_ event: ActivityEvent) -> some View {
         card(id: eventKey(event), title: FeedEventPresentation.title(event),
@@ -629,6 +673,7 @@ struct HomeFeedView: View {
         case .event(let event): FeedEventDetail(event: event)
         case .task(let task): FeedTaskReview(close: { closeFocus() }, taskID: task.id)
         case .browser(let task): CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id, onClose: { closeFocus() })
+        case .emailDecision(let mail): emailDecisionDetail(mail)
         case .paused:
             FeedDetailContent {
                 Text("Hygge is paused").font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
@@ -688,11 +733,12 @@ private struct FeedScrollTracking: ViewModifier {
 }
 
 private enum FeedRow: Identifiable {
-    case active(AgentTask), proposal(ProposedSite), opportunity(Opportunity), decision(AgentTask), event(ActivityEvent)
+    case active(AgentTask), proposal(ProposedSite), opportunity(Opportunity), decision(AgentTask), event(ActivityEvent), emailDecision(FiledEmailSummary)
     case paused, morePlaces, notifications, journal, earlier
     var id: String {
         switch self {
         case .active(let task), .decision(let task): return FeedFocus.taskKey(task)
+        case .emailDecision(let value): return "email-decision-\(value.senderDomain)"
         case .proposal(let value): return "proposal-\(value.id)"
         case .opportunity(let value): return "opportunity-\(value.id)"
         case .event(let value): return "event-\(value.id)"

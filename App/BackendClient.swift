@@ -287,6 +287,19 @@ struct BackendClient {
         return response.messages
     }
 
+    private struct EmailDecisionBody: Encodable { var senderDomain: String; var choice: String }
+    private struct EmailDecisionAck: Decodable { var remembered: Bool? }
+
+    /// Remembers how one sender's mail should be treated from now
+    /// on ("work", "file", or "ignore"). Returns the fresh inbox so
+    /// the caller can update in one step.
+    func decideEmailSender(domain: String, choice: String) async -> [FiledEmailSummary]? {
+        let ack: EmailDecisionAck? = try? await post(
+            "email/decision", body: EmailDecisionBody(senderDomain: domain, choice: choice))
+        guard ack?.remembered == true else { return nil }
+        return try? await filedEmail()
+    }
+
     // MARK: - Push notifications (Brief 07)
     //
     // The device token is registered for the signed-in user only;
