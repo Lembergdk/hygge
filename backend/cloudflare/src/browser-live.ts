@@ -1,3 +1,4 @@
+import { CDPSessionEvent } from "@cloudflare/puppeteer/internal/api/CDPSession.js";
 import { BrowserControl, validateBrowserInput } from "./browser-control.ts";
 
 /** A single CDP screencast, multiplexed to authenticated app viewers.
@@ -6,6 +7,7 @@ export class BrowserLive {
   private viewers = new Map<WebSocket, { owner: string; awaitingFrame: boolean; sequence: number }>();
   private cdp: any;
   private starting: Promise<void> | null = null;
+  private stopping: Promise<void> = Promise.resolve();
   private frame: string | null = null;
   private sequence = 0;
   private closed = false;
@@ -17,6 +19,7 @@ export class BrowserLive {
     this.page = page;
     this.page.once("close", () => this.finish("This browser session has finished."));
   }
+  get ended() { return this.closed; }
   state() {
     const viewport = this.page.viewport() ?? { width: 1365, height: 900 };
     return { type: "state", url: this.page.url(), width: viewport.width, height: viewport.height,
@@ -35,6 +38,10 @@ export class BrowserLive {
     if (this.cdp) return;
     if (this.starting) return this.starting;
     this.starting = (async () => {
+      // stopScreencast affects the page, even when sent on an older CDP session.
+      // Finish detaching the previous viewer before starting its replacement.
+      await this.stopping;
+      if (this.closed || !this.viewers.size) return;
       const cdp = await this.page.createCDPSession();
       this.cdp = cdp;
       cdp.on("Page.screencastFrame", (event: any) => {
@@ -51,16 +58,16 @@ export class BrowserLive {
         void cdp.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => {});
       });
       cdp.on("Page.frameNavigated", () => this.broadcast());
-      cdp.on("Disconnected", () => this.finish("The browser connection ended."));
+      cdp.on(CDPSessionEvent.Disconnected, () => this.finish("The browser connection ended."));
       await cdp.send("Page.enable");
       await cdp.send("Page.startScreencast", { format: "jpeg", quality: 75, maxWidth: 1600, maxHeight: 1600, everyNthFrame: 1 });
     })();
     try { await this.starting; }
-    catch (error) { this.cdp = null; throw error; }
-    finally { this.starting = null; }
+    catch (error) { this.stopCapture(); throw error; }
+    finally { this.starting = null; if (!this.viewers.size) this.stopCapture(); }
   }
   async connect(socket: WebSocket, onResume: () => Promise<(() => void) | void>) {
-    if (this.closed) { socket.close(1000, "Session finished"); return; }
+    if (this.closed) { this.send(socket, { type: "ended", message: "This browser session has ended." }); socket.close(1000, "Session finished"); return; }
     const owner = crypto.randomUUID();
     // Periodically reconnect through the authenticated HTTP route, including token revocation.
     const lifetime = setTimeout(() => socket.close(1001, "Reconnect to continue"), 15 * 60 * 1000);
@@ -69,16 +76,33 @@ export class BrowserLive {
     this.viewers.set(socket, { owner, awaitingFrame: false, sequence: -1 });
     let chain = Promise.resolve();
     let pending = 0;
+    let heartbeatPending = false;
     socket.addEventListener("message", event => {
       if (typeof event.data !== "string" || event.data.length > 10000 || pending >= 64) {
         socket.close(1008, "Invalid input"); return;
+      }
+      // Heartbeats must not queue behind a handoff waiting for an agent action.
+      // A static page is still live; verify CDP without requiring another frame.
+      let incoming: any;
+      try { incoming = JSON.parse(event.data); } catch { socket.close(1008, "Invalid input"); return; }
+      if (incoming?.type === "ping") {
+        if (heartbeatPending || !this.cdp || !this.viewers.has(socket)) return;
+        heartbeatPending = true;
+        const cdp = this.cdp;
+        void cdp.send("Page.getLayoutMetrics").then(() => {
+          if (this.cdp === cdp && this.viewers.has(socket)) { this.send(socket, { type: "pong" }); this.broadcast(); }
+        }).catch(() => {
+          // A ping from a departed viewer can reject when its old CDP detaches.
+          if (this.cdp === cdp && this.viewers.has(socket)) this.finish("The browser connection ended.");
+        }).finally(() => heartbeatPending = false);
+        return;
       }
       pending++;
       chain = chain.then(async () => {
         let message: any;
         try {
           if (!this.viewers.has(socket)) return;
-          message = JSON.parse(event.data as string);
+          message = incoming;
           if (message.type === "ack") {
             const viewer = this.viewers.get(socket);
             if (viewer) {
@@ -89,11 +113,6 @@ export class BrowserLive {
               }
             }
             return;
-          }
-          if (message.type === "ping") {
-            await this.cdp.send("Page.getLayoutMetrics");
-            this.send(socket, { type: "pong" });
-            this.broadcast(); return;
           }
           if (message.type === "takeControl") {
             await this.control.acquire(owner);
@@ -143,6 +162,7 @@ export class BrowserLive {
     socket.addEventListener("error", () => this.remove(socket));
     try {
       await this.start();
+      if (!this.viewers.has(socket) || this.closed) return;
       this.send(socket, this.state());
       if (this.frame) { this.viewers.get(socket)!.awaitingFrame = true; this.viewers.get(socket)!.sequence = this.sequence; this.send(socket, { type: "frame", data: this.frame }); }
     } catch {
@@ -187,12 +207,19 @@ export class BrowserLive {
     }
     this.control.disconnect(viewer.owner);
     this.broadcast();
-    if (!this.viewers.size && this.cdp) {
-      const cdp = this.cdp; this.cdp = null; this.frame = null;
-      cdp.removeAllListeners();
-      void cdp.send("Page.stopScreencast").catch(() => {}).then(() => cdp.detach().catch(() => {}));
-    }
+    if (!this.viewers.size && !this.starting) this.stopCapture();
   }
+  private stopCapture() {
+    const cdp = this.cdp;
+    if (!cdp) return;
+    this.cdp = null; this.frame = null;
+    cdp.removeAllListeners();
+    this.stopping = this.stopping.then(async () => {
+      await cdp.send("Page.stopScreencast").catch(() => {});
+      await cdp.detach().catch(() => {});
+    });
+  }
+
   finish(reason: string) {
     if (this.closed) return;
     this.closed = true;

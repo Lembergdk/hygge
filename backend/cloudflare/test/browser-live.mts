@@ -1,3 +1,4 @@
+import { CDPSessionEvent } from "@cloudflare/puppeteer/internal/api/CDPSession.js";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -84,4 +85,85 @@ test('mission exposes session and stops when takeover interrupts model thinking'
   const result = await runMission({ browser, task: { kind: 'signup', goal: 'profile', target_url: 'https://example.com' },
     onSession: id => published = id, decider: { decide: async () => { assert.equal(published, 'session'); await control.acquire('phone'); return { action: 'click', target: 'Next' }; } } });
   assert.equal(actions, 0); assert.equal(result.status, 'needs_human'); assert.equal(result.sessionID, 'session');
+});
+
+test('replacement viewer waits for previous screencast teardown', async () => {
+  const first = new CDP(), second = new CDP();
+  let finishStop!: () => void;
+  const send = first.send.bind(first);
+  first.send = async (method, params) => {
+    await send(method, params);
+    if (method === 'Page.stopScreencast') await new Promise<void>(resolve => finishStop = resolve);
+  };
+  let created = 0;
+  const page = { createCDPSession: async () => ++created === 1 ? first : second,
+    viewport: () => ({ width: 1000, height: 800 }), url: () => 'https://example.com', once() {} };
+  const live = new BrowserLive(page), a = new Socket(), b = new Socket();
+  await live.connect(a as any, async () => {});
+  a.close();
+  const replacing = live.connect(b as any, async () => {});
+  await tick();
+  assert.equal(created, 1, 'new stream cannot start while old page stop is pending');
+  finishStop(); await replacing;
+  second.emit('Page.screencastFrame', { data: 'fresh-frame', sessionId: 1 });
+  assert.ok(b.messages.some(m => m.type === 'frame' && m.data === 'fresh-frame'));
+  b.close();
+});
+
+test('leaving during startup tears down after startup finishes', async () => {
+  const cdp = new CDP(); let create!: (cdp: CDP) => void;
+  const page = { createCDPSession: () => new Promise<CDP>(resolve => create = resolve),
+    viewport: () => ({ width: 1000, height: 800 }), url: () => 'https://example.com', once() {} };
+  const live = new BrowserLive(page), socket = new Socket();
+  const opening = live.connect(socket as any, async () => {});
+  await tick(); socket.close(); create(cdp); await opening; await tick();
+  assert.ok(cdp.calls.some(c => c.method === 'Page.stopScreencast'));
+  assert.equal(socket.messages.length, 0, 'no messages to departed viewer');
+});
+
+test('static page heartbeats do not wait behind a pending handoff', async () => {
+  const { live, cdp } = fixture(); const socket = new Socket();
+  await live.connect(socket as any, async () => {});
+  cdp.emit('Page.screencastFrame', { data: 'static-frame', sessionId: 1 });
+  let finish!: () => void;
+  const action = live.control.agent(0, () => new Promise<void>(resolve => finish = resolve));
+  await tick(); socket.input({ type: 'takeControl', requestID: 'take' }); await tick();
+  socket.input({ type: 'ping' }); await tick();
+  assert.ok(socket.messages.some(m => m.type === 'pong'));
+  assert.ok(!socket.messages.some(m => m.type === 'controlled'));
+  finish(); await action; await tick();
+  assert.ok(socket.messages.some(m => m.type === 'controlled'));
+  socket.close();
+});
+
+test('actual Puppeteer disconnect event ends viewers and rejects stale reconnect', async () => {
+  const { live, cdp } = fixture(); const a = new Socket(), b = new Socket();
+  await live.connect(a as any, async () => {});
+  cdp.emit(CDPSessionEvent.Disconnected);
+  assert.equal(live.ended, true);
+  assert.ok(a.messages.some(m => m.type === 'ended'));
+  await live.connect(b as any, async () => {});
+  assert.ok(b.messages.some(m => m.type === 'ended'));
+  assert.equal(cdp.calls.filter(c => c.method === 'Page.startScreencast').length, 1);
+});
+
+test('late heartbeat failure from a departed viewer cannot end its replacement', async () => {
+  const first = new CDP(), second = new CDP(); let rejectPing!: (error: Error) => void;
+  const send = first.send.bind(first);
+  first.send = async (method, params) => {
+    await send(method, params);
+    if (method === 'Page.getLayoutMetrics') await new Promise<void>((_, reject) => rejectPing = reject);
+  };
+  let created = 0;
+  const page = { createCDPSession: async () => ++created === 1 ? first : second,
+    viewport: () => ({ width: 1000, height: 800 }), url: () => 'https://example.com', once() {} };
+  const live = new BrowserLive(page), a = new Socket(), b = new Socket();
+  await live.connect(a as any, async () => {});
+  a.input({ type: 'ping' }); await tick(); a.close();
+  await live.connect(b as any, async () => {});
+  rejectPing(new Error('old session detached')); await tick();
+  assert.equal(live.ended, false);
+  second.emit('Page.screencastFrame', { data: 'fresh-frame', sessionId: 1 });
+  assert.ok(b.messages.some(m => m.type === 'frame'));
+  b.close();
 });

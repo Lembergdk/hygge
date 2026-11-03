@@ -4,6 +4,7 @@ struct BrowserLiveViewport: View {
     @Environment(\.scenePhase) private var scenePhase
     var session: LiveBrowserSession
     var interactive = false
+    var showsRecoveryActions = false
     var revealControls: (() -> Void)?
     var body: some View {
         ZStack {
@@ -19,9 +20,15 @@ struct BrowserLiveViewport: View {
             }
             if !session.connected {
                 VStack(spacing: 12) {
-                    if !session.ended { ProgressView().tint(HyggeTheme.sageDeep) }
+                    if session.isRecovering { ProgressView().tint(HyggeTheme.sageDeep) }
                     Text(session.status).font(.subheadline.weight(.medium))
-                    if session.ended { Text("Return to chat for the latest update.").font(.caption) }
+                    if session.ended { Text("Return to chat to continue.").font(.caption) }
+                    else if session.requiresSignIn { Text("Sign in to Hygge again.").font(.caption) }
+                    else if session.retryStopped {
+                        if showsRecoveryActions {
+                            Button("Reconnect") { session.reconnect() }.font(.subheadline.weight(.semibold))
+                        } else { Text(interactive ? "Try reconnecting below." : "Tap to reconnect.").font(.caption) }
+                    }
                 }.foregroundStyle(HyggeTheme.ink).padding(20)
                     .background(HyggeTheme.paper.opacity(0.95), in: RoundedRectangle(cornerRadius: 18))
             }
@@ -89,8 +96,8 @@ struct CloudBrowserView: View {
                             .accessibilityLabel("Fullscreen browser")
                     }
                     HStack(spacing: 10) {
-                        AnimatedFlame(animation: session.humanControlled || task?.needsChatHelp == true ? .notify : .laptop, size: 36)
-                        Text(session.ownsControl ? "You’re in control" : session.humanControlled ? "Waiting for you" : task?.needsChatHelp == true ? "Hygge needs you" : "Hygge is working")
+                        AnimatedFlame(animation: session.ended || session.retryStopped || session.requiresSignIn || session.humanControlled || task?.needsChatHelp == true ? .notify : .laptop, size: 36)
+                        Text(session.ended ? "Browser session ended" : session.requiresSignIn ? "Sign in to continue" : session.retryStopped ? "Browser unavailable" : session.ownsControl ? "You’re in control" : session.humanControlled ? "Waiting for you" : task?.needsChatHelp == true ? "Hygge needs you" : "Hygge is working")
                             .font(.subheadline.weight(.semibold))
                         Spacer()
                         Circle().fill(session.connected ? HyggeTheme.sageDeep : HyggeTheme.secondary).frame(width: 7, height: 7)
@@ -104,10 +111,14 @@ struct CloudBrowserView: View {
                     if let problem = session.problem {
                         HStack {
                             Text(problem).font(.footnote)
-                            Button("Reconnect") { session.reconnect() }.font(.footnote.weight(.semibold))
+                            if session.canReconnect {
+                                Button("Reconnect") { session.reconnect() }.font(.footnote.weight(.semibold))
+                            } else {
+                                Button("Back to chat") { openChat() }.font(.footnote.weight(.semibold))
+                            }
                         }.foregroundStyle(HyggeTheme.secondary)
                     }
-                    if !session.keyboardVisible { controls(session) }
+                    if !session.keyboardVisible && (session.connected || session.isRecovering) { controls(session) }
                 }.padding(.horizontal, 18).padding(.top, 22).padding(.bottom, 12)
                     .task(id: session.connected) {
                         if session.connected && takeControlOnOpen && !autoControlAttempted {
@@ -173,10 +184,10 @@ private struct BrowserFullscreen: View {
     var body: some View {
         GeometryReader { geometry in
           ZStack(alignment: .bottom) {
-            BrowserLiveViewport(session: session, interactive: true, revealControls: reveal)
+            BrowserLiveViewport(session: session, interactive: true, showsRecoveryActions: true, revealControls: reveal)
                 .frame(width: geometry.size.width, height: geometry.size.height)
                 .task(id: "\(geometry.size)-\(session.connected)-\(session.ownsControl)") { session.resize(geometry.size) }
-            if showingControls && !session.keyboardVisible {
+            if (showingControls || !session.connected) && !session.keyboardVisible {
                 HStack(spacing: 12) {
                     if session.ownsControl {
                         Button { session.precisionPointer.toggle(); reveal() } label: { Image(systemName: "cursorarrow.motionlines") }.accessibilityLabel("Precision cursor")
