@@ -192,7 +192,7 @@ final class AppStore {
     /// sessions. Drives the laptop flame — Hygge is at the keyboard.
     private(set) var activeRunCount = 0
     private(set) var liveBrowserSessionCount = 0
-    var isAgentWorking: Bool { activeRunCount + liveBrowserSessionCount > 0 }
+    var isAgentWorking: Bool { activeRunCount > 0 || tasks.contains { $0.status == .running || $0.status == .approved } }
 
     func noteRunStarted() { activeRunCount += 1 }
     func noteRunFinished() { activeRunCount = max(0, activeRunCount - 1) }
@@ -724,6 +724,42 @@ final class AppStore {
         appendChat(fromAgent: true, text: "Okay — I won't continue that step.")
     }
 
+    @ObservationIgnored private var browserResumeIDs: Set<UUID> = []
+    @ObservationIgnored private var browserSessions: [String: LiveBrowserSession] = [:]
+    func browserSession(_ id: String) -> LiveBrowserSession {
+        if let session = browserSessions[id], session.accountToken == backend.apiToken { return session }
+        let session = LiveBrowserSession(id: id, backend: backend)
+        browserSessions[id] = session
+        return session
+    }
+    /// Read running session IDs without overwriting a locally owned task request.
+    func observeBrowserTasks() async {
+        while !Task.isCancelled {
+            let token = backend.apiToken
+            if let remote = try? await backend.setupTasks(), token == backend.apiToken {
+                for task in remote {
+                    guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { continue }
+                    if runningTaskIDs.contains(task.id) {
+                        tasks[index].browserSessionID = task.browserSessionID
+                        tasks[index].backendTaskID = task.backendTaskID
+                    } else { tasks[index] = task }
+                }
+                for task in chatHelpTasks { surfaceTaskHelp(taskID: task.id) }
+            }
+            do { try await Task.sleep(for: .seconds(3)) } catch { return }
+        }
+    }
+    func browserDidResume(_ taskID: UUID) {
+        if runningTaskIDs.contains(taskID) { browserResumeIDs.insert(taskID) }
+        if let index = tasks.firstIndex(where: { $0.id == taskID }) {
+            tasks[index].status = .running
+            tasks[index].help = nil
+            tasks[index].pendingReply = nil
+        }
+        conversationTaskID = taskID
+        appendChat(fromAgent: true, text: "Thanks — I’ll check your changes and carry on.")
+    }
+
     var chatHelpTasks: [AgentTask] { tasks.filter { $0.needsChatHelp } }
 
     // MARK: - Sites & credentials
@@ -1051,6 +1087,10 @@ final class AppStore {
 
             guard backend.apiToken == runAccountToken,
                   tasks.contains(where: { $0.id == taskID }) else { return nil }
+            if browserResumeIDs.remove(taskID) != nil,
+               let remote = try? await backend.setupTasks(), let current = remote.first(where: { $0.id == taskID }), backend.apiToken == runAccountToken {
+                task = current
+            }
             if task.status == .succeeded {
                 task.help = nil
                 task.pendingReply = nil

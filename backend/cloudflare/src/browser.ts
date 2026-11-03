@@ -4,6 +4,7 @@
 /// Object; the mission loop (agent.ts) chooses every action.
 import { launch, type Browser, type Page } from "@cloudflare/puppeteer";
 import type { SessionState } from "./session-profile.ts";
+import { BrowserLive } from "./browser-live.ts";
 import { profilePhotoTargetAllowed } from "./profile-photo.ts";
 
 export interface PageElement {
@@ -18,6 +19,7 @@ export interface Snapshot {
   title: string;
   elements: PageElement[];
   humanControlled: boolean;
+  controlEpoch?: number;
   screenshotBase64: string | null;
 }
 
@@ -25,7 +27,7 @@ interface Session {
   id: string;
   browser: Browser;
   page: Page;
-  humanControlled: boolean;
+  live: BrowserLive;
 }
 
 export class BrowserRunBrowser {
@@ -86,12 +88,29 @@ export class BrowserRunBrowser {
         .catch(() => {});
     }
     const id = crypto.randomUUID();
-    this.sessions.set(id, { id, browser, page, humanControlled: false });
+    this.sessions.set(id, { id, browser, page, live: new BrowserLive(page) });
     return this.snapshot(id) as Promise<Snapshot>;
   }
 
   hasSession(id: string): boolean {
     return this.sessions.has(id);
+  }
+
+  controlState(id: string) { return this.sessions.get(id)?.live.control; }
+
+  async agentStep<T>(id: string, epoch: number, operation: () => Promise<T>): Promise<T> {
+    const s = this.sessions.get(id);
+    if (!s) throw new Error("session ended");
+    return s.live.control.agent(epoch, operation);
+  }
+
+  async stream(id: string, onResume: () => Promise<(() => void) | void>): Promise<Response> {
+    const s = this.sessions.get(id);
+    if (!s) return new Response("Session ended", { status: 404 });
+    const pair = new WebSocketPair();
+    pair[1].accept();
+    void s.live.connect(pair[1], onResume);
+    return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
   /// Capture the reusable sign-in state of a live session. The caller
@@ -154,22 +173,38 @@ export class BrowserRunBrowser {
       currentURLString: page.url(),
       title: await page.title(),
       elements,
-      humanControlled: s.humanControlled,
+      humanControlled: s.live.control.human,
+      controlEpoch: s.live.control.epoch,
       screenshotBase64: btoa(b64),
     };
+  }
+
+  // Compatibility for already-installed clients; still serialized against agent input.
+  async legacyAct(id: string, body: { action: string; target?: string; value?: string }): Promise<Snapshot | null> {
+    const s = this.sessions.get(id);
+    if (!s) return null;
+    if (body.action === "setHumanControl") {
+      if (body.value === "true") await s.live.control.acquire("legacy-app");
+      else await s.live.control.release("legacy-app");
+      s.live.broadcast();
+      return this.snapshot(id);
+    }
+    return s.live.control.input("legacy-app", () => this.act(id, body, true));
   }
 
   async act(
     id: string,
     { action, target, value }: { action: string; target?: string; value?: string },
+    legacyHuman = false,
   ): Promise<Snapshot | null> {
     const s = this.sessions.get(id);
     if (!s) return null;
     const page = s.page;
+    if (s.live.control.human && !legacyHuman) throw new Error("browser is under human control");
     if (action === "navigate" && value) {
       await page.goto(value, { waitUntil: "domcontentloaded" });
     } else if (action === "setHumanControl") {
-      s.humanControlled = value === "true";
+      throw new Error("Use the live connection to transfer browser control.");
     } else if (action === "click" && target) {
       const safe = target.replaceAll('"', "'");
       // normalize-space(.) covers labels split across nested spans;
@@ -177,6 +212,8 @@ export class BrowserRunBrowser {
       const exact = await page.$$(`xpath///a[normalize-space(.)="${safe}"] | //button[normalize-space(.)="${safe}"]`);
       const el = exact[0] ?? (await page.$$(`xpath///a[contains(normalize-space(.), "${safe}")] | //button[contains(normalize-space(.), "${safe}")]`))[0];
       if (!el) throw new Error(`element not found: ${target}`);
+      const box = await (el as any).boundingBox();
+      if (box) s.live.noteAgentPointer(box.x + box.width / 2, box.y + box.height / 2);
       await (el as { click(): Promise<void> }).click();
     } else if (action === "type" && target) {
       const field =
@@ -184,6 +221,8 @@ export class BrowserRunBrowser {
         (await page.$(`input[name*="${target.toLowerCase()}" i]`)) ??
         (await page.$("input, textarea"));
       if (!field) throw new Error(`field not found: ${target}`);
+      const box = await field.boundingBox();
+      if (box) s.live.noteAgentPointer(box.x + box.width / 2, box.y + box.height / 2);
       await field.type(value ?? "");
     }
     return this.snapshot(id);
@@ -193,7 +232,7 @@ export class BrowserRunBrowser {
   /// A unique observed file field and the approved HTTPS host are both required.
   async uploadProfilePhoto(id: string, target: string, base64: string, approvedURL: string): Promise<void> {
     const session = this.sessions.get(id);
-    if (!session || session.humanControlled) throw new Error("browser is unavailable for photo attachment");
+    if (!session || session.live.control.human) throw new Error("browser is unavailable for photo attachment");
     if (!profilePhotoTargetAllowed(session.page.url(), approvedURL)) throw new Error("photo target is outside the approved site");
     const host = new URL(approvedURL).hostname.replace(/^www\./, "");
     const attached = await session.page.evaluate(({ target, base64, host }) => {
@@ -241,6 +280,7 @@ export class BrowserRunBrowser {
   async closeSession(id: string): Promise<boolean> {
     const s = this.sessions.get(id);
     if (!s) return false;
+    s.live.finish("This browser session has finished.");
     await s.browser.close().catch(() => {});
     return this.sessions.delete(id);
   }

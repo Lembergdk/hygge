@@ -46,7 +46,7 @@ struct BackendClient {
     var baseURL: URL {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--settings-preview") {
-            return URL(string: "http://127.0.0.1:9")!
+            return URL(string: ProcessInfo.processInfo.arguments.contains("--browser-preview") ? "http://127.0.0.1:8768" : "http://127.0.0.1:9")!
         }
         #endif
         let raw = BackendAddress.effective(

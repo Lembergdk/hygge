@@ -143,10 +143,10 @@ struct FloatingFlame: View {
         // Paused whenever calm: no continuous full-rate rendering while idle.
         TimelineView(.animation(minimumInterval: 0.05, paused: !isAnimating)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
-            ZStack(alignment: .topTrailing) {
+            ZStack(alignment: .topLeading) {
                 // The flame is a character, not a button in a disc (mocks):
                 // big, sticker-like, soft shadow only.
-                AnimatedFlame(animation: animation, size: 81)
+                AnimatedFlame(animation: animation, size: 108)
                     .shadow(color: Color.black.opacity(0.18), radius: 10, y: 5)
                     .offset(y: bounceOffset(t))
                     .scaleEffect(pulseScale(t))
@@ -155,11 +155,11 @@ struct FloatingFlame: View {
                         .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(HyggeTheme.emberDeep, in: Capsule())
-                        .offset(x: 2, y: -2)
+                        .offset(x: 0, y: 2)
                 }
             }
         }
-        .frame(width: 94, height: 120)
+        .frame(width: 122, height: 150)
         .opacity(dimmed ? 0.35 : 1)
         .animation(.easeInOut(duration: 0.25), value: dimmed)
         .contentShape(Circle())
