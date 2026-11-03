@@ -4,16 +4,12 @@ import SwiftUI
 struct HomeFeedView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var browserTask: AgentTask?
-    @State private var proposalDetail: ProposedSite?
-    @State private var opportunityDetail: Opportunity?
-    @State private var eventDetail: ActivityEvent?
-    @State private var reviewTask: AgentTask?
+    @Namespace private var focusAnimation
+    @State private var focus: FeedFocus?
     @State private var showConversation = false
     @State private var showProfile = false
     @State private var showYourWork = false
     @State private var showNotifications = false
-    @State private var showPaused = false
     @State private var showPauseConfirm = false
     @State private var earlierExpanded = false
     @State private var morePlaces = false
@@ -29,7 +25,7 @@ struct HomeFeedView: View {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     header.padding(.bottom, 12)
                     if store.isPaused {
-                        Button { showPaused = true } label: {
+                        Button { openFocus(.paused) } label: {
                             FeedSummary(title: "Hygge is paused", subtitle: "Your work is here when you’re ready", icon: "pause")
                         }.buttonStyle(.plain)
                     } else {
@@ -72,6 +68,22 @@ struct HomeFeedView: View {
             FloatingFlame(state: flameState, dimmed: flameDimmed) { showConversation = true } onLongPress: { showPauseConfirm = true }
                 .padding(.trailing, 18).padding(.bottom, 14)
         }
+        .allowsHitTesting(focus == nil)
+        .accessibilityHidden(focus != nil)
+        .overlay {
+            GeometryReader { geometry in
+                if let focus {
+                    ZStack {
+                        Color.black.opacity(0.55).ignoresSafeArea().onTapGesture { closeFocus() }
+                            .accessibilityLabel("Back to feed").accessibilityAddTraits(.isButton)
+                        FeedFocusCard(close: { closeFocus() }) { focusedContent(focus) }
+                            .frame(width: min(geometry.size.width - 32, 620), height: min(geometry.size.height * 0.9, focus.maximumHeight))
+                            .matchedGeometryEffect(id: focus.id, in: focusAnimation, isSource: true)
+                    }.frame(width: geometry.size.width, height: geometry.size.height)
+                    .zIndex(2)
+                }
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             if let undo {
                 HStack(spacing: 12) {
@@ -85,24 +97,10 @@ struct HomeFeedView: View {
             }
         }
         .task { await store.observeBrowserTasks() }
-        .sheet(item: $proposalDetail, onDismiss: openPendingChat) { FeedProposalDetail(proposalID: $0.id) }
-        .sheet(item: $opportunityDetail) { FeedOpportunityDetail(opportunityID: $0.id) }
-        .sheet(item: $eventDetail) { FeedEventDetail(event: $0) }
-        .sheet(item: $reviewTask, onDismiss: openPendingChat) { FeedTaskReview(taskID: $0.id) }
-        .sheet(item: $browserTask, onDismiss: openPendingChat) { task in
-            CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id)
-        }
         .sheet(isPresented: $showConversation, onDismiss: { store.conversationTaskID = nil }) { ConversationView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showProfile) { ProfileHubView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showYourWork) { YourWorkView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showNotifications) { NavigationStack { SettingsPermissionsView() }.presentationDragIndicator(.visible) }
-        .sheet(isPresented: $showPaused) {
-            FeedSheet {
-                Text("Hygge is paused").font(.system(.title, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                Text("Searching, sending and booking will wait until you resume.").foregroundStyle(HyggeTheme.secondary)
-                FeedPrimaryButton(title: "Resume Hygge") { store.setPaused(false); showPaused = false }
-            }
-        }
         .confirmationDialog(store.isPaused ? "Resume Hygge?" : "Pause Hygge?", isPresented: $showPauseConfirm, titleVisibility: .visible) {
             Button(store.isPaused ? "Resume" : "Pause everything") { store.setPaused(!store.isPaused) }
             Button("Cancel", role: .cancel) {}
@@ -113,9 +111,8 @@ struct HomeFeedView: View {
         }
         .onChange(of: store.conversationTaskID) { _, id in
             guard id != nil else { return }
-            if proposalDetail != nil { proposalDetail = nil }
-            else if reviewTask != nil { reviewTask = nil }
-            else if browserTask == nil { showConversation = true }
+            if focus != nil { closeFocus(openChat: true) }
+            else { showConversation = true }
         }
     }
 
@@ -164,7 +161,7 @@ struct HomeFeedView: View {
     private var runningTasks: [AgentTask] { store.tasks.filter { $0.status == .running || $0.status == .approved } }
     private var events: [ActivityEvent] { store.activityEvents.sorted { $0.occurredAt > $1.occurredAt } }
     private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && !store.isPaused }
-    private func taskKey(_ task: AgentTask) -> String { "task-\(task.id)-\(task.status.rawValue)-\(task.help?.id.uuidString ?? "")" }
+    private func taskKey(_ task: AgentTask) -> String { FeedFocus.taskKey(task) }
     private func eventKey(_ event: ActivityEvent) -> String { "event-\(event.id)" }
     private func isArchived(_ id: String) -> Bool { store.archivedFeedIDs.contains(id) }
 
@@ -172,8 +169,8 @@ struct HomeFeedView: View {
         Group {
             ForEach(pendingProposals.prefix(morePlaces ? pendingProposals.count : 1)) { proposal in
                 card(id: "proposal-\(proposal.id)", title: store.siteName(id: proposal.siteID), subtitle: proposal.rationale,
-                     icon: "link", primaryTitle: "Start setup", primaryIcon: "sparkles",
-                     open: { proposalDetail = proposal },
+                     icon: "link", style: .invitation, primaryTitle: "Start setup", primaryIcon: "sparkles",
+                     open: { openFocus(.proposal(proposal)) },
                      primary: { store.approveProposal(proposalID: proposal.id, alreadyHasAccount: false) },
                      dismiss: {
                         store.dismissProposal(proposalID: proposal.id)
@@ -190,8 +187,8 @@ struct HomeFeedView: View {
         ForEach(listings) { opportunity in
             card(id: "opportunity-\(opportunity.id)", title: opportunity.title,
                  subtitle: "\(opportunity.payLabel) · \(opportunity.isRemote ? "Remote" : opportunity.locationLabel)",
-                 icon: opportunity.category == .creative ? "paintpalette" : "briefcase", primaryTitle: "Prepare draft", primaryIcon: "square.and.pencil",
-                 open: { opportunityDetail = opportunity }, primary: { store.draftApplication(for: opportunity) },
+                 icon: opportunity.category == .creative ? "paintpalette" : "briefcase", style: .opportunity, primaryTitle: "Prepare draft", primaryIcon: "square.and.pencil",
+                 open: { openFocus(.opportunity(opportunity)) }, primary: { store.draftApplication(for: opportunity) },
                  dismiss: {
                     store.setStatus(.dismissed, for: opportunity.id)
                     showUndo("Opportunity dismissed") { store.setStatus(opportunity.status, for: opportunity.id) }
@@ -201,16 +198,18 @@ struct HomeFeedView: View {
     private var activeTasks: some View {
         ForEach(runningTasks.filter { !isArchived(taskKey($0)) }) { task in
             if task.browserSessionID != nil {
-                SwipeFeedCard(id: taskKey(task), primaryTitle: "Watch", primaryIcon: "arrow.up.left.and.arrow.down.right", openCardID: $openCardID, open: { browserTask = task }, primary: { browserTask = task }, dismiss: { archive(taskKey(task)) }) {
+                SwipeFeedCard(id: taskKey(task), primaryTitle: "Watch", primaryIcon: "arrow.up.left.and.arrow.down.right", openCardID: $openCardID, open: { openFocus(.browser(task)) }, primary: { openFocus(.browser(task)) }, dismiss: { archive(taskKey(task)) }) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(task.connectsExistingAccount ? "Connecting your account" : task.isSiteSetup ? "Setting up your account" : task.title)
+                    Text(task.connectsExistingAccount ? "Connecting your account" : task.kind == .buildProfile ? "Building your profile" : task.isSiteSetup ? "Setting up your account" : task.title)
                         .font(.system(.subheadline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
-                    BrowserLiveAttachment(task: task) { browserTask = task }
+                    BrowserLiveAttachment(task: task) { openFocus(.browser(task)) }
                 }.padding(14).hyggeCard(radius: 22)
                 }
+                .matchedGeometryEffect(id: taskKey(task), in: focusAnimation, isSource: focus?.id != taskKey(task))
+                .opacity(focus?.id == taskKey(task) ? 0 : 1)
             } else {
                 card(id: taskKey(task), title: "\(store.siteName(id: task.siteID)) · Working", subtitle: task.title,
-                     icon: "sparkles", primaryTitle: "Details", open: { reviewTask = task }, primary: { reviewTask = task })
+                     icon: "sparkles", primaryTitle: "Details", open: { openFocus(.task(task)) }, primary: { openFocus(.task(task)) })
             }
         }
     }
@@ -221,10 +220,29 @@ struct HomeFeedView: View {
         let chat = task.needsChatHelp
         let approval = task.help?.kind == .approval
         return card(id: taskKey(task), title: taskTitle(task),
-                    subtitle: store.siteName(id: task.siteID), icon: chat && !approval ? "bubble.left.and.bubble.right" : "doc.text", usesProfilePhoto: task.kind == .buildProfile,
+                    subtitle: store.siteName(id: task.siteID), icon: taskIcon(task), usesProfilePhoto: task.kind == .buildProfile, style: chat && !approval ? .question : .review,
                     primaryTitle: chat && !approval ? "Open chat" : "Review", primaryIcon: chat ? "bubble.left" : "doc.text.magnifyingglass",
-                    open: { if chat { openChat(task) } else { reviewTask = task } },
-                    primary: { if chat { openChat(task) } else { reviewTask = task } })
+                    open: { if chat { openChat(task) } else { openFocus(.task(task)) } },
+                    primary: { if chat { openChat(task) } else { openFocus(.task(task)) } })
+    }
+    private func taskIcon(_ task: AgentTask) -> String {
+        if task.needsChatHelp {
+            switch task.help?.kind {
+            case .approval: return "doc.text.magnifyingglass"
+            case .verification: return "checkmark.shield"
+            case .credentials: return "key"
+            case .recovery: return "arrow.clockwise"
+            default: return "bubble.left.and.bubble.right"
+            }
+        }
+        switch task.kind {
+        case .buildProfile: return "person.text.rectangle"
+        case .apply: return "envelope.open"
+        case .message: return "paperplane"
+        case .bookCalendar: return "calendar.badge.plus"
+        case .signup: return "globe"
+        case .discover: return "magnifyingglass"
+        }
     }
     private func taskTitle(_ task: AgentTask) -> String {
         if task.needsChatHelp {
@@ -264,16 +282,18 @@ struct HomeFeedView: View {
     private func eventCard(_ event: ActivityEvent) -> some View {
         card(id: eventKey(event), title: FeedEventPresentation.title(event),
              subtitle: event.siteID.map { store.siteName(id: $0) } ?? JournalBuilder.dayLabel(for: event.occurredAt),
-             icon: FeedEventPresentation.icon(event), asset: event.kind == .workCompleted ? "SettingsEarnings" : nil,
-             primaryTitle: "Details", open: { eventDetail = event }, primary: { eventDetail = event })
+             icon: FeedEventPresentation.icon(event), asset: event.kind == .workCompleted ? "SettingsEarnings" : nil, style: eventStyle(event),
+             primaryTitle: "Details", open: { openFocus(.event(event)) }, primary: { openFocus(.event(event)) })
     }
-    private func card(id: String, title: String, subtitle: String, icon: String, asset: String? = nil, usesProfilePhoto: Bool = false,
+    private func card(id: String, title: String, subtitle: String, icon: String, asset: String? = nil, usesProfilePhoto: Bool = false, style: FeedCardStyle = .update,
                       primaryTitle: String, primaryIcon: String = "arrow.right", open: @escaping () -> Void,
                       primary: @escaping () -> Void, dismiss: (() -> Void)? = nil) -> some View {
         SwipeFeedCard(id: id, primaryTitle: primaryTitle, primaryIcon: primaryIcon, openCardID: $openCardID,
                       open: { openCardID = nil; open() }, primary: primary, dismiss: dismiss ?? { archive(id) }) {
-            FeedSummary(title: title, subtitle: subtitle, icon: icon, asset: asset, usesProfilePhoto: usesProfilePhoto)
+            FeedVisualCard(style: style, title: title, subtitle: subtitle, icon: icon, asset: asset, usesProfilePhoto: usesProfilePhoto)
         }
+        .matchedGeometryEffect(id: id, in: focusAnimation, isSource: focus?.id != id)
+        .opacity(focus?.id == id ? 0 : 1)
     }
     private func archive(_ id: String) {
         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { store.setFeedArchived(id, archived: true) }
@@ -286,7 +306,34 @@ struct HomeFeedView: View {
         if let task { store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id }
         showConversation = true
     }
-    private func openPendingChat() { if store.conversationTaskID != nil { showConversation = true } }
+    private func openFocus(_ value: FeedFocus) {
+        openCardID = nil
+        withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.42, dampingFraction: 0.86)) { focus = value }
+    }
+    private func closeFocus(openChat: Bool = false) {
+        withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.42, dampingFraction: 0.86)) { focus = nil }
+        if openChat || store.conversationTaskID != nil { showConversation = true }
+    }
+    private func eventStyle(_ event: ActivityEvent) -> FeedCardStyle {
+        if event.kind == .workCompleted, let amount = event.grossAmount { return .earnings(amount, event.currencyCode) }
+        if event.kind == .joinedSite || event.kind == .profileLive { return .celebration }
+        return .update
+    }
+    @ViewBuilder private func focusedContent(_ value: FeedFocus) -> some View {
+        switch value {
+        case .proposal(let proposal): FeedProposalDetail(close: { closeFocus() }, proposalID: proposal.id)
+        case .opportunity(let opportunity): FeedOpportunityDetail(close: { closeFocus() }, opportunityID: opportunity.id)
+        case .event(let event): FeedEventDetail(event: event)
+        case .task(let task): FeedTaskReview(close: { closeFocus() }, taskID: task.id)
+        case .browser(let task): CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id, onClose: { closeFocus() })
+        case .paused:
+            FeedDetailContent {
+                Text("Hygge is paused").font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
+                Text("Searching, sending and booking will wait until you resume.").foregroundStyle(HyggeTheme.secondary)
+                FeedPrimaryButton(title: "Resume Hygge") { store.setPaused(false); closeFocus() }
+            }
+        }
+    }
 }
 
 private struct FeedScrollOffset: PreferenceKey {
@@ -314,10 +361,12 @@ enum FeedEventPresentation {
         switch event.kind {
         case .joinedSite, .profileLive: return "checkmark.circle.fill"
         case .workCompleted: return "banknote"
-        case .applicationSent, .messageSent: return "paperplane"
+        case .applicationSent: return "paperplane"
+        case .messageSent: return "bubble.left"
         case .booked: return "calendar"
         case .filedEmail: return "envelope"
-        default: return "sparkles"
+        case .searchedSite: return "magnifyingglass"
+        case .learnedAboutSite: return "map"
         }
     }
 }

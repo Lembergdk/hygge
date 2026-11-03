@@ -63,6 +63,7 @@ struct CloudBrowserView: View {
     var existingSessionID: String? = nil
     var taskID: UUID? = nil
     var takeControlOnOpen = false
+    var onClose: (() -> Void)? = nil
     @State private var fullscreen = false
     @State private var autoControlAttempted = false
     private var task: AgentTask? { store.tasks.first { $0.id == taskID } }
@@ -153,12 +154,13 @@ struct CloudBrowserView: View {
             }
         }
     }
-    private func openChat() { if let taskID { store.conversationTaskID = taskID }; dismiss() }
+    private func close() { if let onClose { onClose() } else { dismiss() } }
+    private func openChat() { if let taskID { store.conversationTaskID = taskID }; close() }
     private func resume(_ session: LiveBrowserSession) async {
         guard await session.handBack() else { return }
         if let taskID { store.browserDidResume(taskID) }
         fullscreen = false
-        dismiss()
+        close()
     }
 }
 

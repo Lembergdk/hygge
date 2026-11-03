@@ -36,16 +36,14 @@ struct FeedSummary: View {
     }
 }
 
-struct FeedSheet<Content: View>: View {
+struct FeedDetailContent<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) { content }
                 .padding(24).padding(.top, 16).frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(HyggeTheme.paper)
-        .presentationDetents([.fraction(0.8), .large]).presentationDragIndicator(.visible)
-        .presentationCornerRadius(30)
+        .background(HyggeTheme.card)
     }
 }
 
