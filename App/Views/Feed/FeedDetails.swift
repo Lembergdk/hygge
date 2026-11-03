@@ -2,10 +2,10 @@ import SwiftUI
 
 struct FeedProposalDetail: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.dismiss) private var dismiss
+    let close: () -> Void
     let proposalID: UUID
     var body: some View {
-        FeedSheet {
+        FeedDetailContent {
             if let proposal = store.proposals.first(where: { $0.id == proposalID }) {
                 VStack(alignment: .leading, spacing: 10) {
                     Label(store.siteName(id: proposal.siteID), systemImage: "link")
@@ -22,10 +22,10 @@ struct FeedProposalDetail: View {
                 if proposal.status == .proposed {
                     VStack(spacing: 12) {
                         FeedPrimaryButton(title: "Create my account") {
-                            store.approveProposal(proposalID: proposalID, alreadyHasAccount: false); dismiss()
+                            store.approveProposal(proposalID: proposalID, alreadyHasAccount: false); close()
                         }
                         Button("I have one") {
-                            store.approveProposal(proposalID: proposalID, alreadyHasAccount: true); dismiss()
+                            store.approveProposal(proposalID: proposalID, alreadyHasAccount: true); close()
                         }.foregroundStyle(HyggeTheme.ink).frame(maxWidth: .infinity, minHeight: 44)
                     }.padding(.top, 12)
                 }
@@ -36,10 +36,10 @@ struct FeedProposalDetail: View {
 
 struct FeedOpportunityDetail: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.dismiss) private var dismiss
+    let close: () -> Void
     let opportunityID: UUID
     var body: some View {
-        FeedSheet {
+        FeedDetailContent {
             if let opportunity = store.opportunities.first(where: { $0.id == opportunityID }) {
                 Text(opportunity.title).font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
                 Text(store.siteName(id: opportunity.siteID)).foregroundStyle(HyggeTheme.sageDeep)
@@ -52,7 +52,7 @@ struct FeedOpportunityDetail: View {
                     FeedFact(icon: "sparkles", title: "Skills", value: opportunity.requiredSkills.joined(separator: ", "))
                 }
                 if !store.applications.contains(where: { $0.opportunityID == opportunity.id }) {
-                    FeedPrimaryButton(title: "Prepare an application") { store.draftApplication(for: opportunity); dismiss() }
+                    FeedPrimaryButton(title: "Prepare an application") { store.draftApplication(for: opportunity); close() }
                     Text("You’ll review it before anything is sent.").font(.caption).foregroundStyle(HyggeTheme.secondary)
                 }
             } else { Text("This opportunity is no longer available.").foregroundStyle(HyggeTheme.secondary) }
@@ -65,7 +65,7 @@ struct FeedEventDetail: View {
     let event: ActivityEvent
     @State private var money: ApplicationRecord?
     var body: some View {
-        FeedSheet {
+        FeedDetailContent {
             if event.kind == .workCompleted {
                 Image("SettingsEarnings").resizable().scaledToFit().frame(height: 120).frame(maxWidth: .infinity)
             }
@@ -86,14 +86,14 @@ struct FeedEventDetail: View {
 /// opens this review, with the actual draft and the existing approval gate.
 struct FeedTaskReview: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.dismiss) private var dismiss
+    let close: () -> Void
     let taskID: UUID
     @State private var submitting = false
     @State private var audit = false
     private var task: AgentTask? { store.tasks.first { $0.id == taskID } }
     private let visibleKeys = ["profileHeadline", "profileBio", "coverLetter", "message", "displayName", "hourlyRate", "skills", "eventTitle", "eventStartISO8601", "location", "searchTerms"]
     var body: some View {
-        FeedSheet {
+        FeedDetailContent {
             if let task {
                 Text(task.kind == .buildProfile ? "Review your profile" : task.title)
                     .font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
@@ -101,7 +101,7 @@ struct FeedTaskReview: View {
                 if task.needsChatHelp {
                     Text(task.help?.message ?? "Hygge needs your help to continue.").foregroundStyle(HyggeTheme.ink)
                     FeedPrimaryButton(title: "Continue in chat") {
-                        store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id; dismiss()
+                        store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id; close()
                     }
                 } else {
                     ForEach(visibleKeys.filter { task.draftedPayload[$0]?.isEmpty == false }, id: \.self) { key in
@@ -120,7 +120,7 @@ struct FeedTaskReview: View {
                         FeedPrimaryButton(title: submitting ? "Starting…" : actionTitle(task)) {
                             guard !submitting else { return }; submitting = true
                             Task { await store.approveAndRun(taskID: taskID) }
-                            dismiss()
+                            close()
                         }.disabled(submitting || store.isPaused)
                         if store.isPaused { Text("Resume Hygge before continuing.").font(.caption).foregroundStyle(HyggeTheme.secondary) }
                     }

@@ -8,9 +8,21 @@ struct FeedPreviewHost: View {
     @State private var ready = false
     var body: some View {
         Group {
-            if ready { HomeFeedView() }
+            if ready { HomeFeedView().task { await renderCatalog() } }
             else { Color.clear.task { seed(); ready = true } }
         }.preferredColorScheme(.dark)
+    }
+    @MainActor private func renderCatalog() async {
+        guard ProcessInfo.processInfo.arguments.contains("--feed-catalog") else { return }
+        try? await Task.sleep(for: .seconds(3))
+        let board = FeedCatalogBoard(liveTask: store.tasks.first { $0.browserSessionID != nil })
+            .environment(store).environment(\.colorScheme, .dark)
+        let renderer = ImageRenderer(content: board)
+        renderer.scale = 1
+        if let data = renderer.uiImage?.pngData(),
+           let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            try? data.write(to: folder.appendingPathComponent("feed-object-overview.png"))
+        }
     }
     private func seed() {
         store.profile = EarningsProfile(displayName: "Mikael", interests: [.creative], locationLabel: "Austin, TX")
@@ -28,6 +40,14 @@ struct FeedPreviewHost: View {
         question.status = .needsHuman
         question.help = TaskHelp(kind: .information, message: "Which title feels most like you?", questions: [.init(text: "Professional title", suggestions: ["Designer & writer", "Creative freelancer"])])
         store.tasks = [review, question]
+        if ProcessInfo.processInfo.arguments.contains("--browser-preview") {
+            let workroom = TargetSite(id: "workroom", name: "Workroom", startURLString: "https://workroom.example", category: .creative, goalTemplate: "")
+            store.sites.append(workroom)
+            var live = AgentTaskFactory.profileTask(profile: store.profile, site: workroom)
+            live.id = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
+            live.status = .running; live.browserSessionID = "preview"; live.backendTaskID = "preview-task"
+            store.tasks.append(live)
+        }
         store.activityEvents = [
             ActivityEvent(kind: .joinedSite, sentence: "Your Contra account is ready.", detail: "Hygge confirmed that you’re signed in.", siteID: "contra"),
             ActivityEvent(kind: .workCompleted, sentence: "You logged $120 for a design project.", detail: "This amount was entered by you.", siteID: "contra", grossAmount: 120)

@@ -28,12 +28,13 @@ struct SwipeFeedCard<Content: View>: View {
                     .accessibilityHidden(true)
             }
             .offset(x: offset)
-            .rotationEffect(.degrees(reduceMotion ? 0 : (offset < 0 ? -min(2, abs(offset) / width * 2) : 0)))
+            .rotationEffect(.degrees(rotation))
             .background {
                 FeedSwipeUnderlay(offset: offset, armed: armed, primaryTitle: primaryTitle,
                                   primaryIcon: primaryIcon, reduceMotion: reduceMotion,
                                   disabled: committing, commit: commit)
                     .accessibilityHidden(true)
+                    .opacity(offset == 0 ? 0 : 1)
                     .background(GeometryReader { geometry in
                         Color.clear.onAppear { width = geometry.size.width }
                             .onChange(of: geometry.size.width) { _, value in width = value; close() }
@@ -48,6 +49,10 @@ struct SwipeFeedCard<Content: View>: View {
             .accessibilityHint("Opens details. Swipe right for \(primaryTitle.lowercased()), left to dismiss.")
             .onChange(of: openCardID) { _, value in if value != id { close() } }
     }
+    private var rotation: Double {
+        guard !reduceMotion, offset < 0, width > 0 else { return 0 }
+        return -min(2.0, Double(abs(offset) / width) * 2.0)
+    }
     private func tap() {
         guard !committing else { return }
         if offset != 0 { close() } else { open() }
@@ -56,7 +61,7 @@ struct SwipeFeedCard<Content: View>: View {
     private func drag(_ translation: CGFloat) {
         guard !committing else { return }
         offset = min(width, max(-width, origin + translation))
-        let next = abs(offset) >= FeedSwipe.threshold(width: width)
+        let next = Double(abs(offset)) >= FeedSwipe.threshold(width: Double(width))
         if next != armed {
             armed = next
             if next { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
@@ -64,10 +69,10 @@ struct SwipeFeedCard<Content: View>: View {
     }
     private func endDrag(_ cancelled: Bool) {
         guard !cancelled else { close(); return }
-        switch FeedSwipe.outcome(offset: offset, width: width) {
+        switch FeedSwipe.outcome(offset: Double(offset), width: Double(width)) {
         case .closed: close()
         case .revealed(let direction):
-            withAnimation(motion) { offset = CGFloat(direction) * FeedSwipe.revealWidth }
+            withAnimation(motion) { offset = CGFloat(direction) * CGFloat(FeedSwipe.revealWidth) }
         case .triggered(let direction): commit(direction)
         }
         armed = false
@@ -115,7 +120,7 @@ private struct FeedSwipeUnderlay: View {
                             .multilineTextAlignment(.center)
                     }
                     .foregroundStyle(isPrimary ? HyggeTheme.onSage : HyggeTheme.faceBrown)
-                    .frame(width: max(FeedSwipe.revealWidth, abs(offset)), height: geometry.size.height)
+                    .frame(width: max(CGFloat(FeedSwipe.revealWidth), abs(offset)), height: geometry.size.height)
                     .frame(width: max(0, abs(offset)), alignment: isPrimary ? .leading : .trailing)
                     .clipped().contentShape(Rectangle())
                 }.buttonStyle(.plain).disabled(disabled || offset == 0)
