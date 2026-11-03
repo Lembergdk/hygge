@@ -98,11 +98,24 @@ public struct FiledEmailSummary: Codable, Equatable, Sendable, Identifiable {
     public var actionableItems: [String]
     public var attachments: [AttachmentMeta]
     public var filedAt: String?
+    /// How the sender relates to the user: "owner" (the user's own
+    /// verified address), "site" (a place Hygge watches), or "unknown".
+    public var relation: String?
+    /// "pending" while an unknown sender waits for the user's call;
+    /// otherwise the remembered sender choice ("work"/"file"/"ignore")
+    /// or "none" for signup codes and confirmations.
+    public var decision: String?
+    /// Plain labels for things the mail mentioned that may matter
+    /// ("Someone may have messaged you") — mentions, never claims.
+    public var highlights: [String]?
+    /// The watched site this mail belongs to, when one matches.
+    public var siteID: String?
 
     public init(id: String, sender: String, senderDomain: String, subject: String,
                 date: String? = nil, kind: String, summary: String,
                 actionableItems: [String] = [], attachments: [AttachmentMeta] = [],
-                filedAt: String? = nil) {
+                filedAt: String? = nil, relation: String? = nil, decision: String? = nil,
+                highlights: [String]? = nil, siteID: String? = nil) {
         self.id = id
         self.sender = sender
         self.senderDomain = senderDomain
@@ -113,6 +126,10 @@ public struct FiledEmailSummary: Codable, Equatable, Sendable, Identifiable {
         self.actionableItems = actionableItems
         self.attachments = attachments
         self.filedAt = filedAt
+        self.relation = relation
+        self.decision = decision
+        self.highlights = highlights
+        self.siteID = siteID
     }
 }
 

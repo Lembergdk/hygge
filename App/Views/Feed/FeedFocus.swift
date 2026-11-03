@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum FeedFocus: Identifiable {
-    case proposal(ProposedSite), opportunity(Opportunity), event(ActivityEvent), task(AgentTask), browser(AgentTask), paused
+    case proposal(ProposedSite), opportunity(Opportunity), event(ActivityEvent), task(AgentTask), browser(AgentTask), paused, emailDecision(FiledEmailSummary)
     var id: String {
         switch self {
         case .proposal(let value): return "proposal-\(value.id)"
@@ -9,12 +9,13 @@ enum FeedFocus: Identifiable {
         case .event(let value): return "event-\(value.id)"
         case .task(let value), .browser(let value): return Self.taskKey(value)
         case .paused: return "paused"
+        case .emailDecision(let value): return "email-decision-\(value.senderDomain)"
         }
     }
     var maximumHeight: CGFloat {
         switch self {
         case .paused: return 320
-        case .event: return 560
+        case .event, .emailDecision: return 560
         case .proposal: return 600
         case .opportunity, .task: return 680
         case .browser: return 780

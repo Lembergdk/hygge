@@ -37,12 +37,14 @@ public struct BeliefBook: Codable, Equatable, Sendable {
     public var pending: [Belief] = []
     public init() {}
 
-    public mutating func propose(sentence: String, source: Belief.Source, confidence: Double) {
+    @discardableResult
+    public mutating func propose(sentence: String, source: Belief.Source, confidence: Double) -> Bool {
         let clean = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty,
               !beliefs.contains(where: { $0.sentence == clean }),
-              !pending.contains(where: { $0.sentence == clean }) else { return }
+              !pending.contains(where: { $0.sentence == clean }) else { return false }
         pending.append(Belief(sentence: clean, source: source, confidence: confidence))
+        return true
     }
 
     public mutating func confirm(proposalID: UUID) {

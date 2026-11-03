@@ -13,6 +13,9 @@ import {
   attachEmailToTasks,
   classifyEmail,
   extractEmailCode,
+  extractEmailHighlights,
+  parseOwnerEmailCommand,
+  senderEmailOf,
   generateSitePassword,
   handleEmailAddressRequest,
   isSafeVerificationLink,
@@ -423,4 +426,61 @@ test("receive-only inbox: the only mail-send path is magic-link auth mail", () =
   // The Email Worker entry exists and is inbound-shaped.
   const index = readFileSync(srcDir + "index.ts", "utf8");
   assert.match(index, /email:\s*handleEmailMessage/);
+});
+
+// ---- triage: owner mail, site highlights, owner commands -----------------
+
+test("triage: owner mail counts only with an aligned pass from a verified address", async () => {
+  const ownerRaw = (auth: boolean, from = "Sam Example <sam@gmail.com>") => [
+    `From: ${from}`,
+    ...(auth ? ["Authentication-Results: mx.cloudflare.net; dkim=pass header.d=gmail.com"] : []),
+    "To: 4839201847@usehygge.cc",
+    "Subject: Please look on Rover",
+    "Content-Type: text/plain",
+    "",
+    "Scan Rover for new jobs when you can.",
+  ].join("\r\n");
+  const run = async (raw: string) => {
+    const db = new MemoryEmailAddressDb();
+    await allocateHyggeAddress(db, "owner-1", { nextDigits: rngDigits("4839201847") });
+    const deliveries: InboundEmailDelivery[] = [];
+    await processInboundEmail({ to: "4839201847@usehygge.cc", raw }, {
+      db,
+      verifiedEmailsFor: async (userId) => (userId === "owner-1" ? ["sam@gmail.com"] : []),
+      deliver: async (_u, d) => { deliveries.push(d); },
+    });
+    return deliveries[0];
+  };
+  const mine = await run(ownerRaw(true));
+  assert.equal(mine.triage?.ownerVerified, true);
+  assert.equal(mine.triage?.senderEmail, "sam@gmail.com");
+  // Same address, no aligned authentication: never the owner.
+  assert.equal((await run(ownerRaw(false))).triage?.ownerVerified, false);
+  // Authenticated, but a different person.
+  assert.equal((await run(ownerRaw(true, "Other <other@gmail.com>"))).triage?.ownerVerified, false);
+  assert.equal(senderEmailOf("Sam Example <SAM@Gmail.com>"), "sam@gmail.com");
+});
+
+test("triage: site-mail highlights are plain, deterministic mentions", () => {
+  const kinds = (raw: string) => extractEmailHighlights(parseMimeMessage(raw)).map((h) => h.kind);
+  const mail = (subject: string, body: string) => [
+    "From: Rover <no-reply@rover.com>", "To: 4839201847@usehygge.cc",
+    `Subject: ${subject}`, "Content-Type: text/plain", "", body,
+  ].join("\r\n");
+  assert.ok(kinds(mail("New message from Alex", "Alex sent you a message about Saturday. Reply: https://www.rover.com/inbox")).includes("client_message"));
+  assert.ok(kinds(mail("3 new jobs near you", "New dog walking jobs were just posted: https://www.rover.com/jobs")).includes("job_alert"));
+  assert.ok(kinds(mail("Booking confirmed", "Your booking for Saturday is confirmed.")).includes("booking"));
+  assert.ok(kinds(mail("Payment sent", "You received a payment for last weekend.")).includes("payment"));
+  assert.deepEqual(kinds(mail("Our November newsletter", "Season's greetings from the team.")), []);
+});
+
+test("triage: owner commands parse strictly, forwarded mail never does", () => {
+  const sites = [{ siteID: "rover", name: "Rover", domain: "rover.com" }];
+  assert.deepEqual(parseOwnerEmailCommand({ subject: "", text: "Scan Rover for new jobs" }, sites), { type: "scan", siteID: "rover" });
+  assert.deepEqual(parseOwnerEmailCommand({ subject: "Rover", text: "please re-add Rover" }, sites), { type: "readd", siteID: "rover" });
+  assert.deepEqual(parseOwnerEmailCommand({ subject: "", text: "add pawshake.com" }, sites), { type: "add", domain: "pawshake.com" });
+  assert.deepEqual(parseOwnerEmailCommand({ subject: "pause", text: "" }, sites), { type: "pause" });
+  assert.equal(parseOwnerEmailCommand({ subject: "", text: "don't scan Rover" }, sites), null);
+  assert.equal(parseOwnerEmailCommand({ subject: "", text: "Thanks, great week so far!" }, sites), null);
+  assert.equal(parseOwnerEmailCommand({ subject: "Fwd: scan Rover", text: "Scan Rover for new jobs" }, sites), null);
 });
