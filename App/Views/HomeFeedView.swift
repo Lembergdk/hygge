@@ -14,7 +14,11 @@ struct HomeFeedView: View {
     @State private var dragStartCenter: CGPoint?
     /// Window-space center while he hops between spots (overrides the
     /// placement-derived center so the hop itself animates).
-    @State private var centerOverride: CGPoint?
+    /// Visual offset while hopping between spots: layout sits at the
+    /// target placement, the offset (start - target, animated to zero)
+    /// draws him along the way. Driving .position itself through an
+    /// optional override snapped him off-screen for a frame on close.
+    @State private var hopOffset: CGSize = .zero
     /// Where he was living before a tap sent him home for chat.
     @State private var returnPlacement: FlamePlacement?
 
@@ -51,6 +55,7 @@ struct HomeFeedView: View {
                 onDragBegan: { dragStartCenter = flameWindowCenter() }
                 onDragEnded: { translation in commitDrag(translation) }
                     .position(flameCenter(in: geo))
+                    .offset(hopOffset)
                     // Above the chat bubble (zIndex 3): on close he hops
                     // back THROUGH the bubble's fading rectangle, and
                     // behind it he vanished until the fade finished.
@@ -232,12 +237,19 @@ struct HomeFeedView: View {
                    screenSize.height - flameFrameH / 2 + 14))
     }
 
+    /// Where layout puts him (his placement spot), before hop offset.
+    private func flameLayoutCenter() -> CGPoint {
+        windowCenter(for: playStore.settings.placement)
+    }
+
+    /// Where he is actually drawn right now, hop offset included.
     private func flameWindowCenter() -> CGPoint {
-        centerOverride ?? windowCenter(for: playStore.settings.placement)
+        let c = flameLayoutCenter()
+        return CGPoint(x: c.x + hopOffset.width, y: c.y + hopOffset.height)
     }
 
     private func flameCenter(in geo: GeometryProxy) -> CGPoint {
-        let wc = flameWindowCenter()
+        let wc = flameLayoutCenter()
         let o = geo.frame(in: .global).origin
         return CGPoint(x: wc.x - o.x, y: wc.y - o.y)
     }
@@ -263,18 +275,28 @@ struct HomeFeedView: View {
                      then: @escaping () -> Void) {
         let distance = hypot(target.x - start.x, target.y - start.y)
         if reduceMotion || distance < 8 {
-            centerOverride = nil
+            hopOffset = .zero
             then()
             return
         }
         let duration = min(0.85, max(0.45, Double(distance) / 1400 + 0.35))
-        centerOverride = start
+        // Placement already holds the target at both call sites, so
+        // layout is there; pin him to the start with an offset in a
+        // no-animation transaction, let that frame land, then animate
+        // the offset home. Interpolating from exactly where he is
+        // drawn now is what keeps the first hop frame on screen.
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) {
+            hopOffset = CGSize(width: start.x - target.x,
+                               height: start.y - target.y)
+        }
         flameTraveling = true
-        withAnimation(.easeInOut(duration: duration)) { centerOverride = target }
         Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(30))
+            withAnimation(.easeInOut(duration: duration)) { hopOffset = .zero }
             try? await Task.sleep(for: .seconds(duration))
             flameTraveling = false
-            centerOverride = nil
             then()
         }
     }
