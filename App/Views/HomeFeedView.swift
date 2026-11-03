@@ -31,6 +31,7 @@ struct HomeFeedView: View {
 
     @State private var showProfile = false
     @State private var showNotifications = false
+    @State private var emailOpenItem: FiledEmailSummary?
     @State private var earlierExpanded = false
     @State private var morePlaces = false
     @State private var openCardID: String?
@@ -125,9 +126,27 @@ struct HomeFeedView: View {
         .sheet(isPresented: $showConversation, onDismiss: { store.conversationTaskID = nil }) { ConversationView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showProfile) { ProfileHubView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showNotifications) { NavigationStack { SettingsPermissionsView() }.presentationDragIndicator(.visible) }
+        .sheet(item: $emailOpenItem) { mail in
+            NavigationStack { FiledEmailDetailView(mail: mail) }.presentationDragIndicator(.visible)
+        }
         .onChange(of: store.pendingTaskOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingTaskOpenID = nil
             openChat(store.tasks.first { $0.id == id })
+        }
+        // A tapped push opens the exact element it named: whatever
+        // is presented closes first, then the element itself opens.
+        .onChange(of: store.pendingOpportunityOpenID, initial: true) { _, id in
+            guard let id else { return }; store.pendingOpportunityOpenID = nil
+            guard let opportunity = store.opportunities.first(where: { $0.id == id }) else { return }
+            dismissPresented()
+            receiveFeedUpdates()
+            openFocus(.opportunity(opportunity))
+        }
+        .onChange(of: store.pendingEmailOpenID, initial: true) { _, id in
+            guard let id else { return }; store.pendingEmailOpenID = nil
+            guard let mail = store.filedEmailSummaries.first(where: { $0.id.lowercased() == id.uuidString.lowercased() }) else { return }
+            dismissPresented()
+            emailOpenItem = mail
         }
         .onChange(of: store.conversationTaskID) { _, id in
             guard id != nil else { return }
@@ -520,10 +539,22 @@ struct HomeFeedView: View {
              })
     }
     private func opportunityCard(_ opportunity: Opportunity) -> some View {
-        card(id: "opportunity-\(opportunity.id)", title: opportunity.title,
-             subtitle: "\(opportunity.payLabel) · \(opportunity.isRemote ? "Remote" : opportunity.locationLabel)",
-             icon: opportunity.category == .creative ? "paintpalette" : "briefcase", style: .opportunity, primaryTitle: "Prepare draft", primaryIcon: "square.and.pencil",
-             open: { openFocus(.opportunity(opportunity)) }, primary: { store.draftApplication(for: opportunity) },
+        // A blocked-look item is not work: its card offers the fix
+        // (in its detail), never an application draft.
+        let blocked = opportunity.needsYouKind != nil
+        return card(id: "opportunity-\(opportunity.id)", title: opportunity.title,
+             subtitle: blocked ? store.siteName(id: opportunity.siteID)
+                : "\(opportunity.payLabel) · \(opportunity.isRemote ? "Remote" : opportunity.locationLabel)",
+             icon: blocked ? (opportunity.needsYouKind == "login" ? "key" : "hand.raised")
+                : opportunity.category == .creative ? "paintpalette" : "briefcase",
+             style: .opportunity,
+             primaryTitle: blocked ? (opportunity.needsYouKind == "login" ? "Save login again" : "Open the site") : "Prepare draft",
+             primaryIcon: blocked ? "arrow.right" : "square.and.pencil",
+             open: { openFocus(.opportunity(opportunity)) },
+             primary: {
+                if blocked { openFocus(.opportunity(opportunity)) }
+                else { store.draftApplication(for: opportunity) }
+             },
              dismiss: {
                 store.setStatus(.dismissed, for: opportunity.id)
                 showUndo("Opportunity dismissed", restoring: "opportunity-\(opportunity.id)") { store.setStatus(opportunity.status, for: opportunity.id) }
@@ -719,6 +750,14 @@ struct HomeFeedView: View {
                 if let id { updateGate.restore(id, at: index) }
             })
         }
+    }
+    private func dismissPresented() {
+        showConversation = false
+        showProfile = false
+        showYourWork = false
+        showNotifications = false
+        if showBubbleChat { closeBubble() }
+        if focus != nil { closeFocus() }
     }
     private func openChat(_ task: AgentTask?) {
         if let task { store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id }

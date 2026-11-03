@@ -652,6 +652,10 @@ export interface InboundEmailDelivery {
   triage?: {
     senderEmail: string;
     ownerVerified: boolean;
+    /// The aligned DKIM/SPF/DMARC pass for the sender domain.
+    /// Acting on mail content (e.g. a message-waiting push)
+    /// requires it; forged mail is only ever filed.
+    senderAuthenticated: boolean;
     highlights: EmailHighlight[];
   };
 }
@@ -747,7 +751,12 @@ export async function processInboundEmail(
     summary: summarizeEmail(parsed, kind, code),
     code,
     verification,
-    triage: { senderEmail, ownerVerified, highlights: extractEmailHighlights(parsed) },
+    triage: {
+      senderEmail,
+      ownerVerified,
+      senderAuthenticated: parsed.senderAuthenticated,
+      highlights: extractEmailHighlights(parsed),
+    },
   };
   await count(kind);
   try {

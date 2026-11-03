@@ -38,24 +38,51 @@ struct FeedOpportunityDetail: View {
     @Environment(AppStore.self) private var store
     let close: () -> Void
     let opportunityID: UUID
+    @State private var saveLogin = false
+    @State private var openSite = false
     var body: some View {
         FeedDetailContent {
             if let opportunity = store.opportunities.first(where: { $0.id == opportunityID }) {
                 Text(opportunity.title).font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
                 Text(store.siteName(id: opportunity.siteID)).foregroundStyle(HyggeTheme.sageDeep)
-                VStack(spacing: 18) {
-                    FeedFact(icon: "banknote", title: "Pay", value: opportunity.payLabel)
-                    FeedFact(icon: "mappin", title: "Location", value: opportunity.isRemote ? "Remote" : opportunity.locationLabel)
-                }.padding(20).hyggeCard(radius: 22)
-                Text(opportunity.summary).foregroundStyle(HyggeTheme.ink)
-                if !opportunity.requiredSkills.isEmpty {
-                    FeedFact(icon: "sparkles", title: "Skills", value: opportunity.requiredSkills.joined(separator: ", "))
-                }
-                if !store.applications.contains(where: { $0.opportunityID == opportunity.id }) {
-                    FeedPrimaryButton(title: "Prepare an application") { store.draftApplication(for: opportunity); close() }
-                    Text("You’ll review it before anything is sent.").font(.caption).foregroundStyle(HyggeTheme.secondary)
+                if let blockedKind = opportunity.needsYouKind {
+                    // A blocked look, not work: the one action is the fix.
+                    Text(opportunity.summary).foregroundStyle(HyggeTheme.ink)
+                    if blockedKind == "login" {
+                        FeedPrimaryButton(title: "Save login again") { saveLogin = true }
+                    } else {
+                        FeedPrimaryButton(title: "Open \(store.siteName(id: opportunity.siteID))") { openSite = true }
+                    }
+                } else {
+                    VStack(spacing: 18) {
+                        FeedFact(icon: "banknote", title: "Pay", value: opportunity.payLabel)
+                        FeedFact(icon: "mappin", title: "Location", value: opportunity.isRemote ? "Remote" : opportunity.locationLabel)
+                    }.padding(20).hyggeCard(radius: 22)
+                    Text(opportunity.summary).foregroundStyle(HyggeTheme.ink)
+                    if !opportunity.requiredSkills.isEmpty {
+                        FeedFact(icon: "sparkles", title: "Skills", value: opportunity.requiredSkills.joined(separator: ", "))
+                    }
+                    if !store.applications.contains(where: { $0.opportunityID == opportunity.id }) {
+                        FeedPrimaryButton(title: "Prepare an application") { store.draftApplication(for: opportunity); close() }
+                        Text("You’ll review it before anything is sent.").font(.caption).foregroundStyle(HyggeTheme.secondary)
+                    }
                 }
             } else { Text("This opportunity is no longer available.").foregroundStyle(HyggeTheme.secondary) }
+        }
+        .sheet(isPresented: $saveLogin) {
+            if let opportunity = store.opportunities.first(where: { $0.id == opportunityID }) {
+                CredentialSaveSheet(siteName: store.siteName(id: opportunity.siteID),
+                                    domain: store.site(id: opportunity.siteID)?.domain ?? opportunity.urlString) { saved in
+                    // A saved login ends the episode (the backend clears
+                    // it); drop the card here so the feed agrees at once.
+                    if saved { store.setStatus(.dismissed, for: opportunity.id); close() }
+                }.presentationDragIndicator(.visible)
+            }
+        }
+        .sheet(isPresented: $openSite) {
+            if let opportunity = store.opportunities.first(where: { $0.id == opportunityID }) {
+                CloudBrowserView(urlString: opportunity.urlString, takeControlOnOpen: true)
+            }
         }
     }
 }

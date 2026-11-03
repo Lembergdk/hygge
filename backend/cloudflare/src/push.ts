@@ -1,15 +1,19 @@
-/// Push notifications (Brief 07): device-token registration, the
-/// APNs sender, and the trigger rules. Transactional only — a task
-/// entering `needsHuman` and a scheduled-scan batch that surfaced
-/// new work are the only two events that can ever notify. There is
-/// no digest, no marketing path, and no other caller.
+/// Push notifications (Brief 07, descriptive format by the user's
+/// call 2026-11-03): device-token registration, the APNs sender,
+/// and the trigger rules. Transactional only — a task entering
+/// `needsHuman`, a scheduled-scan batch (new work or a blocked
+/// look), and tracked-site mail mentioning a client message are
+/// the only events that can ever notify. There is no digest, no
+/// marketing path, and no other caller.
 ///
-/// Payload minimalism is structural: `buildPushPayload` can only
-/// emit a constant calm title plus a task/feed reference for
-/// deep-linking. It has no parameter that could carry a code, an
-/// amount, a message body, or profile data, so a future caller
-/// cannot smuggle one in without changing this function's shape
-/// (and its schema test).
+/// Format: messages from Hygge wear the sender's name (`Hygge`)
+/// with the actual message as the body; feed pushes name the
+/// content (site, listing, the listing's own pay words). Bodies
+/// are built only by the bounded builders below: text is
+/// whitespace-collapsed, code-shaped digit runs are redacted, and
+/// everything truncates at a word boundary. A code, a login
+/// detail, or an earnings claim still has no path in — pay
+/// appears only as the listing's own label.
 ///
 /// Tokens are personal data: they live in D1 `device_tokens` keyed
 /// to the owning user, are never logged, and prove nothing about
@@ -26,25 +30,56 @@ import type { ScanTickSummary } from "./scan.ts";
 
 // ---- trigger vocabulary ------------------------------------------------
 
-export type PushKind = "needs_you" | "new_work";
-export type PushRefKind = "task" | "feed";
+export type PushKind = "needs_you" | "new_work" | "message_waiting";
+export type PushRefKind = "task" | "feed" | "email";
 
 export interface PushEvent {
   kind: PushKind;
   refKind: PushRefKind;
   refId: string | null;
+  title: string;
+  body: string;
 }
 
-/// Final copy is Mikael's call at review time (brief open question);
-/// these are the brief's proposed neutral titles. Titles only —
-/// APNs `alert` is a bare string here, so no body can exist.
-export const PUSH_TITLES: Record<PushKind, string> = {
-  needs_you: "Hygge needs you",
-  new_work: "New work found",
-};
+export const PUSH_BODY_MAX_CHARS = 180;
 
-export function needsHumanEvent(taskId: string): PushEvent {
-  return { kind: "needs_you", refKind: "task", refId: taskId };
+/// One formatting path for everything a push may say: collapse
+/// whitespace, redact code-shaped digit runs, truncate at a word
+/// boundary. Applied to titles and bodies at payload build time,
+/// so no caller can bypass it.
+export function pushSafeText(text: string, maxChars = PUSH_BODY_MAX_CHARS): string {
+  const clean = String(text ?? "")
+    .replace(/\b\d{4,8}\b/g, "[code]")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (clean.length <= maxChars) return clean;
+  const cut = clean.slice(0, maxChars);
+  const boundary = cut.lastIndexOf(" ");
+  return `${(boundary > 0 ? cut.slice(0, boundary) : cut).trimEnd()}…`;
+}
+
+/// A chat message from Hygge: the sender's name, then the message
+/// itself — the same words the thread shows.
+export function needsHumanEvent(taskId: string, message?: string): PushEvent {
+  return {
+    kind: "needs_you", refKind: "task", refId: taskId,
+    title: "Hygge",
+    body: message?.trim() ? message : "Something needs you.",
+  };
+}
+
+/// Tracked-site mail mentioning a client message. The body is the
+/// site's own (already code-redacted) subject line, attributed —
+/// Hygge relays that mail arrived; it has not read the message.
+export function messageWaitingEvent(
+  mailId: string, detail: { siteName: string; subject: string },
+): PushEvent {
+  const subject = detail.subject?.trim() || "You may have a new message";
+  return {
+    kind: "message_waiting", refKind: "email", refId: mailId,
+    title: "Hygge",
+    body: `${detail.siteName} emailed: “${subject}”`,
+  };
 }
 
 /// A task run notifies only on a *fresh* entry into needsHuman, and
@@ -65,32 +100,62 @@ export function shouldNotifyNeedsHuman(
 /// the new items are still waiting in the feed when the user opens
 /// the app from the needs-you push.
 export function planTickNotifications(
-  summary: Pick<ScanTickSummary, "paused" | "surfacedIds" | "needsYouItemIds">,
+  summary: Pick<ScanTickSummary, "paused" | "surfacedIds" | "needsYouItemIds" | "firstSurfaced" | "firstNeedsYou">,
 ): PushEvent[] {
   if (summary.paused) return [];
   const needsYou = summary.needsYouItemIds?.[0];
-  if (needsYou) return [{ kind: "needs_you", refKind: "feed", refId: needsYou }];
+  if (needsYou) {
+    const detail = summary.firstNeedsYou;
+    return [{
+      kind: "needs_you", refKind: "feed", refId: needsYou,
+      title: detail ? `${detail.siteName} needs you` : "Hygge needs you",
+      body: detail?.title || "Something in your feed needs you.",
+    }];
+  }
   const surfaced = summary.surfacedIds?.[0];
-  if (surfaced) return [{ kind: "new_work", refKind: "feed", refId: surfaced }];
+  if (surfaced) {
+    const first = summary.firstSurfaced;
+    if (!first) {
+      return [{
+        kind: "new_work", refKind: "feed", refId: surfaced,
+        title: "New work found", body: "Fresh work is waiting in your feed.",
+      }];
+    }
+    const parts = [
+      first.title,
+      first.payLabel && first.payLabel !== "See listing" ? first.payLabel : "",
+      first.isRemote ? "Remote" : (first.locationLabel && first.locationLabel !== "See listing" ? first.locationLabel : ""),
+    ].filter(Boolean);
+    const more = (summary.surfacedIds?.length ?? 1) - 1;
+    return [{
+      kind: "new_work", refKind: "feed", refId: surfaced,
+      title: `New work on ${first.siteName}`,
+      body: parts.join(" · ") + (more > 0 ? ` (+${more} more)` : ""),
+    }];
+  }
   return [];
 }
 
 // ---- payload -------------------------------------------------------------
 
 export interface PushPayload {
-  aps: { alert: string; sound: string };
+  aps: { alert: { title: string; body: string }; sound: string };
   hyggeKind: PushKind;
   hyggeRef: string | null;
   hyggeRoute: string;
 }
 
-/// The ONLY payload shape this system can send: constant title +
-/// reference. No badge: the server does not keep a badge count, and
-/// inventing one would drift from what the feed actually shows.
+/// The ONLY payload shape this system can send: a formatted
+/// title+body plus the reference the tap opens. No badge: the
+/// server does not keep a badge count, and inventing one would
+/// drift from what the feed actually shows.
 export function buildPushPayload(event: PushEvent): PushPayload {
   const route = event.refId ? `${event.refKind}/${event.refId}` : "home";
   return {
-    aps: { alert: PUSH_TITLES[event.kind], sound: "default" },
+    aps: {
+      alert: { title: pushSafeText(event.title, 60), body: pushSafeText(event.body) },
+      sound: "default",
+    },
     hyggeKind: event.kind,
     hyggeRef: event.refId,
     hyggeRoute: route,

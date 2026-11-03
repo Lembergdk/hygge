@@ -1074,6 +1074,14 @@ export interface ScanTickSummary {
   skipped: ScanSkip[];
   surfacedIds: string[];
   needsYouItemIds: string[];
+  /// The first thing of each kind this tick surfaced, in words —
+  /// the push names its content, so the planner needs more than
+  /// ids. Pay appears only as the listing's own label.
+  firstSurfaced: {
+    siteName: string; title: string; payLabel: string;
+    locationLabel: string; isRemote: boolean;
+  } | null;
+  firstNeedsYou: { siteName: string; title: string } | null;
   /// Site proposals withdrawn because their site became ineligible.
   withdrawnProposalIds: string[];
   /// "Ignored" feedback events derived this tick (ids).
@@ -1097,7 +1105,7 @@ export async function runScheduledTick(
   const say = (m: string) => { log.push(m); deps.log?.(m); };
   const summary: ScanTickSummary = {
     slot: opts.slot, runDate, paused: false, scanned: [], skipped: [],
-    surfacedIds: [], needsYouItemIds: [], withdrawnProposalIds: [],
+    surfacedIds: [], needsYouItemIds: [], firstSurfaced: null, firstNeedsYou: null, withdrawnProposalIds: [],
     ignoredEventIds: [], filtered: [], writeTasksCreated: 0, log,
   };
 
@@ -1369,6 +1377,7 @@ export async function runScheduledTick(
         gate.existingKeys.add(dedupeKey(site.id, String(payload.title)));
         gate.existingIds.add(normalizeId(itemId));
         summary.needsYouItemIds.push(itemId);
+        summary.firstNeedsYou ??= { siteName: site.name, title: String(payload.title) };
       }
       // Failures count toward nothing: no exhaustion update, retry
       // at the next scheduled slot (unless an episode blocks it).
@@ -1409,6 +1418,12 @@ export async function runScheduledTick(
       gate.existingKeys.add(dedupeKey(site.id, listing.title));
       gate.existingIds.add(normalizeId(id));
       summary.surfacedIds.push(id);
+      summary.firstSurfaced ??= {
+        siteName: site.name, title: listing.title,
+        payLabel: listing.payLabel || "See listing",
+        locationLabel: listing.locationLabel || "",
+        isRemote: listing.isRemote,
+      };
       surfaced += 1;
     }
 

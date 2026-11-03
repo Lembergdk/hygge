@@ -160,6 +160,8 @@ final class AppStore {
     /// unregister exactly it; it is never part of synced state.
     var notificationPrimerVisible = false
     var pendingTaskOpenID: UUID?
+    var pendingOpportunityOpenID: UUID?
+    var pendingEmailOpenID: UUID?
     var highlightedOpportunityID: UUID?
     static let pushTokenKey = "hyggePushTokenV1"
     static let pushPrimerResolvedKey = "hyggePushPrimerResolvedV1"
@@ -456,10 +458,11 @@ final class AppStore {
         await refreshNotificationPrimer()
     }
 
-    /// A tapped notification lands on fresh state, then on the item
-    /// it named. Home is the only destination: a task opens its
-    /// detail sheet; a feed item is highlighted at the top of the
-    /// pinned zone's home feed (it was pulled just now).
+    /// A tapped notification lands on fresh state, then opens the
+    /// exact element it named: the task's chat card, the listing's
+    /// own detail, or that one filed mail. If the element is gone
+    /// (handled elsewhere, dismissed), Home says so in one line —
+    /// never a wrong element silently substituted.
     func handlePushRoute(_ route: String) async {
         await pullFromServer()
         switch PushDeepLink.parse(route: route) {
@@ -471,9 +474,18 @@ final class AppStore {
             }
         case .feedItem(let id):
             highlightedOpportunityID = id
-            lastMessage = opportunities.contains { $0.id == id }
-                ? "Here is the new work that just turned up."
-                : "Fresh work is waiting in your feed below."
+            if opportunities.contains(where: { $0.id == id }) {
+                pendingOpportunityOpenID = id
+            } else {
+                lastMessage = "Fresh work is waiting in your feed below."
+            }
+        case .email(let id):
+            await refreshHyggeEmail()
+            if filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() }) {
+                pendingEmailOpenID = id
+            } else {
+                lastMessage = "That mail is filed under Hygge email in your profile."
+            }
         case .home:
             break
         }
@@ -494,6 +506,8 @@ final class AppStore {
         PushInbox.pendingRoute = nil
         notificationPrimerVisible = false
         pendingTaskOpenID = nil
+        pendingOpportunityOpenID = nil
+        pendingEmailOpenID = nil
         highlightedOpportunityID = nil
         await backend.signOut()
         isSignedIn = false
