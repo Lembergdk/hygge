@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "sites": [
+    {
+      "siteId": "wave4-jobs",
+      "origin": "https://hygge-wave4-jobs.lemberg-89a.workers.dev",
+      "routes": {
+        "home": "/",
+        "listings": "/listings",
+        "apply": "/apply",
+        "login": "/login"
+      },
+      "controls": [
+        "Search",
+        "Apply",
+        "Submit",
+        "Cover"
+      ],
+      "fieldSets": [
+        "listings"
+      ],
+      "pitfalls": [],
+      "review": {
+        "policyVersion": "hygge-public-skills-v2.1",
+        "reviewedRevision": "wave4-2026-11-03",
+        "source": "developer_review"
+      }
+    }
+  ]
+}

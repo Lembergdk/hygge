@@ -1,5 +1,10 @@
 import { classifyBrowserFailure } from "./browser-failure.ts";
 import { help, applyHelpReply, mobileTask, canResumeWithInboxCode, reconcileEndedSession, rejectTaskHelp } from "./task-help.ts";
+import { bindWorkspaceOwner, workspaceMode } from './workspace-owner.ts';
+import { migrateCredentialSchema } from './schema-migrations.ts';
+import { createWorkspaceExecution, type WorkspaceExecution } from './workspace-execution.ts';
+import type { WorkspaceBrowser } from './workspace-browser.ts';
+import type { WorkspaceMissionHooks } from './workspace-task-runner.ts';
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { json } from "./env.ts";
@@ -11,8 +16,8 @@ import { makeDecider, runMission, distillHints, emailCodeAllowedForTask } from "
 import * as vault from "./vault.ts";
 import { PROFILE_ROW_ID, STATE_ROUTES, StateStore, createSqliteStateDb, ensureStateSchema, normalizeId } from "./state.ts";
 import {
-  D1SkillRepository, applySkillOutcome, outcomeForTaskKind, promoteCandidate,
-  requiresApprovalForKind, shouldPromote, skillImplicatedByFailure,
+  D1SkillRepository, applySkillOutcome, missionOutcomeVerified, outcomeForTaskKind, promoteCandidate,
+  requiresApprovalForKind, shouldPromote, skillBodyHash, skillImplicatedByFailure,
   type SharedSkill, type SkillCandidate, type SkillOutcome,
 } from "./skills.ts";
 import {
@@ -85,6 +90,7 @@ function domainOf(url: string): string {
 }
 
 type Row = Record<string, unknown>;
+type UserBrowser = BrowserRunBrowser | WorkspaceBrowser;
 
 /// One UserSandbox (Durable Object + container) per verified user.
 /// Holds that user's tasks, credentials (encrypted under their own
@@ -98,34 +104,21 @@ export class UserSandbox extends DurableObject<Env> {
   /// nothing to return to.
   private activeMissions = new Map<string, Promise<any>>();
   private browserResumes = new Set<string>();
-  private browserInstance: BrowserRunBrowser | null = null;
+  private browserInstance: UserBrowser | null = null;
+  private workspaceExecution: WorkspaceExecution | null = null;
+  private dekPromise: Promise<CryptoKey> | null = null;
+  private schemaReady: Promise<unknown> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const container = ctx.container;
     if (container?.running) {
       void ctx.blockConcurrencyWhile(() =>
-        container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS),
+        container.setInactivityTimeout(workspaceMode(env.HYGGE_WORKSPACE_MODE)==='retained-v2' ? 6*60*60*1000 : INACTIVITY_TIMEOUT_MS),
       );
     }
-    // Schema migration guard: CREATE IF NOT EXISTS never migrates,
-    // and PRAGMA is unauthorized in DO SQLite — so detect the old
-    // scaffold schema via sqlite_schema and rebuild. (Production
-    // needs real migrations before any user has data worth keeping.)
-    const credSql = [
-      ...ctx.storage.sql.exec(
-        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'credentials'",
-      ),
-    ] as Row[];
-    if (credSql.length && !String(credSql[0].sql).includes("(id TEXT PRIMARY KEY")) {
-      ctx.storage.sql.exec(`
-        DROP TABLE IF EXISTS credentials;
-        DROP TABLE IF EXISTS memories;
-        DROP TABLE IF EXISTS tasks;
-        DROP TABLE IF EXISTS site_memory;
-        DROP TABLE IF EXISTS approvals;
-      `);
-    }
+    // CREATE never replaces existing data. Verified schema/key preflight runs
+    // before servicing a request; unknown historical schemas remain intact.
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS profile_photo (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);
@@ -348,9 +341,25 @@ export class UserSandbox extends DurableObject<Env> {
   /// The user's DEK, created once, stored wrapped (AES-KW) under the
   /// environment master key in both this object and D1 `user_keys`.
   private async dek(): Promise<CryptoKey> {
+    return this.dekPromise ??= this.loadDek().catch(error => { this.dekPromise = null; throw error; });
+  }
+
+  private async loadDek(): Promise<CryptoKey> {
     const master = await vault.masterKey(this.env);
     const wrapped = await this.ctx.storage.get<string>("wrappedDek");
     if (wrapped) return vault.unwrapDEK(wrapped, master);
+    if (!this.userId) throw new Error('OWNER_REQUIRED');
+    // Recover the original key before considering creation. A lookup failure
+    // cannot be interpreted as absence and must never rotate a user's key.
+    const backup = await this.env.DB.prepare('SELECT wrapped FROM user_keys WHERE user_id=?').bind(this.userId).first<{wrapped:string}>();
+    if (backup?.wrapped) {
+      const recovered = await vault.unwrapDEK(backup.wrapped, master);
+      await this.ctx.storage.put('wrappedDek', backup.wrapped);
+      return recovered;
+    }
+    const encrypted = ['credentials', 'email_codes'].some(table => Number(([...this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`)] as Row[])[0]?.n) > 0)
+      || Number(([...this.ctx.storage.sql.exec('SELECT COUNT(*) AS n FROM session_profiles WHERE has_profile=1')] as Row[])[0]?.n) > 0;
+    if (encrypted) throw new Error('MISSING_ORIGINAL_ENCRYPTION_KEY');
     const dek = await vault.generateDEK();
     const wrappedNew = await vault.wrapDEK(dek, master);
     await this.ctx.storage.put("wrappedDek", wrappedNew);
@@ -371,7 +380,18 @@ export class UserSandbox extends DurableObject<Env> {
     return dek;
   }
 
-  private browser(): BrowserRunBrowser {
+  private workspace(): WorkspaceExecution {
+    if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)!=='retained-v2' || !this.userId) throw new Error('WORKSPACE_MODE_REQUIRED');
+    return this.workspaceExecution ??= createWorkspaceExecution({
+      owner:bindWorkspaceOwner(this.ctx.storage,this.userId,this.env.HYGGE_ENV,this.ctx.id.toString()),
+      env:this.env,storage:this.ctx.storage,container:this.ctx.container!,
+      loadTask:id=>this.loadTask(id),projectTask:task=>this.saveTask(task),
+      denyFetcher:(this.ctx as any).exports?.OutboundDeny?.({props:{}}) as Fetcher,
+    });
+  }
+
+  private browser(): UserBrowser {
+    if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2') return this.workspace().browser;
     return (this.browserInstance ??= new BrowserRunBrowser(this.env.BROWSER));
   }
 
@@ -652,6 +672,11 @@ export class UserSandbox extends DurableObject<Env> {
     const succeeded = result.status === "succeeded";
     try {
       if (activeSkill) {
+        // Positive shared feedback needs observed evidence, not model "done".
+        if (succeeded && !missionOutcomeVerified(task, result)) {
+          task.log.push(`Shared skill ${activeSkill.id} v${activeSkill.version} feedback held (outcome not independently observed)`);
+          return;
+        }
         const updated = applySkillOutcome(activeSkill, succeeded,
           !succeeded && skillImplicatedByFailure(activeSkill, result.trace));
         await this.skillRepo().update(updated);
@@ -661,23 +686,45 @@ export class UserSandbox extends DurableObject<Env> {
         return;
       }
       if (!succeeded || !result.skillDraft) return;
+      if (!missionOutcomeVerified(task, result)) {
+        task.log.push(`Skill candidate for ${domain}/${outcome} held (outcome not independently observed)`);
+        return;
+      }
       // Known user values are match needles for sanitization only —
       // never stored or logged. The vault secret is never loaded here.
+      // Needles include this user's durable profile and credential
+      // usernames, not only the promoting task's draft.
       const knownValues: string[] = Object.values(task.drafted_payload ?? {})
         .flatMap((v: any) => Array.isArray(v) ? v : [v]).map(String);
+      try {
+        for (const row of [...this.ctx.storage.sql.exec("SELECT username FROM credentials")] as Row[]) {
+          if (row.username) knownValues.push(String(row.username));
+        }
+        for (const row of [...this.ctx.storage.sql.exec("SELECT payload FROM profile WHERE id = 'profile'")] as Row[]) {
+          const collect = (v: unknown): void => {
+            if (typeof v === "string" && v) knownValues.push(v);
+            else if (v && typeof v === "object") Object.values(v).forEach(collect);
+          };
+          collect(JSON.parse(String(row.payload)));
+        }
+      } catch { /* draft needles still apply; sanitization stays fail-closed */ }
       if (task.credential_id) {
         const creds = [...this.ctx.storage.sql.exec(
           "SELECT username FROM credentials WHERE id = ?", task.credential_id)] as Row[];
         if (creds.length) knownValues.push(String(creds[0].username));
       }
       const existing = this.loadSkillCandidate(domain, outcome);
-      // Corroboration counts missions that succeeded with the FIRST
-      // authored body; later drafts never overwrite it, so a promoted
-      // body is always the one that actually accumulated the count.
+      // Corroboration is hash-bound to the FIRST authored body: the
+      // authoring run stores it uncounted, and only later verified runs
+      // whose distilled draft is identical may increment the count.
+      if (existing && (await skillBodyHash(result.skillDraft)) !== (await skillBodyHash(existing.body))) {
+        task.log.push(`Skill candidate for ${domain}/${outcome} held (run did not reproduce the authored procedure)`);
+        return;
+      }
       const candidate: SkillCandidate = {
         id: existing?.id ?? crypto.randomUUID(), site: domain, outcome,
         body: existing?.body ?? result.skillDraft,
-        corroborationCount: (existing?.corroborationCount ?? 0) + 1, // one per distinct successful mission
+        corroborationCount: existing ? existing.corroborationCount + 1 : 0,
         status: "candidate",
       };
       this.ctx.storage.sql.exec(
@@ -707,7 +754,7 @@ export class UserSandbox extends DurableObject<Env> {
     }
   }
 
-  private runInteractiveTask(task: any, browser: BrowserRunBrowser): Promise<any> {
+  private runInteractiveTask(task: any, browser: UserBrowser): Promise<any> {
     const existing = this.activeMissions.get(task.id);
     if (existing) return existing;
     const run = this.runInteractiveTaskInner(task, browser).finally(() => this.activeMissions.delete(task.id));
@@ -745,9 +792,12 @@ export class UserSandbox extends DurableObject<Env> {
     };
   }
 
-  private async runInteractiveTaskInner(task: any, browser: BrowserRunBrowser) {
+  private async runInteractiveTaskInner(task: any, browser: UserBrowser) {
     try { return await this.runTask(task, browser); }
-    catch (error) {
+    catch(error) {
+      // Canonical V2 recovery owns projection. A stale caller must never
+      // replace a newer generation's result with an old failure response.
+      if(workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2')throw error;
       task.status = "failed";
       task.failure = classifyBrowserFailure(error);
       task.help = help("recovery", `${task.failure.userMessage} I can check where we left off in a new session, or you can stop here.`, [], "Open new session");
@@ -761,7 +811,14 @@ export class UserSandbox extends DurableObject<Env> {
     }
   }
 
-  private async runTask(task: any, browser: BrowserRunBrowser) {
+  private async runTask(task: any, browser: UserBrowser) {
+    if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2') {
+      return this.workspace().run(task,(hooks,_runId,scopedTask)=>this.runTaskLegacy(scopedTask,browser,hooks),task.status==='running' || task.status==='approved');
+    }
+    return this.runTaskLegacy(task,browser);
+  }
+
+  private async runTaskLegacy(task: any, browser: UserBrowser, workspaceHooks?: WorkspaceMissionHooks) {
     const statusBeforeRun = String(task.status ?? "");
     // The persisted running state claims the request; the runner receives its approved scope.
     task.status = "approved";
@@ -834,15 +891,15 @@ export class UserSandbox extends DurableObject<Env> {
 
     const outcome = outcomeForTaskKind(task.kind);
     let activeSkill: SharedSkill | null = null;
-    try { activeSkill = await this.skillRepo().loadActive(domain, outcome); }
+    try { activeSkill = workspaceHooks ? task._workspace_skill ?? null : await this.skillRepo().loadActive(domain, outcome); }
     catch { task.log.push("Shared skill store unavailable — routing as no-skill (Wonder authoring)"); }
-    const skillCandidate = activeSkill ? null : this.loadSkillCandidate(domain, outcome);
+    const skillCandidate = workspaceHooks ? task._workspace_candidate ?? null : activeSkill ? null : this.loadSkillCandidate(domain, outcome);
     task.skill_id = activeSkill?.id ?? null;
     task.skill_version = activeSkill?.version ?? null;
     // Trusted sign-in: restore the saved profile for this domain when
     // trust is not known-unsupported ("unknown" means try and learn).
     const trust = this.trustSupport(domain);
-    const restoreState = trust === "unsupported" ? null : await this.loadSessionState(domain);
+    const restoreState = workspaceHooks || trust === "unsupported" ? null : await this.loadSessionState(domain);
 
     const photoStore = this.profilePhotoStore();
     const hasProfilePhoto = profilePhotoAllowedForTask(task) && photoStore.read() !== null;
@@ -856,6 +913,7 @@ export class UserSandbox extends DurableObject<Env> {
     const result = await runMission({
       browser,
       task,
+      workspaceHooks,
       traceAgentId: `hygge-${this.env.HYGGE_ENV}`,
       traceSessionId: this.ctx.id.toString(),
       traceSessionName: this.userId || undefined,
@@ -872,6 +930,7 @@ export class UserSandbox extends DurableObject<Env> {
       skillCandidate,
       onSession: (id: string) => {
         task.session_id = id;
+        if(workspaceHooks){workspaceHooks.onSession?.(id);return;}
         const status = task.status;
         task.status = "running";
         this.saveTask(task);
@@ -881,6 +940,9 @@ export class UserSandbox extends DurableObject<Env> {
       restoreState,
     });
     task.failure = result.failure ?? null;
+    // Durable runner commits evidence, complete workspace/profile and task/UI
+    // projection together. Legacy outcome/promotions never run on this path.
+    if (workspaceHooks) return result;
     task.help = result.help ?? (result.status === "failed"
       ? help("recovery", "I couldn't finish this step after trying another route. We can check the site before trying again.", [], "Try again") : null);
     task.pending_action = result.pendingAction ?? null;
@@ -962,7 +1024,7 @@ export class UserSandbox extends DurableObject<Env> {
   // write-task path at all: surfacing a listing never applies.
 
   private async runScanMission(
-    input: ScanMissionInput, browser: BrowserRunBrowser,
+    input: ScanMissionInput, browser: UserBrowser,
   ): Promise<ScanMissionOutcome> {
     const { site, tier, credentialId, profile } = input;
     const focus = [
@@ -1097,7 +1159,7 @@ export class UserSandbox extends DurableObject<Env> {
   /// web and only reads: it checks that signup (page + form), profile
   /// editing, and starting an application are reachable without a
   /// phone app. It never submits, signs up, or applies.
-  private async runWebProbe(input: ProbeMissionInput, browser: BrowserRunBrowser): Promise<ProbeOutcome> {
+  private async runWebProbe(input: ProbeMissionInput, browser: UserBrowser): Promise<ProbeOutcome> {
     const site: ScanSite = input.site;
     const task = {
       id: crypto.randomUUID(),
@@ -1122,6 +1184,9 @@ export class UserSandbox extends DurableObject<Env> {
     // what the page actually offers, not only the agent's step
     // intentions (missions can loop or pause before extracting).
     let homepageEvidence = "";
+    // V2 browsing goes through the same anchored mission/effect queue.
+    // The legacy preliminary probe must not create a second writer.
+    if(workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='legacy') {
     try {
       const snap = await browser.createSession(site.startURLString);
       const parts = [snapshotEvidence(snap)];
@@ -1142,6 +1207,7 @@ export class UserSandbox extends DurableObject<Env> {
       homepageEvidence = parts.filter(Boolean).join("\n");
       await browser.closeSession(snap.sessionID).catch(() => {});
     } catch { /* mission evidence only */ }
+    }
     const done = await this.runTask(task, browser);
     const items: string[] = Array.isArray(done.extracted_items) ? done.extracted_items : [];
     let finalEvidence = "";
@@ -1205,7 +1271,7 @@ export class UserSandbox extends DurableObject<Env> {
     catch { /* learning upkeep must never fail a state write */ }
   }
 
-  private scanDeps(browser: BrowserRunBrowser): ScanDeps {
+  private scanDeps(browser: UserBrowser): ScanDeps {
     return {
       state: this.stateStore(),
       scans: this.scanStore(),
@@ -1319,7 +1385,20 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    this.userId = request.headers.get("x-hygge-user-id") ?? this.userId;
+    const verifiedUser = request.headers.get('x-hygge-user-id');
+    if (!verifiedUser) return json({error:'Verified owner required'},403);
+    try {
+      const owner = bindWorkspaceOwner(this.ctx.storage, verifiedUser, this.env.HYGGE_ENV, this.ctx.id.toString());
+      this.userId = owner.userId;
+      workspaceMode(this.env.HYGGE_WORKSPACE_MODE);
+      await (this.schemaReady ??= migrateCredentialSchema(this.ctx.storage, {
+        verifyCurrentCiphertext: async row => {
+          try { await vault.open(await this.dek(), row, `${row.domain}\n${row.username}`); return true; } catch { return false; }
+        },
+        // Historical site_id/AAD mappings need an explicit reviewed adapter.
+        resolveLegacy: async () => null,
+      }).catch(error => { this.schemaReady = null; throw error; }));
+    } catch { return json({error:'Workspace identity, schema, or encryption key needs verified recovery'},409); }
     const url = new URL(request.url);
     const path = url.pathname;
     const parts = path.split("/").filter(Boolean);
@@ -1332,6 +1411,10 @@ export class UserSandbox extends DurableObject<Env> {
     try {
       // Sandbox diagnostics
       if (path.endsWith("/sandbox/verify")) {
+        if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2') {
+          await this.workspace().ensure();
+          return json({ok:true,mode:'retained-v2'});
+        }
         return await this.exclusive(async () => {
           const container = await this.startSandbox();
           const proc = await container.exec(["bash", "-lc", "uname -s; node --version"]);
@@ -1344,6 +1427,10 @@ export class UserSandbox extends DurableObject<Env> {
         });
       }
       if (path.endsWith("/sandbox/save")) {
+        if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2') {
+          const receipt=await this.workspace().save();
+          return json({ok:true,receiptId:receipt.receiptId,committedAt:receipt.committedAt});
+        }
         return await this.exclusive(async () => {
           const container = await this.startSandbox();
           const snapshot = await container.snapshotContainer({ name: "workspace" });
@@ -1613,14 +1700,28 @@ export class UserSandbox extends DurableObject<Env> {
         const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks ORDER BY created_at")] as Row[];
         return json({ tasks: rows.map((r) => {
           const t = JSON.parse(String(r.task));
-          if (reconcileEndedSession(t, Boolean(t.session_id && browser.hasSession(t.session_id)),
+          if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='legacy'
+              && reconcileEndedSession(t, Boolean(t.session_id && browser.hasSession(t.session_id)),
               this.activeMissions.has(t.id) || this.browserResumes.has(t.id))) this.saveTask(t);
           return { ...t, mobile_task: mobileTask(t) };
         }) });
       }
+      if (request.method === "POST" && parts.join("/") === "skills/quarantine") {
+        // Maintainer kill switch for the shared library. The maintainer
+        // secret is the authority; this owner DO is only the execution host.
+        if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)!=='retained-v2') return json({error:'retained-v2 required'},409);
+        const token=request.headers.get('x-hygge-maintainer-token')??'';
+        if(typeof body.operationId!=='string'||typeof body.skillId!=='string'||!['privacy','unsafe_guidance','integrity'].includes(body.reason))return json({error:'operationId, skillId and a valid reason are required'},400);
+        const ok=await this.workspace().quarantineSkill(token,{operationId:body.operationId,skillId:body.skillId,reason:body.reason});
+        return ok?json({ok:true,skillId:body.skillId}):json({error:'quarantine not authorized or not applied'},403);
+      }
       if (request.method === "POST" && parts[0] === "tasks") {
         const task = this.loadTask(parts[1]);
         if (!task) return json({ error: "unknown task" }, 404);
+        if(parts[2]==='reconcile' && workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2') {
+          if(body.reviewed !== true || typeof body.effectId!=='string' || !['confirmed','not_applied'].includes(body.status))return json({error:'Explicit review of the current site outcome is required'},400);
+          return json(await this.workspace().reconcile(task.id,body.effectId,body.status));
+        }
         if (parts[2] === "continue") {
           const error = applyHelpReply(task, body);
           if (error) return json({ error }, 409);
@@ -1635,6 +1736,7 @@ export class UserSandbox extends DurableObject<Env> {
           return json({ error: "approval required: POST /tasks/{id}/approve" }, 403);
         }
         if (parts[2] === "reject") {
+          if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2') return json(await this.workspace().runner.reject(task));
           const sessionID = task.session_id;
           const error = rejectTaskHelp(task, body.helpID);
           if (error) return json({ error }, 409);
@@ -1647,11 +1749,15 @@ export class UserSandbox extends DurableObject<Env> {
           // CAPTCHA/2FA/ID check in the kept-open session. If that
           // session died, runTask falls back to the trusted sign-in /
           // saved credential — the password is never re-asked here.
-          if (!["awaiting_approval", "needsHuman"].includes(task.status)) {
+          // An interrupted run (client disconnect / DO eviction) leaves the
+          // task approved/running with durable runner state. Re-running
+          // joins the live mission in this isolate or resumes the orphan;
+          // runInteractiveTask dedupes, so this cannot double-dispatch.
+          if (!["awaiting_approval", "needsHuman", "approved", "running"].includes(task.status)) {
             return json({ error: `task is ${task.status}, not awaiting_approval` }, 409);
           }
           if (task.interaction_version === 1 && task.status === "needsHuman") return json({ error: "Reply to the current request in chat." }, 409);
-          const resuming = task.status === "needsHuman";
+          const resuming = task.status === "needsHuman" || task.status === "approved" || task.status === "running";
           task.status = task.interaction_version === 1 ? "running" : "approved";
           task.log.push(resuming ? "Resumed by user after completing the check" : "Approved by user");
           this.saveTask(task);

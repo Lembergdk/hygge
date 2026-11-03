@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Synthetic acceptance target only (Wave 4). No data, no custom domain.
+  "name": "hygge-wave4-jobs",
+  "main": "wave4-test-site/worker.mjs",
+  "compatibility_date": "2026-10-31",
+  "workers_dev": true,
+  "observability": { "logs": { "enabled": true } }
+}

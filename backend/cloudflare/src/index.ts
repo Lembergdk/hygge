@@ -1,3 +1,4 @@
+import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { json, sandboxFor } from "./env.ts";
 import { appleAppSiteAssociation, handleAuthRequest, resolveRequestUserId } from "./auth.ts";
@@ -9,12 +10,22 @@ import { d1PushDb, handleDeviceTokenRequest } from "./push.ts";
 
 export { UserSandbox } from "./user-sandbox.ts";
 
+/// Loopback handler for retained-container private-range egress denial.
+/// ctx.exports.OutboundDeny() yields the Fetcher brand interceptOutboundHttp
+/// requires; every intercepted request is refused here and never dialed out.
+export class OutboundDeny extends WorkerEntrypoint {
+  async fetch(): Promise<Response> {
+    return new Response("Private network denied", { status: 403 });
+  }
+}
+
 const USER_ROUTES = [
   "/credentials",
   "/session-profiles",
   "/memory",
   "/sessions",
   "/tasks",
+  "/skills",
   "/site-proposals",
   "/onboarding",
   "/sandbox",
@@ -166,6 +177,12 @@ async function handleOnboardingPreview(
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    // Retained containers route private-range outbound HTTP to the
+    // OutboundDeny loopback entrypoint (see workspace-container.ts). Such requests keep
+    // their original private host and must never be served as API calls.
+    if (/^(localhost|127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|0\.|\[::1\]|\[f[cd]|\[fe[89ab])/i.test(url.hostname)) {
+      return new Response("Private network denied", { status: 403 });
+    }
 
     if (url.pathname === "/health") {
       // Shape matches the app's Health contract (inherited from the

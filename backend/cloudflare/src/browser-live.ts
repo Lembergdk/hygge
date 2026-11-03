@@ -1,5 +1,9 @@
-import { CDPSessionEvent } from "@cloudflare/puppeteer/internal/api/CDPSession.js";
 import { BrowserControl, validateBrowserInput } from "./browser-control.ts";
+
+// Each Puppeteer distribution mints its own Disconnected symbol, so the host
+// runtime injects the token from the library that owns the page. Importing a
+// distribution here would break the other runtime and never match its events.
+export type BrowserDisconnectedEvent = string | symbol;
 
 /** A single CDP screencast, multiplexed to authenticated app viewers.
  * These are pushed compositor frames, not a screenshot polling loop. */
@@ -15,8 +19,10 @@ export class BrowserLive {
   private buttons = 0;
   readonly control = new BrowserControl();
   private page: any;
-  constructor(page: any) {
+  private disconnectedEvent: BrowserDisconnectedEvent;
+  constructor(page: any, disconnectedEvent: BrowserDisconnectedEvent = "Disconnected") {
     this.page = page;
+    this.disconnectedEvent = disconnectedEvent;
     this.page.once("close", () => this.finish("This browser session has finished."));
   }
   get ended() { return this.closed; }
@@ -58,7 +64,7 @@ export class BrowserLive {
         void cdp.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => {});
       });
       cdp.on("Page.frameNavigated", () => this.broadcast());
-      cdp.on(CDPSessionEvent.Disconnected, () => this.finish("The browser connection ended."));
+      cdp.on(this.disconnectedEvent, () => this.finish("The browser connection ended."));
       await cdp.send("Page.enable");
       await cdp.send("Page.startScreencast", { format: "jpeg", quality: 75, maxWidth: 1600, maxHeight: 1600, everyNthFrame: 1 });
     })();
@@ -218,6 +224,19 @@ export class BrowserLive {
       await cdp.send("Page.stopScreencast").catch(() => {});
       await cdp.detach().catch(() => {});
     });
+  }
+
+  /** Checkpoint pause: the logical session survives without its page/process.
+   * Viewers close reconnectably (1001, no terminal message) and reattach to the
+   * same session after the save; human pause and control epoch are untouched. */
+  suspend(reason: string) {
+    if (this.closed) return;
+    for (const socket of [...this.viewers.keys()]) {
+      this.send(socket, { type: "suspended", message: reason });
+      socket.close(1001, "Reconnect to continue");
+      this.remove(socket);
+    }
+    this.stopCapture();
   }
 
   finish(reason: string) {

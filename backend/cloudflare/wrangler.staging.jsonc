@@ -61,6 +61,9 @@
     { "binding": "BROWSER_PROFILES", "bucket_name": "hygge-browser-profiles-staging" }
   ],
   "browser": { "binding": "BROWSER" },
+  "services": [
+    { "binding": "SELF", "service": "hygge-api-staging" }
+  ],
   "send_email": [
     { "name": "EMAIL", "allowed_sender_addresses": ["login@usehygge.app"] }
   ]

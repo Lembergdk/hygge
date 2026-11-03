@@ -4,6 +4,7 @@
 /// Object; the mission loop (agent.ts) chooses every action.
 import { launch, type Browser, type Page } from "@cloudflare/puppeteer";
 import type { SessionState } from "./session-profile.ts";
+import { CDPSessionEvent } from "@cloudflare/puppeteer/internal/api/CDPSession.js";
 import { BrowserLive } from "./browser-live.ts";
 import { BrowserObservation, OBSERVATION_LIMITS, sensitiveElement, redact, type ObservedElement } from "./browser-observation.ts";
 import { profilePhotoTargetAllowed } from "./profile-photo.ts";
@@ -95,7 +96,7 @@ export class BrowserRunBrowser {
       }
       const sessionID = crypto.randomUUID();
       id = sessionID;
-      const live = new BrowserLive(page);
+      const live = new BrowserLive(page, CDPSessionEvent.Disconnected);
       const observation = new BrowserObservation();
       this.sessions.set(id, { id, browser, page, live, observation });
       browser.once("disconnected", () => {

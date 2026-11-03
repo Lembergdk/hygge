@@ -45,7 +45,7 @@ class CDP extends EventEmitter {
 function fixture() {
   const cdp = new CDP();
   const page = { createCDPSession: async () => cdp, viewport: () => ({ width: 1000, height: 800 }), url: () => 'https://example.com', once() {}, frames: () => [] };
-  return { cdp, live: new BrowserLive(page) };
+  return { cdp, live: new BrowserLive(page, CDPSessionEvent.Disconnected) };
 }
 test('one live screencast serves multiple viewers; direct input requires ownership', async () => {
   const { cdp, live } = fixture(); const a = new Socket(), b = new Socket(); let resumes = 0;
@@ -98,7 +98,7 @@ test('replacement viewer waits for previous screencast teardown', async () => {
   let created = 0;
   const page = { createCDPSession: async () => ++created === 1 ? first : second,
     viewport: () => ({ width: 1000, height: 800 }), url: () => 'https://example.com', once() {} };
-  const live = new BrowserLive(page), a = new Socket(), b = new Socket();
+  const live = new BrowserLive(page, CDPSessionEvent.Disconnected), a = new Socket(), b = new Socket();
   await live.connect(a as any, async () => {});
   a.close();
   const replacing = live.connect(b as any, async () => {});
@@ -114,7 +114,7 @@ test('leaving during startup tears down after startup finishes', async () => {
   const cdp = new CDP(); let create!: (cdp: CDP) => void;
   const page = { createCDPSession: () => new Promise<CDP>(resolve => create = resolve),
     viewport: () => ({ width: 1000, height: 800 }), url: () => 'https://example.com', once() {} };
-  const live = new BrowserLive(page), socket = new Socket();
+  const live = new BrowserLive(page, CDPSessionEvent.Disconnected), socket = new Socket();
   const opening = live.connect(socket as any, async () => {});
   await tick(); socket.close(); create(cdp); await opening; await tick();
   assert.ok(cdp.calls.some(c => c.method === 'Page.stopScreencast'));
@@ -157,7 +157,7 @@ test('late heartbeat failure from a departed viewer cannot end its replacement',
   let created = 0;
   const page = { createCDPSession: async () => ++created === 1 ? first : second,
     viewport: () => ({ width: 1000, height: 800 }), url: () => 'https://example.com', once() {} };
-  const live = new BrowserLive(page), a = new Socket(), b = new Socket();
+  const live = new BrowserLive(page, CDPSessionEvent.Disconnected), a = new Socket(), b = new Socket();
   await live.connect(a as any, async () => {});
   a.input({ type: 'ping' }); await tick(); a.close();
   await live.connect(b as any, async () => {});
@@ -165,5 +165,25 @@ test('late heartbeat failure from a departed viewer cannot end its replacement',
   assert.equal(live.ended, false);
   second.emit('Page.screencastFrame', { data: 'fresh-frame', sessionId: 1 });
   assert.ok(b.messages.some(m => m.type === 'frame'));
+  b.close();
+});
+
+test('checkpoint suspension closes viewers reconnectably without ending the session', async () => {
+  class CodeSocket extends EventTarget {
+    messages: any[] = []; closeCode: number | null = null;
+    send(text: string) { this.messages.push(JSON.parse(text)); }
+    close(code?: number) { this.closeCode = code ?? null; this.dispatchEvent(new Event('close')); }
+    input(value: any) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) })); }
+  }
+  const { live, cdp } = fixture(); const a = new CodeSocket(), b = new CodeSocket();
+  await live.connect(a as any, async () => {});
+  (live as any).suspend('Workspace saved. Reconnect to continue.');
+  assert.equal(live.ended, false);
+  assert.ok(!a.messages.some(m => m.type === 'ended'), 'suspension must not look terminal');
+  assert.equal(a.closeCode, 1001, 'suspension must use the reconnectable close code');
+  await live.connect(b as any, async () => {});
+  cdp.emit('Page.screencastFrame', { data: 'after-save-frame', sessionId: 9 });
+  assert.ok(b.messages.some(m => m.type === 'frame' && m.data === 'after-save-frame'));
+  assert.equal(live.ended, false);
   b.close();
 });

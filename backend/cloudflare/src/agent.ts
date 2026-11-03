@@ -30,6 +30,7 @@ import type { BrowserRunBrowser, Snapshot } from "./browser.ts";
 import { distillSkillDraft, outcomeForTaskKind, type SharedSkill, type SkillBody } from "./skills.ts";
 import { detectCheckpoint, probeAuthenticated, isRememberMeLabel } from "./session-profile.ts";
 import { profilePhotoAllowedForTask, profilePhotoTargetAllowed } from "./profile-photo.ts";
+import type { WorkspaceMissionHooks } from './workspace-task-runner.ts';
 
 const ACTIONS = new Set(["navigate", "click", "type", "upload", "select", "check", "press", "hover", "scroll", "back", "forward", "wait", "extract", "askUser", "done", "needsHuman"]);
 export const MAX_STEPS = 25;
@@ -309,6 +310,7 @@ export async function runMission(opts: {
   skill?: SharedSkill | null; skillCandidate?: { body: SkillBody } | null;
   existingSessionID?: string | null; restoreState?: any;
   onSession?: (id: string) => void;
+  workspaceHooks?: WorkspaceMissionHooks;
   traceAgentId?: string; traceSessionId?: string; traceSessionName?: string;
   tracePayloads?: boolean;
 }): Promise<any> {
@@ -323,8 +325,13 @@ export async function runMission(opts: {
     "hygge.task.kind": String(task.kind ?? ""),
     "hygge.task.target_url": String(task.target_url ?? ""),
   }, async (span) => {
-    const result = await runMissionInner(opts).catch((error) => ({ status: "failed", trace: [], extractedItems: [],
-      log: ["Browser attempt interrupted"], sessionID: null, failure: classifyBrowserFailure(error) }));
+    const result = await runMissionInner(opts).catch((error) => {
+      // Durable V2 recovery owns thrown uncertainty; a generic failed result
+      // would discard the effect linkage and invite a retry loop.
+      if (opts.workspaceHooks) throw error;
+      return { status: "failed", trace: [], extractedItems: [],
+      log: ["Browser attempt interrupted"], sessionID: null, failure: classifyBrowserFailure(error) };
+    });
     if (result.status === "failed") {
       result.failure = failureFeedback(result.failure?.code ?? "unknown");
       const lastFailure = result.trace?.findLast((entry: any) => entry.failure)?.failure;
@@ -347,7 +354,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
                                    skill = null, skillCandidate = null,
                                    existingSessionID = null, restoreState = null,
                                    traceAgentId = "hygge-dev", traceSessionId, traceSessionName,
-                                   tracePayloads = false, onSession }: {
+                                   tracePayloads = false, onSession, workspaceHooks }: {
   browser: any; task: any; hints?: string[]; hasCredential?: boolean;
   hasEmailCode?: boolean; fillEmailCodeValue?: any;
   hasProfilePhoto?: boolean; uploadProfilePhoto?: any;
@@ -357,6 +364,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
   traceAgentId?: string; traceSessionId?: string; traceSessionName?: string;
   tracePayloads?: boolean;
   onSession?: (id: string) => void;
+  workspaceHooks?: WorkspaceMissionHooks;
 }): Promise<any> {
   if (!profilePhotoAllowedForTask(task)) {
     hasProfilePhoto = false;
@@ -390,7 +398,15 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     }
   }
   if (!snap) {
-    snap = (await browser.createSession(task.target_url, restoreState)) as Snapshot;
+    const ticket = await workspaceHooks?.onActionBefore({ decision: { action: 'navigate', target: task.target_url, effect: 'reversible' }, snapshot: null, sessionID: null });
+    if(ticket){task.session_id=ticket.effectId;onSession?.(ticket.effectId);}
+    try {
+      snap = (await browser.createSession(task.target_url, restoreState, ticket?.effectId)) as Snapshot;
+    } catch (error) {
+      if (ticket) await workspaceHooks!.onActionAfter(ticket, { error });
+      throw error;
+    }
+    if (ticket) await workspaceHooks!.onActionAfter(ticket, { result: { succeeded: true }, snapshot: snap });
   }
   onSession?.(snap.sessionID);
   const epoch = browser.controlState?.(snap.sessionID)?.epoch ?? 0;
@@ -457,10 +473,12 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     const lastKey = trace.length ? `${trace.at(-1).browserAction ?? trace.at(-1).action}|${trace.at(-1).targetRef ?? trace.at(-1).target}|${snapshot.currentURLString}` : "";
     const repeated = (actionKeys.get(lastKey) ?? 0) >= 2;
     let decision: any;
+    let approvedActionProof: unknown;
     try {
       // Consent is bound to the exact action, draft, and observed page.
       const authorized = task.authorized_action;
       if (authorized && authorized.fingerprint === actionFingerprint(authorized.decision, snapshot, task.drafted_payload)) {
+        approvedActionProof = structuredClone(authorized);
         decision = { ...authorized.decision, consentGranted: true };
       } else {
         decision = await decider.decide({
@@ -541,7 +559,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       log.push("Paused at a two-factor check. The browser session stays open for you to finish it there.");
       return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, help: help("verification", `I need you to finish a ${checkpoint} on ${site}. Your place is saved.`, [], "Complete check"), ...routing() };
     }
-    if (needsActionApproval(task, decision) && decision.consentGranted !== true) {
+    if ((task.workspace_requires_fresh_approval || needsActionApproval(task, decision)) && decision.consentGranted !== true) {
       await recordToolApproval("requested");
       const request = help("approval", `${decision.preview || decision.reason || "This step changes something outside Hygge."}\nProposed action: ${decision.action} “${decision.targetLabel ?? decision.target}”${decision.value ? ` — ${decision.value}` : ""}`, [], "Approve and continue");
       return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID,
@@ -550,6 +568,10 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     }
     if (decision.consentGranted === true) await recordToolApproval("approved");
     let result: any;
+    // The wrapper owns the whole operation, including private credential/code
+    // fills and uploads; nested browser calls must not consume consent twice.
+    const ticket = await workspaceHooks?.onActionBefore({ decision, snapshot, sessionID: snap.sessionID, approvedActionProof });
+    if (ticket && approvedActionProof) task.workspace_requires_fresh_approval = false;
     try {
       result = await withSpan(`execute_tool ${decision.action}`, {
         ...traceIdentity,
@@ -577,9 +599,21 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
         return r;
       });
     } catch (e: any) {
+      if (ticket) {
+        await workspaceHooks!.onActionAfter(ticket, { error: e });
+        // No mission-loop retry after a dispatch with an uncertain outcome.
+        throw e;
+      }
       if (e instanceof BrowserControlInterrupted || interrupted()) return paused();
       const failure = classifyBrowserFailure(e);
       result = { succeeded: false, summary: failure.summary, failure };
+    }
+    if (ticket) {
+      let observed: Snapshot | null;
+      try { observed = await browser.snapshot(snap.sessionID); }
+      catch (error) { await workspaceHooks!.onActionAfter(ticket, { error }); throw error; }
+      await workspaceHooks!.onActionAfter(ticket, { result, snapshot: observed });
+      if(observed)result.observedURL=observed.currentURLString;
     }
     if (interrupted()) return paused();
     if (result.items?.length) extractedItems.push(...result.items);
@@ -589,7 +623,8 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     // File attachment is input; keep the existing trace enum for older apps.
     trace.push({ action: mobileBrowserAction(decision.action), browserAction: decision.action,
                  target: decision.targetLabel ?? decision.target ?? "", targetRef: decision.target ?? "",
-                 urlString: snapshot.currentURLString,
+                 ...(workspaceHooks ? { valueRef: decision.valueRef ?? null } : {}),
+                 urlString: workspaceHooks && decision.action==='navigate' && result.observedURL ? result.observedURL : snapshot.currentURLString,
                  summary: `${result.summary}${decision.reason ? ` — ${decision.reason}` : ""}`,
                  succeeded: result.succeeded, failure: result.failure, ...stamp });
     if ((actionKeys.get(key) ?? 0) >= 4) {

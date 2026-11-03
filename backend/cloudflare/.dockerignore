@@ -1,0 +1,15 @@
+**
+!container/
+container/**
+!container/Dockerfile
+!container/package.json
+!container/package-lock.json
+!container/server.mjs
+!src/
+src/**
+!src/browser-live.ts
+!src/browser-observation.ts
+!src/browser-control.ts
+!src/workspace-container-protocol.ts
+!src/workspace-security.ts
+!src/workspace-contract.ts
