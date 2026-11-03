@@ -4,7 +4,7 @@
 
 <h1 align="center">Hygge</h1>
 
-<p align="center"><strong>Work you like, without the boring parts.</strong></p>
+<p align="center"><strong>Work you like, without the work.</strong></p>
 
 <p align="center">
   Hygge (Danish, pronounced “hoo-gah”) means being cozy and spending quality
