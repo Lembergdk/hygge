@@ -134,6 +134,27 @@ final class FlamePlayTests: XCTestCase {
         XCTAssertFalse(FlameGestureClassifier.isDoubleTap(previousAt: 2.0, now: 1.0))
     }
 
+    /// The user's Flame Lab picks (2026-11-03), baked as factory defaults.
+    func testBakedDefaultsMatchLabPicks() {
+        let s = FlameInteractionSettings()
+        XCTAssertEqual(s.homeFlameSize, 122)
+        XCTAssertEqual(s.liveliness, 1.35)
+        XCTAssertEqual(s.jumpHeight, 24)
+        XCTAssertEqual(s.gyroLeanDegrees, 14)
+        XCTAssertEqual(s.idleInterval, 5)
+        XCTAssertTrue(s.gyroEnabled)
+        XCTAssertTrue(s.idleEnabled)
+        let expected: [FlameGestureKind: FlameReactionKind] = [
+            .tapHead: .pat, .tapBody: .poke, .tapFeet: .footTapDance,
+            .doubleTap: .laugh, .longPress: .wave,
+            .swipeUp: .bigJump, .swipeDown: .duck,
+            .swipeLeft: .sideHop, .swipeRight: .sideHop,
+            .pinchIn: .shrinkStartle, .pinchOut: .puffUp,
+            .shake: .nauseous,
+        ]
+        XCTAssertEqual(s.reactions, expected)
+    }
+
     func testDoubleTapAndLongPressDefaults() {
         let settings = FlameInteractionSettings()
         XCTAssertEqual(settings.reaction(for: .doubleTap), .laugh)

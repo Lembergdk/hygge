@@ -186,7 +186,7 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
     public var placement: FlamePlacement?
 
     public init(homeFlameSize: Double = 122, liveliness: Double = 1.35,
-                gyroLeanDegrees: Double = 9, jumpHeight: Double = 24,
+                gyroLeanDegrees: Double = 14, jumpHeight: Double = 24,
                 idleInterval: Double = 5, idleEnabled: Bool = true,
                 gyroEnabled: Bool = true,
                 reactions: [FlameGestureKind: FlameReactionKind]? = nil,
@@ -236,7 +236,7 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
     public mutating func clamp() {
         homeFlameSize = Self.clamp(homeFlameSize, 81, 170, fallback: 122)
         liveliness = Self.clamp(liveliness, 0.4, 2, fallback: 1.35)
-        gyroLeanDegrees = Self.clamp(gyroLeanDegrees, 0, 14, fallback: 9)
+        gyroLeanDegrees = Self.clamp(gyroLeanDegrees, 0, 14, fallback: 14)
         jumpHeight = Self.clamp(jumpHeight, 8, 40, fallback: 24)
         idleInterval = Self.clamp(idleInterval, 2.5, 10, fallback: 5)
         if let p = placement { placement = FlamePlacement(x: p.x, y: p.y) }
