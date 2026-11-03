@@ -19,6 +19,10 @@ struct HomeFeedView: View {
     /// draws him along the way. Driving .position itself through an
     /// optional override snapped him off-screen for a frame on close.
     @State private var hopOffset: CGSize = .zero
+    /// While the chat bubble is open he perches a little higher, fully
+    /// on screen under its tail, instead of clipped by the bottom edge.
+    @State private var chatLift: CGFloat = 0
+    private var chatLiftAmount: CGFloat { 28 }
     /// Where he was living before a tap sent him home for chat.
     @State private var returnPlacement: FlamePlacement?
 
@@ -55,7 +59,7 @@ struct HomeFeedView: View {
                 onDragBegan: { dragStartCenter = flameWindowCenter() }
                 onDragEnded: { translation in commitDrag(translation) }
                     .position(flameCenter(in: geo))
-                    .offset(hopOffset)
+                    .offset(x: hopOffset.width, y: hopOffset.height + chatLift)
                     // Above the chat bubble (zIndex 3): on close he hops
                     // back THROUGH the bubble's fading rectangle, and
                     // behind it he vanished until the fade finished.
@@ -242,10 +246,11 @@ struct HomeFeedView: View {
         windowCenter(for: playStore.settings.placement)
     }
 
-    /// Where he is actually drawn right now, hop offset included.
+    /// Where he is actually drawn right now, hop and chat offsets in.
     private func flameWindowCenter() -> CGPoint {
         let c = flameLayoutCenter()
-        return CGPoint(x: c.x + hopOffset.width, y: c.y + hopOffset.height)
+        return CGPoint(x: c.x + hopOffset.width,
+                       y: c.y + hopOffset.height + chatLift)
     }
 
     private func flameCenter(in geo: GeometryProxy) -> CGPoint {
@@ -311,20 +316,30 @@ struct HomeFeedView: View {
         hop(from: start, to: windowCenter(for: nil)) {
             withAnimation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.82)) {
                 showBubbleChat = true
+                chatLift = -chatLiftAmount
             }
         }
     }
 
     /// Closing sends him hopping back to wherever he was living before.
     private func closeBubble() {
+        let start = flameWindowCenter()
         withAnimation(reduceMotion ? nil : .easeIn(duration: 0.2)) {
             showBubbleChat = false
         }
-        guard let back = returnPlacement else { return }
+        guard let back = returnPlacement else {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
+                chatLift = 0
+            }
+            return
+        }
         returnPlacement = nil
-        let start = flameWindowCenter()
         playStore.settings.placement = back
+        // Fold the perch lift into the hop: clearing it inside hop's
+        // no-animation pin (hop reads it via the start point) keeps
+        // his drawn position continuous.
         hop(from: start, to: windowCenter(for: back)) {}
+        chatLift = 0
     }
 
     private func bubbleChat(in geo: GeometryProxy) -> some View {
