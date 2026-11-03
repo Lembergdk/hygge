@@ -289,16 +289,18 @@ struct FlameActor: View {
         let mag = max(1, hypot(value.translation.width, value.translation.height))
         let ux = Double(value.translation.width / mag)
         let uy = Double(value.translation.height / mag)
+        let up: Double = max(0, -uy)
+        let down: Double = max(0, uy)
         var p = FlamePose.rest
         p.face = .surprised
         p.rot = ux * 7
-        p.dy = CGFloat(max(0, -uy) * 3)
-        p.sy = CGFloat(1 - max(0, -uy) * 0.09 + max(0, uy) * 0.04)
-        p.sx = CGFloat(1 + max(0, -uy) * 0.06)
+        p.dy = CGFloat(up * 3)
+        p.sy = CGFloat(1 - up * 0.09 + down * 0.04)
+        p.sx = CGFloat(1 + up * 0.06)
         p.armSL = 26 + ux * 22
         p.armSR = -26 + ux * 22
-        p.legSL = max(0, -uy) * 18
-        p.legSR = -max(0, -uy) * 18
+        p.legSL = up * 18
+        p.legSR = -up * 18
         withAnimation(.easeOut(duration: 0.09)) { pose = p }
     }
 
