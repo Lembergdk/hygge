@@ -20,7 +20,7 @@ export type SkillOutcome = (typeof SKILL_OUTCOMES)[number];
 export type SkillStatus = "candidate" | "active" | "deprecated";
 export type SkillCoverage = "active" | "candidate" | "none";
 
-export const PROMOTION_THRESHOLD = 3; // authoring run + 2 confirming runs
+export const PROMOTION_THRESHOLD = 3; // confirming runs after authoring; the authoring run never counts
 export const MAX_SKILL_BODY_BYTES = 16_384;
 
 export interface SkillBody {
@@ -106,8 +106,12 @@ const DETECTORS: { name: string; re: RegExp; placeholder: string }[] = [
 /// Language that would make a skill an authority/checkpoint bypass.
 /// Presence anywhere in the body rejects promotion.
 const GUARDRAIL_PATTERNS: { name: string; re: RegExp }[] = [
-  { name: "approval-bypass", re: /\b(?:skip|bypass|avoid|ignore|pre-?approv\w*|without)\b[^.]{0,40}\b(?:approval|user (?:consent|confirmation)|confirmation)\b/i },
+  { name: "approval-bypass", re: /\b(?:skip|bypass|avoid|ignore|pre-?approv\w*|without)\b[^.]{0,40}\b(?:approva[l1i]|user (?:consent|confirmation)|confirmation)\b/i },
   { name: "approval-bypass", re: /\bno (?:approval|confirmation) (?:is )?(?:needed|required)\b/i },
+  { name: "approval-bypass", re: /\b(?:already|previously|earlier)\b[^.]{0,30}\b(?:approved|granted|consented)\b/i },
+  { name: "approval-bypass", re: /\b(?:approval|consent)\b[^.]{0,30}\b(?:already|previously|earlier|was granted|has been granted)\b/i },
+  { name: "approval-bypass", re: /\b(?:do not|don't|dont|never)\s+ask\b[^.]{0,40}\b(?:confirmation|approval|consent|permission|again|just)\b/i },
+  { name: "approval-bypass", re: /\bwithout asking\b|\bproceed silently\b|\bsubmit silently\b/i },
   { name: "checkpoint-bypass", re: /\b(?:bypass|solve|skip|defeat|evade|circumvent|get (?:past|around))\b[^.]{0,40}\b(?:captcha|2fa|two[- ]factor|mfa|identity (?:check|verification)|id check|verification code)\b/i },
   { name: "checkpoint-bypass", re: /\b(?:enter|type|fill in?|provide)\b[^.]{0,30}\b(?:verification|otp|one[- ]time) code\b[^.]{0,30}\b(?:yourself|automatically|from (?:the )?(?:sms|email|message))\b/i },
   { name: "credential-request", re: /\b(?:ask|request|collect|prompt)\b[^.]{0,30}\b(?:the user|user)\b[^.]{0,20}\b(?:password|credential|secret)\b/i },
@@ -121,8 +125,58 @@ export interface SanitizationResult {
   reasons: string[];
 }
 
+// Detection-only folding: NFKC + casefold + Cyrillic/Greek confusables, so
+// case, spacing, punctuation, percent-encoding, or lookalike letters cannot
+// smuggle a known personal value past the re-scan below.
+const CONFUSABLE_FOLD: Record<string, string> = {
+  "\u0430": "a", "\u0435": "e", "\u043E": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x",
+  "\u0456": "i", "\u0455": "s", "\u04BB": "h", "\u0458": "j", "\u0410": "a", "\u0412": "b", "\u0415": "e",
+  "\u041A": "k", "\u041C": "m", "\u041D": "h", "\u041E": "o", "\u0420": "p", "\u0421": "c", "\u0422": "t",
+  "\u0425": "x", "\u03B1": "a", "\u03B5": "e", "\u03B9": "i", "\u03BA": "k", "\u03BD": "v", "\u03BF": "o",
+  "\u03C1": "p", "\u03C4": "t", "\u03C5": "u", "\u03C7": "x",
+};
+function foldForMatch(text: string): string {
+  let out = "";
+  for (const ch of String(text).normalize("NFKC")) out += CONFUSABLE_FOLD[ch] ?? ch;
+  return out.toLowerCase();
+}
+function compactForMatch(text: string): string {
+  return foldForMatch(text).replace(/[^\p{L}\p{N}]/gu, "");
+}
+function foldedHaystacks(text: string): { folded: string; compact: string } {
+  let decoded = text;
+  try { decoded = decodeURIComponent(text); } catch { /* keep raw */ }
+  const joined = decoded === text ? text : `${text}\n${decoded}`;
+  return { folded: foldForMatch(joined), compact: compactForMatch(joined) };
+}
+function knownValueRemains(clean: string, knownValues: string[]): boolean {
+  const { folded, compact } = foldedHaystacks(clean);
+  for (const value of knownValues) {
+    const v = value.trim();
+    if (v.length < 3) continue;
+    if (clean.includes(v) || folded.includes(foldForMatch(v))) return true;
+    const needle = compactForMatch(v);
+    if (needle.length >= 4 && compact.includes(needle)) return true;
+  }
+  return false;
+}
+
+/// Shared guidance may name a site's origin and generic routes, never a
+/// personalized URL: query, fragment, and userinfo are stripped here and
+/// any remainder rejects at re-scan.
+function scrubUrls(text: string, redactions: Set<string>): string {
+  return text.replace(/https?:\/\/[^\s"')]+/gi, (m) => {
+    try {
+      const u = new URL(m);
+      const clean = u.origin + u.pathname;
+      if (clean !== m) redactions.add("url-query");
+      return clean;
+    } catch { return m; }
+  });
+}
+
 function sanitizeText(text: string, knownValues: string[], redactions: Set<string>): string {
-  let out = String(text ?? "");
+  let out = scrubUrls(String(text ?? ""), redactions);
   for (const value of knownValues) {
     const v = value.trim();
     if (v.length >= 3 && out.includes(v)) {
@@ -157,8 +211,9 @@ export function sanitizeSkillBody(input: unknown, knownValues: string[] = []): S
   if (JSON.stringify(candidate).length > MAX_SKILL_BODY_BYTES) reasons.push("body too large");
 
   const rawText = bodyText(candidate);
+  const foldedRaw = foldForMatch(rawText);
   for (const g of GUARDRAIL_PATTERNS) {
-    if (g.re.test(rawText)) reasons.push(`guardrail: ${g.name}`);
+    if (g.re.test(rawText) || g.re.test(foldedRaw)) reasons.push(`guardrail: ${g.name}`);
   }
 
   const redactions = new Set<string>();
@@ -178,9 +233,8 @@ export function sanitizeSkillBody(input: unknown, knownValues: string[] = []): S
       && !/^Bearer <token>$/i.test(m.trim()) && !/^credential: <credential>$/i.test(m.trim()) && !/^name: <name>$/i.test(m.trim()));
     if (leftover.length) reasons.push(`unsanitized ${d.name} remained`);
   }
-  for (const value of knownValues) {
-    if (value.trim().length >= 3 && clean.includes(value.trim())) reasons.push("known user value remained");
-  }
+  if (knownValueRemains(clean, knownValues)) reasons.push("known user value remained");
+  if (/https?:\/\/[^\s"')]*[?#][^\s"')]+/i.test(clean)) reasons.push("personalized url remained");
   return reasons.length
     ? { ok: false, redactions: [...redactions], reasons }
     : { ok: true, body, redactions: [...redactions], reasons: [] };
@@ -202,7 +256,11 @@ export function distillSkillDraft({ site, outcome, trace }: {
       if (/password/i.test(t.target ?? "")) {
         steps.push("When a password field appears, fill it via valueRef credential.secret so the vault supplies it.");
       } else if (t.action === "navigate" && t.urlString) {
-        steps.push(`Start at ${t.urlString} and look for the ${outcome} entry point.`);
+        // Observed URLs may be personalized (profile paths, invite queries):
+        // only the origin and generic route may ever become guidance.
+        let route = "";
+        try { const u = new URL(String(t.urlString)); route = u.origin + u.pathname; } catch { /* unparseable: emit no step */ }
+        if (route) steps.push(`Start at ${route} and look for the ${outcome} entry point.`);
       } else if (t.target) {
         steps.push(`Use the "${t.target}" control when it is visible on ${site}.`);
       }
@@ -250,12 +308,33 @@ export function shouldPromote(candidate: SkillCandidate): boolean {
   return candidate.status === "candidate" && candidate.corroborationCount >= PROMOTION_THRESHOLD;
 }
 
+/// Stable content hash binding corroboration to the exact authored body:
+/// a later run only corroborates when its distilled draft is identical.
+export async function skillBodyHash(body: SkillBody): Promise<string> {
+  const canonical = JSON.stringify({ summary: body.summary, steps: body.steps, pitfalls: body.pitfalls, notes: body.notes });
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return [...new Uint8Array(digest)].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/// Legacy missions have no canonical receipt or reviewed postconditions, so
+/// positive shared feedback requires observed evidence in the result itself.
+/// A model "done" alone never moves shared confidence.
+export function missionOutcomeVerified(task: any, result: any): boolean {
+  if (result?.status !== "succeeded") return false;
+  if (Array.isArray(result.extractedItems) && result.extractedItems.length > 0) return true;
+  if (result.sessionProbe === "authenticated") return true;
+  void task;
+  return false;
+}
+
 // ---- repository (D1 in production, in-memory in tests) ----------------
 
 export interface SkillRepository {
   loadActive(site: string, outcome: SkillOutcome): Promise<SharedSkill | null>;
   insertActive(skill: SharedSkill): Promise<void>;
   update(skill: SharedSkill): Promise<void>;
+  /// Maintainer kill switch: terminally deprecate so loadActive never serves it.
+  quarantine(id: string): Promise<boolean>;
 }
 
 export class InMemorySkillRepository implements SkillRepository {
@@ -268,6 +347,12 @@ export class InMemorySkillRepository implements SkillRepository {
   async update(skill: SharedSkill) {
     const i = this.skills.findIndex((s) => s.id === skill.id);
     if (i >= 0) this.skills[i] = { ...skill };
+  }
+  async quarantine(id: string): Promise<boolean> {
+    const i = this.skills.findIndex((s) => s.id === id);
+    if (i < 0 || this.skills[i].status === "deprecated") return false;
+    this.skills[i] = { ...this.skills[i], status: "deprecated" };
+    return true;
   }
   nextVersion(site: string, outcome: SkillOutcome): number {
     return Math.max(0, ...this.skills.filter((s) => s.site === site && s.outcome === outcome).map((s) => s.version)) + 1;
@@ -306,6 +391,13 @@ export class D1SkillRepository implements SkillRepository {
       `UPDATE skills SET confidence = ?2, source_run_count = ?3, last_verified_at = ?4, status = ?5,
        updated_at = datetime('now') WHERE id = ?1`,
     ).bind(skill.id, skill.confidence, skill.sourceRunCount, skill.lastVerifiedAt, skill.status).run();
+  }
+  async quarantine(id: string): Promise<boolean> {
+    await this.db.prepare(
+      `UPDATE skills SET status = 'deprecated', updated_at = datetime('now') WHERE id = ?1 AND status != 'deprecated'`,
+    ).bind(id).run();
+    const row = await this.db.prepare("SELECT status FROM skills WHERE id = ?1").bind(id).first();
+    return row?.status === "deprecated";
   }
 }
 

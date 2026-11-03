@@ -1,0 +1,1 @@
+{"name":"hygge-workspace-container","private":true,"type":"module","engines":{"node":">=22.18"},"scripts":{"test":"node --experimental-strip-types --test test/*.mjs"},"dependencies":{"puppeteer-core":"25.16.0","ws":"8.22.1"}}

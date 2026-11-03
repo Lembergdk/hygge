@@ -1,0 +1,9 @@
+[
+  {
+    "origin": "https://hygge-wave4-jobs.lemberg-89a.workers.dev",
+    "outcome": "apply",
+    "pathname": "/apply/success",
+    "requiredLabels": ["Application received"],
+    "reviewedRevision": "wave4-2026-11-03"
+  }
+]

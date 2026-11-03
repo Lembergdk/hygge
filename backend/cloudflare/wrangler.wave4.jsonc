@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Isolated Wave 4 acceptance stack. Separate script, DO namespace, D1
+  // and R2 from hygge-api-staging/production; workers.dev only, no crons.
+  // Fill database_id, image digest, and test-site origin at deploy (plan:
+  // outputs/sandbox-wave-4/plan.md). Do not point this at shared staging.
+  "name": "hygge-api-wave4",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-31",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "upload_source_maps": true,
+  "observability": { "logs": { "enabled": true }, "traces": { "enabled": true, "head_sampling_rate": 1 } },
+  "containers": [
+    { "class_name": "UserSandbox", "scheduling_policy": "durable_object", "images": { "base": { "image": "registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:ae26f5d92b203d94f18bc13f1c121975459053c3b34d9ee2ea664d68f01d55ff" } } }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "UserSandbox", "name": "USER_SANDBOX" }
+    ]
+  },
+  "exports": {
+    "UserSandbox": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "vars": {
+    "HYGGE_ENV": "staging",
+    "HYGGE_TRACE_PAYLOADS": "0",
+    "HYGGE_LLM_BASE_URL": "https://gateway.ai.cloudflare.com/v1/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-staging/custom-meta-ai/v1",
+    "HYGGE_AIG_COLLECT_PAYLOAD": "0",
+    "HYGGE_LLM_MODEL_FAST": "muse-spark-1.3",
+    "HYGGE_LLM_MODEL_STRONG": "muse-wonder-1.0",
+    "HYGGE_APPLE_BUNDLE_ID": "app.usehygge",
+    "HYGGE_WORKSPACE_MODE": "retained-v2",
+    "HYGGE_WORKSPACE_NAMESPACE": "hygge-wave4",
+    "HYGGE_WORKSPACE_IMAGE": "registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:ae26f5d92b203d94f18bc13f1c121975459053c3b34d9ee2ea664d68f01d55ff",
+    "HYGGE_SKILL_REGISTRY": "{\"schemaVersion\":1,\"sites\":[{\"siteId\":\"wave4-jobs\",\"origin\":\"https://hygge-wave4-jobs.lemberg-89a.workers.dev\",\"routes\":{\"home\":\"/\",\"listings\":\"/listings\",\"apply\":\"/apply\",\"login\":\"/login\"},\"controls\":[\"Search\",\"Apply\",\"Submit\",\"Cover\"],\"fieldSets\":[\"listings\"],\"pitfalls\":[],\"review\":{\"policyVersion\":\"hygge-public-skills-v2.1\",\"reviewedRevision\":\"wave4-2026-11-03\",\"source\":\"developer_review\"}}]}",
+    "HYGGE_WORKSPACE_POSTCONDITIONS": "[{\"origin\":\"https://hygge-wave4-jobs.lemberg-89a.workers.dev\",\"outcome\":\"apply\",\"pathname\":\"/apply/success\",\"requiredLabels\":[\"Application received\"],\"reviewedRevision\":\"wave4-2026-11-03\"}]"
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "hygge-wave4", "database_id": "733dd04a-e102-46a9-8b6c-ac5b55f3b41c" }
+  ],
+  "r2_buckets": [
+    { "binding": "BROWSER_PROFILES", "bucket_name": "hygge-browser-profiles-wave4" },
+    { "binding": "WORKSPACE_CHECKPOINTS", "bucket_name": "hygge-workspace-checkpoints-wave4" }
+  ],
+  "browser": { "binding": "BROWSER" },
+  "services": [
+    { "binding": "SELF", "service": "hygge-api-wave4" }
+  ]
+}
