@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { LLMClient } from "../src/llm.ts";
-import { makeDecider, runMission } from "../src/agent.ts";
+import { makeDecider, runMission, CHECKPOINT_ATTEMPT_BUDGET } from "../src/agent.ts";
 import { generateDEK } from "../src/vault.ts";
 import {
   sealSessionState,
@@ -138,7 +138,7 @@ test("expired trusted session: probe fails, vault re-login runs (profile refresh
   assert.ok(fresh.cookies.length > 0); // caller seals+saves this as the refreshed profile
 });
 
-test("2FA checkpoint: mission pauses as needs_human and the agent never acts on the checkpoint page", async () => {
+test("2FA checkpoint with no inbox code: bounded attempts, then needs_human; credentials and literals never enter the page", async () => {
   const browser = new FakeBrowser(["Enter the verification code we sent to your phone", "Code field", "Verify button"]);
   let fills = 0;
   const result = await runMission({
@@ -146,10 +146,11 @@ test("2FA checkpoint: mission pauses as needs_human and the agent never acts on 
     fillCredentialValue: async () => { fills += 1; },
   });
   assert.equal(result.status, "needs_human");
-  assert.ok(result.checkpoint);
+  assert.equal(result.checkpoint, "two-factor check");
   assert.equal(fills, 0);
-  assert.deepEqual(browser.clickedTargets, []);
-  assert.deepEqual(browser.typedTargets, []);
+  assert.ok(browser.clickedTargets.length > 0, "expected attempt actions");
+  assert.ok(browser.clickedTargets.length <= CHECKPOINT_ATTEMPT_BUDGET);
+  assert.deepEqual(browser.typedTargets, []); // a code is never invented or typed literally
   assert.deepEqual(browser.closed, []); // runMission never closes; caller keeps needs_human sessions open
 });
 
@@ -177,9 +178,10 @@ test("dead kept session falls back to a fresh session (then vault/profile)", asy
   assert.equal(result.status, "succeeded");
 });
 
-test("combined: skill-loaded mission hitting a CAPTCHA pauses as needs_human with zero actions and no skill draft", async () => {
-  // Integration guard (Brief 02 + Brief 03): an active shared skill
-  // must never weaken the pre-decider checkpoint guard.
+test("combined: skill-loaded mission hitting a CAPTCHA attempts within budget, then asks with no skill draft", async () => {
+  // Attempt-then-ask: an active shared skill does not change the
+  // bounded attempt window, and a check that never clears still
+  // ends as needs_human with the session kept open.
   const browser = new FakeBrowser(["I'm not a robot", "reCAPTCHA", "Continue button"]);
   let fills = 0;
   const skill: any = {
@@ -192,9 +194,44 @@ test("combined: skill-loaded mission hitting a CAPTCHA pauses as needs_human wit
     fillCredentialValue: async () => { fills += 1; },
   });
   assert.equal(result.status, "needs_human");
+  assert.equal(result.checkpoint, "CAPTCHA check");
   assert.equal(result.skillCoverage, "active");
   assert.equal(fills, 0);
-  assert.deepEqual(browser.clickedTargets, []);
-  assert.deepEqual(browser.typedTargets, []);
+  // It really tried (observed controls only), bounded by the budget.
+  assert.ok(browser.clickedTargets.length > 0, "expected at least one attempt action");
+  assert.ok(browser.clickedTargets.length <= CHECKPOINT_ATTEMPT_BUDGET,
+    `attempts ${browser.clickedTargets.length} exceeded budget ${CHECKPOINT_ATTEMPT_BUDGET}`);
+  assert.deepEqual(browser.typedTargets, []); // no literal codes/facts invented
   assert.equal(result.skillDraft ?? null, null);
+  assert.deepEqual(browser.closed, []); // session stays open for the user
+});
+
+test("checkpoint attempt that clears lets the mission continue to success", async () => {
+  const browser = new FakeBrowser(
+    ["I'm not a robot", "reCAPTCHA"],
+    { "not a robot": ["Search field", "Search button"] },
+  );
+  const result: any = await runMission({
+    browser, task: TASK, hints: [], decider, hasCredential: false,
+    fillCredentialValue: async () => {},
+  });
+  assert.equal(result.status, "succeeded");
+  assert.ok(browser.clickedTargets.some((t) => t.toLowerCase().includes("not a robot")));
+  assert.ok(result.log.join("\n").includes("Got through"));
+});
+
+test("scheduled scan attempts a two-factor check but can never spend an emailed code", async () => {
+  const browser = new FakeBrowser(["Enter the verification code we sent", "Verification code field", "Verify button"]);
+  let emailCodeFills = 0;
+  const scanTask = { ...TASK, scheduled_scan: true };
+  const result: any = await runMission({
+    browser, task: scanTask, hints: [], decider, hasCredential: false,
+    hasEmailCode: true,
+    fillEmailCodeValue: async () => { emailCodeFills += 1; },
+    fillCredentialValue: async () => {},
+  });
+  assert.equal(result.status, "needs_human"); // tried, could not clear it, asked
+  assert.ok(browser.clickedTargets.length > 0, "scan should still attempt the check");
+  assert.equal(emailCodeFills, 0); // codes stay reserved for user-started missions
+  assert.deepEqual(browser.typedTargets, []);
 });

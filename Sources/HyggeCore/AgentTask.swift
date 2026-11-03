@@ -148,7 +148,7 @@ public enum AgentTaskFactory {
         """
         return AgentTask(
             kind: .apply, siteID: opportunity.siteID, targetURLString: opportunity.urlString,
-            goal: "Open the listing \"\(opportunity.title)\", log in if needed, open the apply/contact flow, fill it with the approved cover letter, and submit. Stop for the user at any CAPTCHA, 2FA, payment or identity check.",
+            goal: "Open the listing \"\(opportunity.title)\", log in if needed, open the apply/contact flow, fill it with the approved cover letter, and submit.",
             opportunityID: opportunity.id,
             title: "Apply: \(opportunity.title)",
             draftedPayload: ["coverLetter": letter, "listingURL": opportunity.urlString,
@@ -198,10 +198,10 @@ public enum AgentTaskFactory {
                                   signupEmail: String) -> AgentTask {
         let verificationNote = emailChoice == .hygge
             ? "Email verification for this signup lands in the Hygge inbox and is handled from there — do not ask the user to open email."
-            : "Stop for the user at email verification."
+            : "Email verification for this signup goes to the user's own inbox."
         return AgentTask(
             kind: .signup, siteID: site.id, targetURLString: site.startURLString,
-            goal: "Get the user set up on \(site.name). First figure out how this site works: is there a login that already works with the vault credential (existing account), or is a new signup needed? Work out what information the signup requires. Handle safe reversible setup choices autonomously. Use known profile values; never invent personal facts. Ask only when necessary and suggest grounded answers. Do not publish a public profile or make commitments without specific approval. \(verificationNote) Stop for the user at CAPTCHA/bot checks, ID or background checks.",
+            goal: "Get the user set up on \(site.name). First figure out how this site works: is there a login that already works with the vault credential (existing account), or is a new signup needed? Work out what information the signup requires. Handle safe reversible setup choices autonomously. Use known profile values; never invent personal facts. Ask only when necessary and suggest grounded answers. Do not publish a public profile or make commitments without specific approval. \(verificationNote)",
             title: "Sign up for \(site.name)",
             draftedPayload: emailChoice.draftedPayload(signupEmail: signupEmail, displayName: profile.displayName)
                 .merging(["location": profile.locationLabel, "headline": profile.headline,

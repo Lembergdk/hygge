@@ -70,12 +70,13 @@ quiet week.
 
 Trusted sign-ins can expire. The next look notices, signs in again
 with the saved login, and carries on — nothing for the user to do.
-If the saved login itself is turned away, or the site asks for a
-check only the person can do, Hygge stops there. It never tries to
-get past such a check. Exactly one card appears in the feed saying
-what is needed, and that site is not looked at again until the
-login is saved again or a look succeeds. One card per problem,
-never one per look.
+If the saved login itself is turned away, or the site presents a
+check, Hygge gets a bounded number of tries at it with ordinary
+page controls (it still never spends an emailed code during a
+scan). If it cannot get through, exactly one card appears in the
+feed saying what is needed, and that site is not looked at again
+until the login is saved again or a look succeeds. One card per
+problem, never one per look.
 
 ## Cost guardrails
 

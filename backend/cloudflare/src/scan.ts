@@ -962,10 +962,10 @@ export function needsYouPayload(
     id,
     siteID: site.siteID,
     title: needsCheck
-      ? `${site.name} asked for a check only you can do`
+      ? `${site.name} asked for a check I couldn't finish`
       : `Your saved login for ${site.name} needs you`,
     summary: needsCheck
-      ? `When I looked for new work on ${site.name}, it asked for a check only you can do, so I stopped there. I will not look again until you open the site and finish it. Nothing was sent or booked.`
+      ? `When I looked for new work on ${site.name}, it asked for a check and I couldn't get through it, so I stopped there. I will not look again until you open the site and finish it. Nothing was sent or booked.`
       : `When I looked for new work on ${site.name}, your saved login did not work, so I stopped there. I will not look again until you save your login for ${site.name} again in the app. Nothing was sent or booked.`,
     category: validCategory(site.category),
     payLabel: "Needs you",
@@ -1021,8 +1021,9 @@ export interface ScanMissionOutcome {
   /// The saved login / trusted sign-in was rejected (expired
   /// session that the vault login could not revive, wrong secret).
   loginFailure?: boolean;
-  /// A human-only check (bot check, two-factor, identity) stopped
-  /// the scan. Never bypassed; the user is asked once per episode.
+  /// A check (bot check, two-factor, identity) stopped the scan
+  /// after its bounded attempt window; the user is asked once
+  /// per episode.
   needsHuman?: boolean;
   /// The mission hit a mobile-app wall (Brief 06 re-probe trigger).
   /// Distinct from needsHuman, which is generic. One strike triggers

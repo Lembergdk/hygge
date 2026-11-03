@@ -83,6 +83,9 @@ export interface TierContext {
   repeatedAction?: boolean;
   isFinalSubmit?: boolean;
   drafting?: boolean;
+  /// Working through a detected site check: bounded, vision-heavy
+  /// steps where the stronger model earns its cost.
+  checkpointAttempt?: boolean;
   /// Brief 02 routing: "active" = shared skill loaded, "candidate" =
   /// per-user candidate being corroborated, "none" = no skill at all.
   /// Undefined keeps the pre-Brief-02 behavior (routine Spark).
@@ -101,6 +104,7 @@ export function selectTier(cfg: LLMConfig, ctx: TierContext) {
   if (isFinalSubmit && taskKind && HIGH_STAKES.has(taskKind)) return pick("wonder", "final submit on a high-stakes mission");
   if (drafting) return pick("wonder", "composing user-facing text");
   if (failures === 1) return pick("wonder", "previous action failed — escalating to replan");
+  if (ctx.checkpointAttempt) return pick("wonder", "working through a site check");
   if (ctx.skillCoverage === "none") return pick("wonder", "no active skill for this site/outcome — Wonder authoring mode");
   if (ctx.skillCoverage === "candidate") return pick("wonder", "skill candidate not yet corroborated — Wonder confirming mode");
   return pick("spark", ctx.skillCoverage === "active" ? "active shared skill loaded" : "routine browsing decision");

@@ -258,10 +258,11 @@ test("emailed 2FA code: consumed once then gone; expired codes never chosen", as
   assert.equal(takeFreshCode(store, "rover.com", now), null); // wrong site
 });
 
-test("mission consumes an emailed code once via valueRef; without one it pauses", async () => {
+test("mission consumes an emailed code once via valueRef; without one it attempts then asks", async () => {
   const cfg = { baseUrl: "https://api.meta.ai/v1", modelFast: "muse-spark-1.3", modelStrong: "muse-wonder-1.0" };
   const makeBrowser = () => {
     let verified = false;
+    let codeTyped = false;
     const acts: any[] = [];
     const snap = () => ({
       sessionID: "s1", currentURLString: "https://upwork.com/check", mode: "fake",
@@ -276,7 +277,10 @@ test("mission consumes an emailed code once via valueRef; without one it pauses"
       snapshot: async () => snap(),
       act: async (_id: string, action: any) => {
         acts.push(action);
-        if (action.action === "click") verified = true;
+        // The page only verifies once the real code was entered;
+        // clicking Verify empty-handed cannot clear the check.
+        if (action.action === "type" && action.value === "246810") codeTyped = true;
+        if (action.action === "click" && codeTyped) verified = true;
         return snap();
       },
       extract: async () => (verified ? ["Welcome back"] : []),
@@ -303,7 +307,8 @@ test("mission consumes an emailed code once via valueRef; without one it pauses"
   assert.equal(JSON.stringify(result.trace).includes("246810"), false);
   assert.equal(JSON.stringify(result.log).includes("246810"), false);
 
-  // Same page, no emailed code waiting: the checkpoint still pauses.
+  // Same page, no emailed code waiting: bounded attempts happen,
+  // no code is invented, and the mission ends by asking.
   const browser2 = makeBrowser();
   const paused = await runMission({
     browser: browser2, task: { ...task, log: [] },
@@ -311,10 +316,11 @@ test("mission consumes an emailed code once via valueRef; without one it pauses"
     hasEmailCode: false,
   });
   assert.equal(paused.status, "needs_human");
-  assert.equal(browser2.acts.length, 0);
+  assert.ok(browser2.acts.length > 0, "expected attempt actions");
+  assert.ok(browser2.acts.every((a: any) => a.action !== "type"), "no literal code may be typed");
 });
 
-test("merged Brief 04+05: a scheduled scan never spends an emailed code at a check", async () => {
+test("merged Brief 04+05: a scheduled scan attempts a check but never spends an emailed code", async () => {
   assert.equal(emailCodeAllowedForTask({ scheduled_scan: true }), false);
   assert.equal(emailCodeAllowedForTask({ scheduled_scan: false }), true);
   assert.equal(emailCodeAllowedForTask({}), true);
@@ -334,7 +340,8 @@ test("merged Brief 04+05: a scheduled scan never spends an emailed code at a che
     closeSession: async () => true,
   };
   // A code is pending for a user mission. Even if a caller wrongly
-  // offers it, the scheduled-scan mission must pause untouched.
+  // offers it, the scheduled-scan mission may attempt the check
+  // with ordinary controls but must never spend the code.
   const pending = [{ id: "c1", senderDomain: "upwork.com", code: "246810" }];
   let fills = 0;
   const result = await runMission({
@@ -349,7 +356,8 @@ test("merged Brief 04+05: a scheduled scan never spends an emailed code at a che
   });
   assert.equal(result.status, "needs_human");
   assert.equal(fills, 0);
-  assert.equal(acts.length, 0);
+  assert.ok(acts.length > 0, "scan attempts the check with ordinary controls");
+  assert.ok(acts.every((a: any) => a.action !== "type"), "no code typed during a scan");
   assert.equal(pending.length, 1); // still waiting for the user's own mission
 });
 
