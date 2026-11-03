@@ -24,55 +24,20 @@ struct SwipeFeedCard<Content: View>: View {
         content
             .contentShape(RoundedRectangle(cornerRadius: 22))
             .overlay {
-                FeedGestureSurface(onTap: {
-                    guard !committing else { return }
-                    if offset != 0 { close() } else { open() }
-                }, onBegin: {
-                    origin = offset; openCardID = id
-                }, onChange: { translation in
-                    guard !committing else { return }
-                    offset = min(width, max(-width, origin + translation))
-                    let next = abs(offset) >= FeedSwipe.threshold(width: width)
-                    if next != armed {
-                        armed = next
-                        if next { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
-                    }
-                }, onEnd: { cancelled in
-                    guard !cancelled else { close(); return }
-                    switch FeedSwipe.outcome(offset: offset, width: width) {
-                    case .closed: close()
-                    case .revealed(let direction):
-                        withAnimation(motion) { offset = CGFloat(direction) * FeedSwipe.revealWidth }
-                    case .triggered(let direction): commit(direction)
-                    }
-                    armed = false
-                })
-                .accessibilityHidden(true)
+                FeedGestureSurface(onTap: tap, onBegin: beginDrag, onChange: drag, onEnd: endDrag)
+                    .accessibilityHidden(true)
             }
             .offset(x: offset)
             .rotationEffect(.degrees(reduceMotion ? 0 : (offset < 0 ? -min(2, abs(offset) / width * 2) : 0)))
             .background {
-                GeometryReader { geo in
-                    ZStack(alignment: offset >= 0 ? .leading : .trailing) {
-                        (offset >= 0 ? HyggeTheme.sageDeep : HyggeTheme.ember)
-                        Button { commit(offset >= 0 ? 1 : -1) } label: {
-                            VStack(spacing: 6) {
-                                Image(systemName: offset >= 0 ? primaryIcon : "leaf")
-                                    .font(.system(size: 22, weight: .semibold))
-                                    .scaleEffect(armed && !reduceMotion ? 1.15 : 1)
-                                Text(armed ? (offset >= 0 ? "Release to \(primaryTitle.lowercased())" : "Release to dismiss") : (offset >= 0 ? primaryTitle : "Dismiss"))
-                                    .font(.system(.caption, design: .rounded, weight: .semibold))
-                                    .multilineTextAlignment(.center)
-                            }
-                            .foregroundStyle(offset >= 0 ? HyggeTheme.onSage : HyggeTheme.faceBrown)
-                            .frame(width: max(FeedSwipe.revealWidth, abs(offset)), height: geo.size.height)
-                            .frame(width: max(0, abs(offset)), alignment: offset >= 0 ? .leading : .trailing).clipped()
-                            .contentShape(Rectangle())
-                        }.buttonStyle(.plain).disabled(committing || offset == 0)
-                    }
-                    .onAppear { width = geo.size.width }
-                    .onChange(of: geo.size.width) { _, value in width = value; close() }
-                }
+                FeedSwipeUnderlay(offset: offset, armed: armed, primaryTitle: primaryTitle,
+                                  primaryIcon: primaryIcon, reduceMotion: reduceMotion,
+                                  disabled: committing, commit: commit)
+                    .accessibilityHidden(true)
+                    .background(GeometryReader { geometry in
+                        Color.clear.onAppear { width = geometry.size.width }
+                            .onChange(of: geometry.size.width) { _, value in width = value; close() }
+                    })
             }
             .clipShape(RoundedRectangle(cornerRadius: 22))
             .accessibilityElement(children: .combine)
@@ -82,6 +47,30 @@ struct SwipeFeedCard<Content: View>: View {
             .accessibilityAction(named: Text("Dismiss")) { dismiss() }
             .accessibilityHint("Opens details. Swipe right for \(primaryTitle.lowercased()), left to dismiss.")
             .onChange(of: openCardID) { _, value in if value != id { close() } }
+    }
+    private func tap() {
+        guard !committing else { return }
+        if offset != 0 { close() } else { open() }
+    }
+    private func beginDrag() { origin = offset; openCardID = id }
+    private func drag(_ translation: CGFloat) {
+        guard !committing else { return }
+        offset = min(width, max(-width, origin + translation))
+        let next = abs(offset) >= FeedSwipe.threshold(width: width)
+        if next != armed {
+            armed = next
+            if next { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+        }
+    }
+    private func endDrag(_ cancelled: Bool) {
+        guard !cancelled else { close(); return }
+        switch FeedSwipe.outcome(offset: offset, width: width) {
+        case .closed: close()
+        case .revealed(let direction):
+            withAnimation(motion) { offset = CGFloat(direction) * FeedSwipe.revealWidth }
+        case .triggered(let direction): commit(direction)
+        }
+        armed = false
     }
     private func close() {
         withAnimation(motion) { offset = 0; armed = false }
@@ -96,6 +85,41 @@ struct SwipeFeedCard<Content: View>: View {
             guard !Task.isCancelled else { return }
             if direction > 0 { primary() } else { dismiss() }
             offset = 0; origin = 0; committing = false; openCardID = nil
+        }
+    }
+}
+
+private struct FeedSwipeUnderlay: View {
+    let offset: CGFloat
+    let armed: Bool
+    let primaryTitle: String
+    let primaryIcon: String
+    let reduceMotion: Bool
+    let disabled: Bool
+    let commit: (Int) -> Void
+    private var isPrimary: Bool { offset >= 0 }
+    private var title: String {
+        if armed { return isPrimary ? "Release to \(primaryTitle.lowercased())" : "Release to dismiss" }
+        return isPrimary ? primaryTitle : "Dismiss"
+    }
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: isPrimary ? .leading : .trailing) {
+                (isPrimary ? HyggeTheme.sageDeep : HyggeTheme.ember)
+                Button { commit(isPrimary ? 1 : -1) } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: isPrimary ? primaryIcon : "leaf")
+                            .font(.system(size: 22, weight: .semibold))
+                            .scaleEffect(armed && !reduceMotion ? 1.15 : 1)
+                        Text(title).font(.system(.caption, design: .rounded, weight: .semibold))
+                            .multilineTextAlignment(.center)
+                    }
+                    .foregroundStyle(isPrimary ? HyggeTheme.onSage : HyggeTheme.faceBrown)
+                    .frame(width: max(FeedSwipe.revealWidth, abs(offset)), height: geometry.size.height)
+                    .frame(width: max(0, abs(offset)), alignment: isPrimary ? .leading : .trailing)
+                    .clipped().contentShape(Rectangle())
+                }.buttonStyle(.plain).disabled(disabled || offset == 0)
+            }
         }
     }
 }

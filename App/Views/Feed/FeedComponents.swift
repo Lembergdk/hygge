@@ -5,11 +5,17 @@ struct FeedSummary: View {
     let subtitle: String
     var icon = "sparkles"
     var asset: String? = nil
+    var usesProfilePhoto = false
+    @Environment(AppStore.self) private var store
     var body: some View {
         HStack(spacing: 13) {
             Group {
-                if let asset {
-                    Image(asset).resizable().scaledToFit()
+                if usesProfilePhoto, store.profilePhotoData != nil {
+                    ProfileAvatar(size: 48)
+                } else if let asset {
+                    Image(asset).resizable().scaledToFit().scaleEffect(1.7)
+                } else if icon == "checkmark.circle.fill" {
+                    Image(systemName: icon).font(.system(size: 32)).foregroundStyle(HyggeTheme.sageDeep)
                 } else {
                     Image(systemName: icon).font(.system(size: 23, weight: .medium))
                         .foregroundStyle(HyggeTheme.sageDeep)

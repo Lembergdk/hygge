@@ -190,7 +190,7 @@ struct HomeFeedView: View {
         ForEach(listings) { opportunity in
             card(id: "opportunity-\(opportunity.id)", title: opportunity.title,
                  subtitle: "\(opportunity.payLabel) · \(opportunity.isRemote ? "Remote" : opportunity.locationLabel)",
-                 icon: "briefcase", primaryTitle: "Prepare draft", primaryIcon: "square.and.pencil",
+                 icon: opportunity.category == .creative ? "paintpalette" : "briefcase", primaryTitle: "Prepare draft", primaryIcon: "square.and.pencil",
                  open: { opportunityDetail = opportunity }, primary: { store.draftApplication(for: opportunity) },
                  dismiss: {
                     store.setStatus(.dismissed, for: opportunity.id)
@@ -221,7 +221,7 @@ struct HomeFeedView: View {
         let chat = task.needsChatHelp
         let approval = task.help?.kind == .approval
         return card(id: taskKey(task), title: taskTitle(task),
-                    subtitle: store.siteName(id: task.siteID), icon: chat && !approval ? "bubble.left.and.bubble.right" : "doc.text",
+                    subtitle: store.siteName(id: task.siteID), icon: chat && !approval ? "bubble.left.and.bubble.right" : "doc.text", usesProfilePhoto: task.kind == .buildProfile,
                     primaryTitle: chat && !approval ? "Open chat" : "Review", primaryIcon: chat ? "bubble.left" : "doc.text.magnifyingglass",
                     open: { if chat { openChat(task) } else { reviewTask = task } },
                     primary: { if chat { openChat(task) } else { reviewTask = task } })
@@ -267,12 +267,12 @@ struct HomeFeedView: View {
              icon: FeedEventPresentation.icon(event), asset: event.kind == .workCompleted ? "SettingsEarnings" : nil,
              primaryTitle: "Details", open: { eventDetail = event }, primary: { eventDetail = event })
     }
-    private func card(id: String, title: String, subtitle: String, icon: String, asset: String? = nil,
+    private func card(id: String, title: String, subtitle: String, icon: String, asset: String? = nil, usesProfilePhoto: Bool = false,
                       primaryTitle: String, primaryIcon: String = "arrow.right", open: @escaping () -> Void,
                       primary: @escaping () -> Void, dismiss: (() -> Void)? = nil) -> some View {
         SwipeFeedCard(id: id, primaryTitle: primaryTitle, primaryIcon: primaryIcon, openCardID: $openCardID,
                       open: { openCardID = nil; open() }, primary: primary, dismiss: dismiss ?? { archive(id) }) {
-            FeedSummary(title: title, subtitle: subtitle, icon: icon, asset: asset)
+            FeedSummary(title: title, subtitle: subtitle, icon: icon, asset: asset, usesProfilePhoto: usesProfilePhoto)
         }
     }
     private func archive(_ id: String) {
