@@ -202,17 +202,22 @@ export class LLMClient {
     if (logId) span.setAttribute("cloudflare.ai_gateway.log.id", logId.slice(0, 256));
   }
 
-  async complete({ model, system, user, conversationId }: { model: string; system: string; user: string; conversationId?: string }): Promise<string> {
+  async complete({ model, system, user, conversationId, imageDataURL }: { model: string; system: string; user: string; conversationId?: string; imageDataURL?: string }): Promise<string> {
     return withSpan(`chat ${model}`, this.chatAttrs(model, conversationId), async (span) => {
       this.payloadAttrs(span, system, user);
+      if (imageDataURL && (!/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(imageDataURL) || imageDataURL.length > 5_400_000)) throw new Error("Invalid or oversized model image");
+      const headers = llmRequestHeaders(this.cfg, model);
+      // Images never enter application traces or gateway body logs.
+      if (imageDataURL) headers["cf-aig-collect-log-payload"] = "false";
+      span.setAttribute("hygge.vision.attached", Boolean(imageDataURL));
       const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
-        headers: llmRequestHeaders(this.cfg, model),
+        headers,
         body: JSON.stringify({
           model,
           messages: [
             { role: "system", content: system },
-            { role: "user", content: user },
+            { role: "user", content: imageDataURL ? [{ type: "text", text: user }, { type: "image_url", image_url: { url: imageDataURL } }] : user },
           ],
         }),
       });

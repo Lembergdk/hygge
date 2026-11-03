@@ -7,6 +7,7 @@
     "dev": "wrangler dev -c wrangler.staging.jsonc",
     "deploy:staging": "wrangler deploy -c wrangler.staging.jsonc",
     "deploy:production": "wrangler deploy -c wrangler.production.jsonc",
+    "test:browser": "node --experimental-strip-types --test test/browser/*.mts",
     "test": "node --experimental-strip-types --test \"test/*.mts\""
   },
   "dependencies": {

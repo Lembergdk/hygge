@@ -805,6 +805,7 @@ export class UserSandbox extends DurableObject<Env> {
         action: "type",
         target,
         value: valueRef.endsWith("secret") ? secret : String(r.username),
+        sensitive: valueRef.endsWith("secret"),
       });
     };
 
@@ -821,7 +822,7 @@ export class UserSandbox extends DurableObject<Env> {
       if (!emailCodeAllowed) throw new Error("emailed codes are not used during scheduled scans");
       const code = await this.consumeEmailCode(domain);
       if (!code) throw new Error("agent requested an emailed code but none is waiting");
-      await browser.act(sessionID, { action: "type", target, value: code });
+      await browser.act(sessionID, { action: "type", target, value: code, sensitive: true });
       task.email_code_available = false;
     };
 

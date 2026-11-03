@@ -24,12 +24,16 @@ export function informationHelp(decision: any, draft: Record<string, string>) {
 
 export function actionFingerprint(decision: any, snapshot: any, draft: any): string {
   return JSON.stringify([snapshot.sessionID, snapshot.currentURLString, snapshot.title, snapshot.elements.map((e: any) => e.label).sort(),
+    snapshot.elements.find((e: any) => e.ref === decision.target) ?? null,
     decision.action, decision.target ?? "", decision.value ?? "", decision.valueRef ?? "", draft]);
 }
 
 export function needsActionApproval(task: any, decision: any): boolean {
-  if (task.interaction_version !== 1 || !["click", "type", "upload", "navigate"].includes(decision.action)) return false;
-  const target = String(decision.target ?? "");
+  // Keyboard submission has no trustworthy button label; require explicit
+  // approval rather than letting Enter/Space bypass consequential-click gates.
+  if (decision.action === "press" && ["Enter", "Space"].includes(decision.value)) return true;
+  if (task.interaction_version !== 1 || !["click", "type", "upload", "navigate", "select", "check", "press", "hover"].includes(decision.action)) return false;
+  const target = String(decision.targetLabel ?? decision.target ?? "");
   // Obvious consequential controls override a model's "reversible" classification.
   const destructive = /delete|remove account|close account|purchase|pay now|subscribe|accept offer|book now/i.test(target);
   if (destructive) return true;

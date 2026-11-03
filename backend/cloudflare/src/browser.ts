@@ -5,13 +5,10 @@
 import { launch, type Browser, type Page } from "@cloudflare/puppeteer";
 import type { SessionState } from "./session-profile.ts";
 import { BrowserLive } from "./browser-live.ts";
+import { BrowserObservation, OBSERVATION_LIMITS, sensitiveElement, redact, type ObservedElement } from "./browser-observation.ts";
 import { profilePhotoTargetAllowed } from "./profile-photo.ts";
 
-export interface PageElement {
-  label: string;
-  kind: "type" | "click";
-  inputType?: string;
-}
+export interface PageElement extends ObservedElement {}
 
 export interface Snapshot {
   sessionID: string;
@@ -21,6 +18,12 @@ export interface Snapshot {
   humanControlled: boolean;
   controlEpoch?: number;
   screenshotBase64: string | null;
+  notices?: string[];
+  pageText?: { url: string; text: string }[];
+  accessibility?: { role: string; name: string }[];
+  scroll?: { x: number; y: number; width: number; height: number; pageHeight: number };
+  observationTruncated?: boolean;
+  visionSafe?: boolean;
 }
 
 interface Session {
@@ -28,6 +31,7 @@ interface Session {
   browser: Browser;
   page: Page;
   live: BrowserLive;
+  observation: BrowserObservation;
 }
 
 export class BrowserRunBrowser {
@@ -89,9 +93,11 @@ export class BrowserRunBrowser {
     }
     const id = crypto.randomUUID();
     const live = new BrowserLive(page);
-    this.sessions.set(id, { id, browser, page, live });
+    const observation = new BrowserObservation();
+    this.sessions.set(id, { id, browser, page, live, observation });
     browser.once("disconnected", () => {
       live.finish("This browser session has expired. Return to chat to continue.");
+      void observation.close();
       this.sessions.delete(id);
     });
     return this.snapshot(id) as Promise<Snapshot>;
@@ -155,25 +161,7 @@ export class BrowserRunBrowser {
     const s = this.sessions.get(id);
     if (!s) return null;
     const page = s.page;
-    const elements = (await page.evaluate(() => {
-      const out: PageElement[] = [];
-      document
-        .querySelectorAll("a,button,input,textarea,select,[role=button]")
-        .forEach((el) => {
-          const e = el as HTMLInputElement;
-          const label = (e.type === "file"
-            ? (e.getAttribute("aria-label") || e.labels?.[0]?.textContent || e.name || "file")
-            : (e.innerText || e.placeholder || e.name || e.type || "")).trim().slice(0, 60);
-          if (label) {
-            out.push({
-              label,
-              kind: el.tagName === "INPUT" || el.tagName === "TEXTAREA" ? "type" : "click",
-              ...(e.type === "file" ? { inputType: "file" } : {}),
-            });
-          }
-        });
-      return out.slice(0, 80);
-    })) as PageElement[];
+    const observation = await s.observation.capture(page);
     const shot = (await page.screenshot({ type: "png" })) as unknown as Uint8Array;
     let b64 = "";
     const bytes = new Uint8Array(shot);
@@ -183,8 +171,9 @@ export class BrowserRunBrowser {
     return {
       sessionID: id,
       currentURLString: page.url(),
-      title: await page.title(),
-      elements,
+      title: redact(await page.title(), s.observation.secrets),
+      ...observation,
+      visionSafe: observation.visionSafe && !s.live.control.human && bytes.length <= OBSERVATION_LIMITS.imageBytes,
       humanControlled: s.live.control.human,
       controlEpoch: s.live.control.epoch,
       screenshotBase64: btoa(b64),
@@ -206,7 +195,7 @@ export class BrowserRunBrowser {
 
   async act(
     id: string,
-    { action, target, value }: { action: string; target?: string; value?: string },
+    { action, target, value, sensitive = false }: { action: string; target?: string; value?: string; sensitive?: boolean },
     legacyHuman = false,
   ): Promise<Snapshot | null> {
     const s = this.sessions.get(id);
@@ -214,29 +203,66 @@ export class BrowserRunBrowser {
     const page = s.page;
     if (s.live.control.human && !legacyHuman) throw new Error("browser is under human control");
     if (action === "navigate" && value) {
-      await page.goto(value, { waitUntil: "domcontentloaded" });
-    } else if (action === "setHumanControl") {
-      throw new Error("Use the live connection to transfer browser control.");
-    } else if (action === "click" && target) {
-      const safe = target.replaceAll('"', "'");
-      // normalize-space(.) covers labels split across nested spans;
-      // text() equality missed them (live: Rover's Sign Up button).
-      const exact = await page.$$(`xpath///a[normalize-space(.)="${safe}"] | //button[normalize-space(.)="${safe}"]`);
-      const el = exact[0] ?? (await page.$$(`xpath///a[contains(normalize-space(.), "${safe}")] | //button[contains(normalize-space(.), "${safe}")]`))[0];
-      if (!el) throw new Error(`element not found: ${target}`);
-      const box = await (el as any).boundingBox();
-      if (box) s.live.noteAgentPointer(box.x + box.width / 2, box.y + box.height / 2);
-      await (el as { click(): Promise<void> }).click();
-    } else if (action === "type" && target) {
-      const field =
-        (await page.$(`input[placeholder*="${target}" i], textarea[placeholder*="${target}" i]`)) ??
-        (await page.$(`input[name*="${target.toLowerCase()}" i]`)) ??
-        (await page.$("input, textarea"));
-      if (!field) throw new Error(`field not found: ${target}`);
-      const box = await field.boundingBox();
-      if (box) s.live.noteAgentPointer(box.x + box.width / 2, box.y + box.height / 2);
-      await field.type(value ?? "");
-    }
+      const destination = new URL(value, page.url());
+      if (!["https:", "http:"].includes(destination.protocol)) throw new Error("Only HTTP(S) navigation is supported");
+      await page.goto(destination.href, { waitUntil: "domcontentloaded", timeout: 30000 });
+    } else if (action === "back" || action === "forward") {
+      await (action === "back" ? page.goBack({ waitUntil: "domcontentloaded", timeout: 15000 }) : page.goForward({ waitUntil: "domcontentloaded", timeout: 15000 }));
+    } else if (action === "wait") {
+      const duration = Number(value || "500");
+      if (!Number.isFinite(duration) || duration < 100 || duration > 2000) throw new Error("Wait must be between 100 and 2000 milliseconds");
+      await new Promise(resolve => setTimeout(resolve, duration));
+    } else if (action === "scroll") {
+      if (!["up", "down"].includes(value ?? "")) throw new Error("Scroll direction must be up or down");
+      await page.evaluate(direction => window.scrollBy(0, (direction === "down" ? 1 : -1) * window.innerHeight * 0.8), value!);
+    } else if (["click", "type", "select", "check", "press", "hover"].includes(action) && target) {
+      const resolved = await s.observation.resolve(target, action);
+      const field = resolved.handle;
+      try {
+        const box = await field.boundingBox();
+        if (box) s.live.noteAgentPointer(box.x + box.width / 2, box.y + box.height / 2);
+        if (sensitive || sensitiveElement(resolved.element)) {
+          if (value) s.observation.secrets.add(value);
+        }
+        if (sensitive && new URL(resolved.frame.url()).origin !== new URL(page.url()).origin) {
+          throw new Error("Private values cannot be entered in a different-origin frame");
+        }
+        if (action === "click") await field.click();
+        if (action === "hover") await field.hover();
+        if (action === "type") {
+          // Replace rather than append; never fall back to the first input.
+          await field.focus();
+          await field.evaluate((el: any) => {
+            if (el.readOnly) throw new Error("This field is read-only");
+            if (el.isContentEditable) {
+              const range = document.createRange(); range.selectNodeContents(el);
+              const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(range);
+            } else {
+              // Native setters also notify controlled inputs when followed by
+              // an input event; unlike shortcut keys this works cross-platform.
+              const prototype = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+              Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(el, "");
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+          });
+          await field.press("Backspace");
+          await field.type(value ?? "");
+        }
+        if (action === "select") {
+          if (!resolved.element.options?.some((o: { value: string }) => o.value === value)) throw new Error("Choose an observed option value");
+          await field.select(value!);
+        }
+        if (action === "check") {
+          if (!["checkbox", "radio"].includes(resolved.element.role ?? "") || !["true", "false"].includes(value ?? "")) throw new Error("Check requires a checkbox/radio and true or false");
+          if (resolved.element.role === "radio" && value === "false") throw new Error("Select another radio option instead");
+          if (resolved.element.checked !== (value === "true")) await field.click();
+        }
+        if (action === "press") {
+          if (!["Enter", "Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(value ?? "")) throw new Error("Unsupported key");
+          await field.press(value === "Space" ? " " : value);
+        }
+      } finally { await field.dispose(); }
+    } else { throw new Error("Unsupported browser action or missing target"); }
     return this.snapshot(id);
   }
 
@@ -246,22 +272,21 @@ export class BrowserRunBrowser {
     const session = this.sessions.get(id);
     if (!session || session.live.control.human) throw new Error("browser is unavailable for photo attachment");
     if (!profilePhotoTargetAllowed(session.page.url(), approvedURL)) throw new Error("photo target is outside the approved site");
-    const host = new URL(approvedURL).hostname.replace(/^www\./, "");
-    const attached = await session.page.evaluate(({ target, base64, host }) => {
-      if (location.protocol !== "https:" || location.hostname.replace(/^www\./, "") !== host) return false;
-      const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="file"]'));
-      const matches = inputs.filter((e) =>
-        (e.getAttribute("aria-label") || e.labels?.[0]?.textContent || e.name || "file").trim().slice(0, 60) === target);
-      if (matches.length !== 1 || matches[0].disabled) return false;
-      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-      const transfer = new DataTransfer();
-      transfer.items.add(new File([bytes], "profile.jpg", { type: "image/jpeg" }));
-      matches[0].files = transfer.files;
-      matches[0].dispatchEvent(new Event("input", { bubbles: true }));
-      matches[0].dispatchEvent(new Event("change", { bubbles: true }));
-      return true;
-    }, { target, base64, host });
-    if (!attached) throw new Error("a unique photo file input was not found on the approved site");
+    const resolved = await session.observation.resolve(target, "upload");
+    try {
+      if (resolved.element.inputType !== "file" || !profilePhotoTargetAllowed(resolved.frame.url(), approvedURL)) throw new Error("A photo file input on the approved site is required");
+      const attached = await resolved.handle.evaluate((input: HTMLInputElement, base64: string) => {
+        if (!input.isConnected || input.disabled || input.type !== "file") return false;
+        const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([bytes], "profile.jpg", { type: "image/jpeg" }));
+        input.files = transfer.files;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      }, base64);
+      if (!attached) throw new Error("The photo file input changed; observe again");
+    } finally { await resolved.handle.dispose(); }
   }
 
   async extract(id: string): Promise<string[]> {
@@ -286,7 +311,7 @@ export class BrowserRunBrowser {
         }
       });
       return [...strong, ...weak].slice(0, 8);
-    })) as string[];
+    }) as string[]).map(item => redact(item, s.observation.secrets));
   }
 
   async closeSession(id: string): Promise<boolean> {
@@ -294,6 +319,7 @@ export class BrowserRunBrowser {
     if (!s) return false;
     s.live.finish("This browser session has finished.");
     this.sessions.delete(id);
+    await s.observation.close();
     await s.browser.close().catch(() => {});
     return true;
   }
