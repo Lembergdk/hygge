@@ -17,8 +17,9 @@
    on Rover"). The agent must resolve the unknowns itself on the live site:
    existing account or new signup? What does the form require? Anything it
    cannot know (phone for verification, DOB, …) comes back as `askUser`
-   information requests in the app — never invented data. Bot checks / 2FA /
-   ID checks pause for takeover in the cloud-browser view.
+   information requests in the app — never invented data. Checks the
+   agent cannot get through within its attempt window pause for
+   takeover in the cloud-browser view.
 4. **Ongoing work.** Discovery missions surface matched opportunities;
    apply/message/book missions follow the same draft → approve → mission loop.
    Site memory accrues hints so repeat visits get faster.
@@ -51,8 +52,9 @@ Applications + calendar         Session manager (takeover)           or simulate
   `npm i playwright-core`). Each session is an isolated sandbox browser.
 - **Interactive**: the app renders the session snapshot (screenshot + element
   list) and can send actions (`click`, `type`, `navigate`) or flip
-  human/agent control. CAPTCHA, 2FA, email verification and ID checks pause
-  into this view for the user — they are never bypassed.
+  human/agent control. The agent gets a bounded attempt window at
+  detected checks (see the mission loop); this view is where the
+  user finishes one when the attempts run out.
 - Dev worker: `SimulatedBrowser`, a deterministic page model so the full
   contract is testable offline. The iOS app falls back to the local simulated
   runner if the service is unreachable, and the task log says when it did.
@@ -73,8 +75,12 @@ observe page -> LLM decides ONE action -> execute -> observe -> ... -> done
   **muse-wonder-1.0** takes over after failures/deviations/loops, for final
   submits on high-stakes missions, and for composing user-facing text.
 - Harness rails (enforced in code, not prompts): step budget, loop
-  detection, literal passwords refused (vault placeholders only), CAPTCHA /
-  2FA / payment / ID checks return `needsHuman` and pause for the user.
+  detection, literal passwords refused (vault placeholders only). Detected
+  checks (CAPTCHA/bot, 2FA, identity, security) get a bounded attempt
+  window (`CHECKPOINT_ATTEMPT_BUDGET` steps, observed controls only,
+  Wonder tier, approval and secret rails unchanged; codes only via the
+  sealed `emailCode.code` ref, never during scheduled scans), then
+  `needsHuman` pauses for the user with the session kept open.
 
 ## Site memory (learning is an output, never an input script)
 

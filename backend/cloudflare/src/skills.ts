@@ -265,7 +265,7 @@ export function distillSkillDraft({ site, outcome, trace }: {
         steps.push(`Use the "${t.target}" control when it is visible on ${site}.`);
       }
     } else if (t.action === "needsHuman") {
-      pitfalls.push("A human checkpoint (CAPTCHA/2FA/ID/payment) may appear — stop for human takeover, never bypass it.");
+      pitfalls.push("A verification, bot, two-factor or identity check may appear — Hygge gets a bounded number of tries at it before it must ask the user.");
     } else if (t.target) {
       pitfalls.push(`"${t.target}" was not found once — look for a different label if it is absent.`);
     }

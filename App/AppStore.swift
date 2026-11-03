@@ -580,7 +580,7 @@ final class AppStore {
             save()
             return
         }
-        lastMessage = "Joining \(site.name) — I'll work it out on the live site and only stop for things only you can do."
+        lastMessage = "Joining \(site.name) — I'll work it out on the live site and let you know if I need you."
         save()
         // Consent was the approval: the joining mission starts now, with no
         // second generic approval. Unknowns/bot checks still come back.
@@ -688,7 +688,7 @@ final class AppStore {
             let task = tasks[index]
             tasks[index].help = TaskHelp(kind: task.status == .failed ? .recovery : task.informationRequests.isEmpty ? .verification : .information,
                 message: task.status == .failed ? "I couldn't finish this step. Let's check where it stopped before continuing."
-                    : task.informationRequests.isEmpty ? "This site needs a check only you can finish. Your place is saved."
+                    : task.informationRequests.isEmpty ? "This site has a check I couldn't finish. Your place is saved."
                     : "I need a detail to continue.",
                 questions: task.informationRequests.map { .init(text: $0) },
                 actionLabel: task.status == .failed ? "Check and continue" : "Complete check")
@@ -1146,7 +1146,7 @@ final class AppStore {
             if status == .succeeded {
                 sent += 1
             } else {
-                let why = status == .needsHuman ? "it needs something only you can do" : "it didn't go through"
+                let why = status == .needsHuman ? "it needs your help" : "it didn't go through"
                 lastMessage = "Sent \(sent) of \(taskIDs.count). Stopped at “\(task.title)” — \(why). The rest are still waiting for your yes."
                 save()
                 return

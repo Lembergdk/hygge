@@ -241,6 +241,6 @@ test("distillSkillDraft: advisory, no typed values, password via vault ref", () 
   ]});
   const text = JSON.stringify(body);
   assert.ok(text.includes("valueRef credential.secret"));
-  assert.ok(text.includes("never bypass"));
+  assert.ok(text.includes("bounded number of tries"));
   assert.ok(!text.includes("Password field"), "raw password target must not become a step");
 });

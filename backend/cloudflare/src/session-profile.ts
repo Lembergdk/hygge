@@ -59,10 +59,10 @@ export function isEmptyState(state: SessionState | null | undefined): boolean {
   return state.cookies.length === 0 && Object.keys(state.localStorage).length === 0;
 }
 
-/// --- human checkpoints -------------------------------------------------
-/// Server-side guard, checked before the model may act on a page. A hit
-/// pauses the mission as needsHuman with the session kept open. There
-/// is deliberately no code path that clicks/types through/around these.
+/// --- checkpoint detection ----------------------------------------------
+/// Pure detection only: what kind of check a page is showing, if any.
+/// The mission loop (agent.ts) owns the response — a bounded attempt
+/// window, then a needsHuman pause with the session kept open.
 const CHECKPOINT_PATTERNS: { pattern: RegExp; why: string }[] = [
   { pattern: /re?captcha|hcaptcha|turnstile/i, why: "CAPTCHA check" },
   { pattern: /are you (a )?(robot|human)|prove you('| a)re (human|not a robot)|not a robot|human verification/i, why: "bot check" },

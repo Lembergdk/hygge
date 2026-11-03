@@ -116,7 +116,7 @@ final class HyggeCoreTests: XCTestCase {
         try task.approve()
         let result = try SimulatedMissionRunner().run(task, repository: &repository)
         XCTAssertTrue(result.browserTrace.contains { $0.summary.contains("vault") })
-        XCTAssertTrue(result.goal.contains("CAPTCHA"))
+        XCTAssertTrue(result.goal.contains("approved cover letter"))
     }
 
     func testDiscoverMissionExtractsAndFinishes() throws {

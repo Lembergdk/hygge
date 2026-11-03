@@ -23,7 +23,8 @@ import { help, informationHelp, actionFingerprint, needsActionApproval } from ".
 // - valueRef is resolved by the worker/vault; literal values aimed at
 //   password-shaped targets are refused (secrets can't leak via the model).
 // - Loop detection: same action+target+URL 3x -> escalate tier, then stop.
-// - Hard step budget; CAPTCHA/2FA/payment/ID -> needsHuman, never bypassed.
+// - Hard step budget; detected checks (CAPTCHA/bot, 2FA, identity,
+//   security) get a bounded attempt window, then needsHuman.
 import { selectTier, parseDecision, type LLMClient } from "./llm.ts";
 import { withSpan, clip, agentAttrs } from "./tracing.ts";
 import type { BrowserRunBrowser, Snapshot } from "./browser.ts";
@@ -34,6 +35,10 @@ import type { WorkspaceMissionHooks } from './workspace-task-runner.ts';
 
 const ACTIONS = new Set(["navigate", "click", "type", "upload", "select", "check", "press", "hover", "scroll", "back", "forward", "wait", "extract", "askUser", "done", "needsHuman"]);
 export const MAX_STEPS = 25;
+/// Steps the agent may spend working on one detected check before it
+/// must ask the user. Counts toward MAX_STEPS; the consequential-
+/// approval gate and secret-refusal rails apply unchanged inside it.
+export const CHECKPOINT_ATTEMPT_BUDGET = 6;
 
 const SYSTEM = [
   "You are browsing the web on behalf of one user to complete a mission.",
@@ -53,7 +58,7 @@ const SYSTEM = [
   "For needsHuman, include userMessage: one or two warm, plain-language sentences saying what you need and what the user should do. Keep technical reasoning in reason; never expose internal diagnostics or claim an expired session is saved.",
   "AUTONOMY: handle safe reversible choices, navigation, preparation, and recovery yourself.",
   "Use the provided facts before asking. Do not ask users to make routine setup decisions.",
-  "Ask only for unavailable personal facts, human-only checks, or consequential approval.",
+  "Ask only for unavailable personal facts, a check you have tried and could not complete, or consequential approval.",
   "When asking, propose grounded answers using suggestedRefs; never invent personal facts.",
   "Classify the actual effect of EVERY browser action. A save/submit may publish publicly even if its label is only Save.",
   "Never claim completion without observing evidence on the page. For connecting an existing account, verify signed-in state and never create an account or edit a profile.",
@@ -62,9 +67,17 @@ const SYSTEM = [
   "passwords or codes; use valueRef credential.* / emailCode.code and the",
   "worker fills them. emailCode.code is available only when hasEmailedCode",
   "is true (a code that arrived in the user's own Hygge inbox). Use extract",
-  "to read listings/results, done when the mission is complete, needsHuman at",
-  "CAPTCHA, 2FA, payment, or identity checks — never try to solve, bypass, or",
-  "work around them. When logging in, tick any 'remember me' / 'trust this",
+  "to read listings/results, done when the mission is complete. When a",
+  "verification, bot, two-factor, identity or security check appears",
+  "(checkpoint in your input names it and counts your tries), first try",
+  "to complete it yourself with the observed controls and screenshot:",
+  "for example tick the checkbox it offers, pick the challenge answers",
+  "you can see, choose a code-delivery method, or enter an inbox code",
+  "via emailCode.code. The saved profile photo is never attached while",
+  "an identity check is showing. Never invent codes, personal facts or documents, and",
+  "never reuse a code the page rejected. If you cannot get through, or",
+  "it needs something you do not have, use needsHuman and say plainly",
+  "what you tried and what you need. When logging in, tick any 'remember me' / 'trust this",
   "device' / 'stay signed in' option the page offers. If restoredSession is",
   "true you may already be signed in — check the page before logging in.",
   "SIGNUP/LOGIN missions have",
@@ -106,6 +119,7 @@ export class LLMDecider {
         knownProfileValues: ctx.draft,
         availableDraftRefs: Object.keys(ctx.draft ?? {}).map((k) => `draft.${k}`),
         hasStoredCredential: ctx.hasCredential,
+        checkpoint: ctx.checkpoint ?? null,
         hasEmailedCode: Boolean(ctx.hasEmailCode),
         hasProfilePhoto: Boolean(ctx.hasProfilePhoto),
         restoredSession: Boolean(ctx.restoredSession),
@@ -158,6 +172,16 @@ export class SimulatedDecider {
     if (verifyBtn && did("type", "code") && !did("click", "verify") && !did("click", "continue")
         && !did("click", "confirm") && !did("click", "submit")) {
       return out({ action: "click", target: verifyBtn, reason: "submit the emailed code" });
+    }
+
+    // Checkpoint attempt: use the first plausible observed control
+    // (checkbox, verify/continue-style button). No control to try
+    // means asking is the attempt's honest end.
+    if (ctx.checkpoint) {
+      const control = labels.find((l) => !/field/i.test(l) &&
+        /not a robot|captcha|verify|confirm|continue|submit|checkbox|i'?m human/i.test(l));
+      if (control) return out({ action: "click", target: control, reason: `trying to complete the ${ctx.checkpoint.kind}` });
+      return out({ action: "needsHuman", target: "", reason: "no observed control can complete this check" });
     }
 
     if (ctx.taskKind === "signup" && ctx.draft?.setupMode !== "connect") {
@@ -290,10 +314,10 @@ async function execute({ browser, sessionID, decision, task, fillCredentialValue
 }
 
 /// Brief 04 + 05 seam: an emailed code may only complete a check
-/// on a mission the user started or approved. Scheduled scans are
-/// unattended and read-only — a human-only check there must pause
-/// for the person and must never spend a code that arrived for a
-/// user mission. Enforced in runMission and again in UserSandbox.
+/// on a mission the user started or approved. Scheduled scans may
+/// attempt a check with ordinary page controls, but must never
+/// spend a code that arrived for a user mission. Enforced in
+/// runMission and again in UserSandbox.
 export function emailCodeAllowedForTask(task: { scheduled_scan?: unknown } | null | undefined): boolean {
   return task?.scheduled_scan !== true;
 }
@@ -435,7 +459,11 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     ? `skill_id=${skill.id} skill_version=${skill.version} outcome=${outcome} — shared skill loaded, Spark default (advisory only)`
     : `skill_id=none skill_version=none outcome=${outcome} — no active skill, Wonder authoring mode`);
   let failures = 0;
-  let emailedCodeSteps = 0; // Brief 04 two-factor window: type + submit
+  // Attempt-then-ask: consecutive steps spent on the currently
+  // detected check. Resets when the check clears or a different
+  // check appears; MAX_STEPS still caps the whole mission.
+  let activeCheckpoint: string | null = null;
+  let checkpointAttempts = 0;
   const actionKeys = new Map<string, number>();
   const traceConversationId = task.id ? String(task.id) : undefined;
   const traceIdentity = agentAttrs("hygge-browser-agent", traceAgentId, traceConversationId, {
@@ -451,25 +479,38 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       return { status: "failed", failure: classifyBrowserFailure(error), trace, extractedItems, log,
         sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
     }
-    // Human checkpoint guard: CAPTCHA / 2FA / ID checks pause for the
-    // user with the session kept open. Enforced here — before the
-    // model may act — so no decision can attempt to get past one.
+    // Checkpoint handling: a detected check gets a bounded attempt
+    // window (CHECKPOINT_ATTEMPT_BUDGET steps, observed controls
+    // only, all other rails unchanged). Only when the window is
+    // spent — or the model itself asks — does the mission pause
+    // for the user with the session kept open. Brief 04 emailed
+    // codes are one way an attempt can succeed: typing still goes
+    // through the sealed emailCode.code valueRef, and scheduled
+    // scans still cannot spend a code (emailCodeAllowedForTask).
     if (!snapshot) return { status: "failed", trace, extractedItems, log: [...log, "Browser session ended"], failure: failureFeedback("session_ended"), sessionID: snap.sessionID, ...routing() };
     const checkpoint = detectCheckpoint(snapshot);
-    // Brief 04 narrow exception: when a code arrived in the user's
-    // own Hygge inbox, a two-factor page gets a two-step window —
-    // type the code via valueRef (sealed store, deleted on use),
-    // then press the page's own submit. This is using a
-    // legitimately received code, not solving/bypassing a check.
-    // CAPTCHA, ID, and every other checkpoint still pause.
-    const emailedCodeStep = checkpoint === "two-factor check" && hasEmailCode && emailedCodeSteps < 2;
-    if (emailedCodeStep) emailedCodeSteps += 1;
-    if (checkpoint && !emailedCodeStep) {
-      trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
-                   summary: `${checkpoint} — paused for you in the browser`, succeeded: false, modelTier: null });
-      log.push(`Paused at a ${checkpoint}. The browser session stays open for you to finish it there.`);
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, help: help("verification", `I need you to finish a ${checkpoint} on ${site}. Your place is saved.`, [], "Complete check"), ...routing() };
+    const askAfterTrying = (cp: string) => {
+      trace.push({ action: "needsHuman", target: "", urlString: snapshot!.currentURLString,
+                   summary: `${cp} — tried, then paused for you in the browser`, succeeded: false, modelTier: null });
+      log.push(`Tried to get through a ${cp} (${checkpointAttempts} step(s)) and could not. The browser session stays open for you to finish it there.`);
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint: cp, help: help("verification", `I tried to finish a ${cp} on ${site}, but couldn't get through it. I need you to finish it — your place is saved.`, [], "Complete check"), ...routing() };
+    };
+    if (checkpoint) {
+      if (activeCheckpoint !== checkpoint) {
+        activeCheckpoint = checkpoint;
+        checkpointAttempts = 0;
+        log.push(`Hit a ${checkpoint} — trying to get through it before asking you (up to ${CHECKPOINT_ATTEMPT_BUDGET} steps).`);
+      }
+      if (checkpointAttempts >= CHECKPOINT_ATTEMPT_BUDGET) return askAfterTrying(checkpoint);
+      checkpointAttempts += 1;
+    } else if (activeCheckpoint) {
+      log.push(`Got through the ${activeCheckpoint} after ${checkpointAttempts} step(s) — carrying on.`);
+      activeCheckpoint = null;
+      checkpointAttempts = 0;
     }
+    const checkpointCtx = checkpoint
+      ? { kind: checkpoint, attempt: checkpointAttempts, maxAttempts: CHECKPOINT_ATTEMPT_BUDGET }
+      : null;
     const lastKey = trace.length ? `${trace.at(-1).browserAction ?? trace.at(-1).action}|${trace.at(-1).targetRef ?? trace.at(-1).target}|${snapshot.currentURLString}` : "";
     const repeated = (actionKeys.get(lastKey) ?? 0) >= 2;
     let decision: any;
@@ -485,9 +526,10 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
         conversationId: task.id ? String(task.id) : undefined,
         mission: task.goal, taskKind: task.kind, draft: task.drafted_payload,
         hints, hasCredential, hasEmailCode, hasProfilePhoto, snapshot, history: trace, previousFailure: task.failure,
+        checkpoint: checkpointCtx,
         skill, skillCandidate, authoringMode, site,
         restoredSession: Boolean(restoreState) || resumedSession, sessionProbe,
-        tierContext: { taskKind: task.kind, failures, repeatedAction: repeated, skillCoverage },
+        tierContext: { taskKind: task.kind, failures, repeatedAction: repeated, skillCoverage, checkpointAttempt: Boolean(checkpointCtx) },
         });
         delete decision.consentGranted;
       }
@@ -519,11 +561,22 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       "gen_ai.tool.type": "function",
     }, async () => {});
 
-    if (emailedCodeStep && decision.valueRef !== "emailCode.code" && decision.action !== "click" && decision.action !== "needsHuman") {
-      trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
-                   summary: "two-factor check — paused for you in the browser", succeeded: false, ...stamp });
-      log.push("Paused at a two-factor check. The browser session stays open for you to finish it there.");
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, help: help("verification", `I need you to finish a ${checkpoint} on ${site}. Your place is saved.`, [], "Complete check"), ...routing() };
+    if (checkpoint === "identity check" && (decision.action === "upload" || decision.valueRef === "profile.photo")) {
+      // The saved profile photo is a public avatar, not an identity
+      // document: it is never attached into an identity flow, even
+      // inside the attempt window (docs/profile-photos.md contract).
+      trace.push({ action: "type", browserAction: "upload", target: decision.targetLabel ?? decision.target ?? "", urlString: snapshot.currentURLString,
+                   summary: "Refused: profile photo is not attached during an identity check", succeeded: false, ...stamp });
+      failures += 1;
+      continue;
+    }
+    if (decision.action === "done" && checkpoint) {
+      // Trust the page over the claim: the check is still showing,
+      // so this spends the attempt and the loop re-observes.
+      trace.push({ action: "done", target: "", urlString: snapshot.currentURLString,
+                   summary: `Claimed done while a ${checkpoint} is still on the page — not done`, succeeded: false, ...stamp });
+      failures += 1;
+      continue;
     }
     if (decision.action === "done") {
       if (task.drafted_payload?.setupMode === "connect" && probeAuthenticated(snapshot) !== "authenticated") {
@@ -550,15 +603,9 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     if (decision.action === "needsHuman") {
       trace.push({ action: "needsHuman", target: decision.target ?? "", urlString: snapshot.currentURLString,
                    summary: decision.reason || "Human checkpoint", succeeded: false, ...stamp });
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, help: help("verification", typeof decision.userMessage === "string" && decision.userMessage.trim() ? decision.userMessage.trim().slice(0, 400) : "This site needs a check only you can finish. Open the browser to complete it, or stop here.", [], "Complete check"), sessionProbe, resumedSession, ...routing() };
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, help: help("verification", typeof decision.userMessage === "string" && decision.userMessage.trim() ? decision.userMessage.trim().slice(0, 400) : "This site has a check I couldn't finish. Open the browser to complete it, or stop here.", [], "Complete check"), sessionProbe, resumedSession, ...routing() };
     }
 
-    if (emailedCodeStep && decision.valueRef !== "emailCode.code" && decision.action !== "click") {
-      trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
-                   summary: "two-factor check — paused for you in the browser", succeeded: false, ...stamp });
-      log.push("Paused at a two-factor check. The browser session stays open for you to finish it there.");
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, help: help("verification", `I need you to finish a ${checkpoint} on ${site}. Your place is saved.`, [], "Complete check"), ...routing() };
-    }
     if ((task.workspace_requires_fresh_approval || needsActionApproval(task, decision)) && decision.consentGranted !== true) {
       await recordToolApproval("requested");
       const request = help("approval", `${decision.preview || decision.reason || "This step changes something outside Hygge."}\nProposed action: ${decision.action} “${decision.targetLabel ?? decision.target}”${decision.value ? ` — ${decision.value}` : ""}`, [], "Approve and continue");
@@ -628,6 +675,10 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
                  summary: `${result.summary}${decision.reason ? ` — ${decision.reason}` : ""}`,
                  succeeded: result.succeeded, failure: result.failure, ...stamp });
     if ((actionKeys.get(key) ?? 0) >= 4) {
+      // Stuck on a check is an honest "tried, need you", not a
+      // mission failure — the session is exactly where the user
+      // needs it. Anywhere else, looping still fails the mission.
+      if (checkpoint) return askAfterTrying(checkpoint);
       log.push("Stopped: agent repeated the same action without progress");
       return { status: "failed", failure: failureFeedback("repeated_action"), trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
     }

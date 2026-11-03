@@ -368,14 +368,14 @@ test("login failure: stale flag, exactly one needs-you item per episode, scans s
   assert.equal(third.surfacedIds.length, 1);
 });
 
-test("human-only check on a scan: needs-you once, never bypassed, site waits for the user", async () => {
+test("check the agent could not finish on a scan: needs-you once, site waits for the user", async () => {
   const h = harness(() => ({ status: "needs_human", items: [], needsHuman: true }));
   seedUser(h.state, { sites: [ROVER] });
   const first = await runScheduledTick(h.deps, { slot: 0, now: D(DAY1) });
   assert.equal(first.needsYouItemIds.length, 1);
   assert.equal(h.scans.siteState(h.calls[0].site).staleReason, "humanCheck");
   const card = h.state.list("feedItems")[0].data as Record<string, unknown>;
-  assert.match(String(card.title), /check only you can do/);
+  assert.match(String(card.title), /check I couldn't finish/);
   const second = await runScheduledTick(h.deps, { slot: 1, now: D("2026-11-02T13:00:00.000Z") });
   assert.equal(second.skipped[0].reason, "staleLogin");
   assert.equal(h.calls.length, 1);

@@ -48,8 +48,8 @@ observed controls and allowed keys; this is not unrestricted page scripting.
 The mission approval policy applies to new control actions using the observed
 label rather than the opaque reference. Enter/Space require approval because
 keyboard submission can bypass labeled buttons. Approvals bind to the targeted
-node and its observed semantics. CAPTCHA/identity/2FA handoff and exclusive human
-control remain in place. Extra trace metadata preserves the exact browser action
+node and its observed semantics. Check handoff after the bounded attempt
+window and exclusive human control remain in place. Extra trace metadata preserves the exact browser action
 while the existing action enum remains decodable by released iOS clients.
 
 ## Private values and images
