@@ -27,7 +27,6 @@ struct HomeFeedView: View {
     @State private var returnPlacement: FlamePlacement?
 
     @State private var showProfile = false
-    @State private var showYourWork = false
     @State private var showNotifications = false
     @State private var earlierExpanded = false
     @State private var morePlaces = false
@@ -108,12 +107,20 @@ struct HomeFeedView: View {
             }
         }
         .onChange(of: candidateIDs, initial: true) { _, _ in receiveFeedUpdates() }
-        .onChange(of: focus == nil && !showConversation && !showProfile && !showYourWork && !showNotifications) { _, available in
+        .onChange(of: focus == nil && !showConversation && !showProfile && !showNotifications) { _, available in
             if available { receiveFeedUpdates() }
+        }
+        // With nothing actionable in the feed, the journal IS the feed:
+        // its Earlier section starts expanded. Once the user collapses
+        // it, their choice stands until the feed next becomes busy
+        // and empties again.
+        .onChange(of: hasActionableFeedItems, initial: true) { _, hasItems in
+            if !hasItems {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) { earlierExpanded = true }
+            }
         }
         .sheet(isPresented: $showConversation, onDismiss: { store.conversationTaskID = nil }) { ConversationView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showProfile) { ProfileHubView().presentationDragIndicator(.visible) }
-        .sheet(isPresented: $showYourWork) { YourWorkView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showNotifications) { NavigationStack { SettingsPermissionsView() }.presentationDragIndicator(.visible) }
         .onChange(of: store.pendingTaskOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingTaskOpenID = nil
@@ -139,9 +146,6 @@ struct HomeFeedView: View {
                             .font(.system(.title3, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
                             .padding(.top, 32)
                     }
-                    Button("Your work") { showYourWork = true }
-                        .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
-                        .frame(minHeight: 44).padding(.top, 8)
                     Color.clear.frame(height: 175)
                 }
                 .scrollTargetLayout()
@@ -153,6 +157,7 @@ struct HomeFeedView: View {
                 }
                 .padding(.horizontal, 20).padding(.top, 12)
             }
+            .refreshable { await store.refreshFeed() }
             .scrollPosition(id: $scrollAnchor, anchor: .top)
             .onChange(of: updateGate.visibleIDs) { _, _ in
                 if isAtTop { proxy.scrollTo("feed-top", anchor: .top) }
@@ -440,7 +445,7 @@ struct HomeFeedView: View {
             .sorted { (positions[key($0)] ?? 0) < (positions[key($1)] ?? 0) }
     }
     private func receiveFeedUpdates() {
-        let canInsert = isAtTop && focus == nil && !showConversation && !showProfile && !showYourWork && !showNotifications
+        let canInsert = isAtTop && focus == nil && !showConversation && !showProfile && !showNotifications
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--feed-arrivals-preview") { print("FEED_RECEIVE top=\(isAtTop) insert=\(canInsert) visible=\(updateGate.visibleIDs.count) latest=\(candidateIDs.count)") }
         #endif
@@ -449,6 +454,14 @@ struct HomeFeedView: View {
         }
     }
     private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && emailDecisions.isEmpty && !store.isPaused }
+    /// Anything above the Journal heading. When this is false the
+    /// feed is journal-only, so Earlier expands by default.
+    private var hasActionableFeedItems: Bool {
+        !runningTasks.isEmpty || !pendingProposals.isEmpty || !listings.isEmpty
+            || !decisionTasks.filter { !isArchived(taskKey($0)) }.isEmpty
+            || !emailDecisions.isEmpty || store.isPaused
+            || (store.notificationPrimerVisible && updateGate.visibleIDs.contains("notifications"))
+    }
     private func taskKey(_ task: AgentTask) -> String { FeedFocus.taskKey(task) }
     private func eventKey(_ event: ActivityEvent) -> String { "event-\(event.id)" }
     private func isArchived(_ id: String) -> Bool { store.archivedFeedIDs.contains(id) }
@@ -568,7 +581,7 @@ struct HomeFeedView: View {
         case .event(let event): eventCard(event)
         case .paused:
             Button { openFocus(.paused) } label: {
-                FeedSummary(title: "Hygge is paused", subtitle: "Your work is here when you’re ready", icon: "pause")
+                FeedSummary(title: "Hygge is paused", subtitle: "Everything is here when you’re ready", icon: "pause")
             }.buttonStyle(.plain)
         case .morePlaces:
             Button(morePlaces ? "Fewer suggestions" : "\(pendingProposals.count - 1) more places") { withAnimation { morePlaces.toggle() } }
