@@ -40,7 +40,25 @@ try {
   assert.ok(await page.evaluate(() => scrollY > 0), 'wheel scroll reaches remote page');
   send({ type: 'releaseControl', requestID: 'release' });
   await wait(() => messages.some(m => m.type === 'released'), 'handback acknowledged');
-  console.log('PASS: changing live frames, direct click/focus, text, Backspace, scroll, handback');
+  await page.evaluate(() => document.getAnimations().forEach(animation => animation.cancel()));
+  const pongs = messages.filter(m => m.type === 'pong').length;
+  for (let i = 0; i < 4; i++) {
+    send({ type: 'ping' });
+    await wait(() => messages.filter(m => m.type === 'pong').length > pongs + i, 'static page remains responsive');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+  }
+  await new Promise<void>(resolve => { ws.once('close', () => resolve()); ws.close(); });
+  for (let i = 0; i < 8; i++) {
+    const again = new WebSocket('ws://127.0.0.1:8768/sessions/preview/stream');
+    let freshFrame = false;
+    again.on('message', bytes => {
+      const message = JSON.parse(bytes.toString());
+      if (message.type === 'frame') { freshFrame = true; again.send(JSON.stringify({ type: 'ack' })); }
+    });
+    try { await wait(() => freshFrame, 'static page sends a fresh frame after reopening'); }
+    finally { await new Promise<void>(resolve => { again.once('close', () => resolve()); again.close(); }); }
+  }
+  console.log('PASS: live frames, click/focus, text, Backspace, scroll, handback, static-page heartbeat and eight rapid reopenings');
 } finally {
   ws.close();
   await page.evaluate(() => { (document.querySelector('#title') as HTMLInputElement).value = 'Brand designer & writer'; scrollTo(0, 0); });
