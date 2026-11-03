@@ -122,53 +122,58 @@ enum FlameState { case asleep, working, needsYou(Int), celebrating, thinking }
 struct FloatingFlame: View {
     var state: FlameState
     var dimmed: Bool = false
+    var traveling = false
+    var browsing = false
     var onTap: () -> Void
-    var onLongPress: () -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var onLongPress: (() -> Void)? = nil
+    var onDragBegan: (() -> Void)? = nil
+    var onDragEnded: ((CGSize?) -> Void)? = nil
+    @Environment(FlamePlayStore.self) private var playStore
 
-    private var isAnimating: Bool {
-        if reduceMotion { return false }
-        switch state { case .needsYou, .thinking, .working: return true; default: return false }
-    }
+    /// Tunable in Flame Lab. Default 122: about half again the 81pt flame
+    /// of the first interactive build.
+    private var size: CGFloat { CGFloat(playStore.settings.homeFlameSize) }
+    private var frameHeight: CGFloat { size * 1.25 + 18 }
+    /// The artwork carries ~16–18% transparent canvas under his feet, so
+    /// anchoring to the image edge left him floating far above the bottom.
+    /// Drop him by that slack so his *feet* sit near the feed's edge.
+    private var feetDrop: CGFloat { size * 1.25 * 0.165 + 6 }
 
-    private var animation: FlameAnimation {
-        switch state {
-        case .working: return .laptop
-        case .needsYou: return .notify
-        default: return .walk
-        }
-    }
+    private var needsYou: Bool { if case .needsYou = state { return true }; return false }
 
     var body: some View {
-        // Paused whenever calm: no continuous full-rate rendering while idle.
-        TimelineView(.animation(minimumInterval: 0.05, paused: !isAnimating)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            ZStack(alignment: .topLeading) {
-                // The flame is a character, not a button in a disc (mocks):
-                // big, sticker-like, soft shadow only.
-                AnimatedFlame(animation: animation, size: 108)
-                    .shadow(color: Color.black.opacity(0.18), radius: 10, y: 5)
+        // The flame is a character, not a button in a disc (mocks):
+        // big, sticker-like, soft shadow only — a layered rig with
+        // moving limbs and faces; a live browser session brings out
+        // the rig's own laptop and he types on it.
+        FlameActor(size: size,
+                   attention: needsYou,
+                   browsing: browsing,
+                   movable: onDragEnded != nil,
+                   traveling: traveling,
+                   onTap: onTap,
+                   onLongPress: onLongPress,
+                   onDragBegan: onDragBegan,
+                   onDragEnded: onDragEnded)
+            .overlay(alignment: .topLeading) {
                 if case .needsYou(let count) = state, count > 0 {
                     Text("\(count)")
                         .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(HyggeTheme.emberDeep, in: Capsule())
-                        // The 360×450 animation includes transparent padding.
-                        // Anchor to the character's shoulder, not the image corner.
-                        .offset(x: 18, y: 28)
+                        // The artwork includes transparent padding; anchor
+                        // to the character's shoulder, not the image corner.
+                        .offset(x: 18 * size / 108, y: 28 * size / 108)
+                        .allowsHitTesting(false)
                 }
             }
-            .offset(y: bounceOffset(t))
-            .scaleEffect(pulseScale(t))
-        }
-        .frame(width: 122, height: 150)
-        .opacity(dimmed ? 0.35 : 1)
-        .animation(.easeInOut(duration: 0.25), value: dimmed)
-        .contentShape(Circle())
-        .onTapGesture(perform: onTap)
-        .onLongPressGesture(minimumDuration: 0.6, perform: onLongPress)
-        .accessibilityLabel(accessibilityText)
-        .accessibilityAddTraits(.isButton)
+            .frame(width: size + 14, height: frameHeight, alignment: .bottom)
+            .offset(y: feetDrop)
+            .opacity(dimmed ? 0.35 : 1)
+            .animation(.easeInOut(duration: 0.25), value: dimmed)
+            .accessibilityLabel(accessibilityText)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { onTap() }
     }
 
     private var accessibilityText: String {
@@ -181,16 +186,4 @@ struct FloatingFlame: View {
         }
     }
 
-    private func bounceOffset(_ t: TimeInterval) -> CGFloat {
-        guard !reduceMotion, case .needsYou = state else { return 0 }
-        // two small hops, then still for ~30s
-        let cycle = t.truncatingRemainder(dividingBy: 30)
-        guard cycle < 1.2 else { return 0 }
-        return -abs(sin(cycle * .pi * 2)) * 7
-    }
-
-    private func pulseScale(_ t: TimeInterval) -> CGFloat {
-        guard !reduceMotion, case .thinking = state else { return 1 }
-        return 1 + 0.05 * sin(t * 2.4)
-    }
 }

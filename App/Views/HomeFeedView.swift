@@ -3,14 +3,24 @@ import SwiftUI
 /// A visual overview. Details expand over the feed; live questions stay in chat.
 struct HomeFeedView: View {
     @Environment(AppStore.self) private var store
+    @Environment(FlamePlayStore.self) private var playStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var focusAnimation
     @State private var focus: FeedFocus?
     @State private var showConversation = false
+    @State private var showBubbleChat = false
+    @State private var flameTraveling = false
+    @State private var keyboardHeight: CGFloat = 0
+    @State private var dragStartCenter: CGPoint?
+    /// Window-space center while he hops between spots (overrides the
+    /// placement-derived center so the hop itself animates).
+    @State private var centerOverride: CGPoint?
+    /// Where he was living before a tap sent him home for chat.
+    @State private var returnPlacement: FlamePlacement?
+
     @State private var showProfile = false
     @State private var showYourWork = false
     @State private var showNotifications = false
-    @State private var showPauseConfirm = false
     @State private var earlierExpanded = false
     @State private var morePlaces = false
     @State private var openCardID: String?
@@ -22,11 +32,33 @@ struct HomeFeedView: View {
     @State private var scrollAnchor: String?
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            HyggeTheme.paper.ignoresSafeArea()
-            feedScroll
-            FloatingFlame(state: flameState, dimmed: flameDimmed) { showConversation = true } onLongPress: { showPauseConfirm = true }
-                .padding(.trailing, 18).padding(.bottom, 14)
+        GeometryReader { geo in
+            ZStack {
+                HyggeTheme.paper.ignoresSafeArea()
+                feedScroll
+                if showBubbleChat {
+                    Color.black.opacity(0.18).ignoresSafeArea()
+                        .onTapGesture { closeBubble() }
+                        .transition(.opacity)
+                }
+                // He lives where he was dropped (placement persists in the
+                // flame settings); nil placement is his bottom-right home.
+                FloatingFlame(state: flameState, dimmed: flameDimmed,
+                              traveling: flameTraveling,
+                              browsing: store.hasActiveBrowserSession) {
+                    flameTapped()
+                }
+                onDragBegan: { dragStartCenter = flameWindowCenter() }
+                onDragEnded: { translation in commitDrag(translation) }
+                    .position(flameCenter(in: geo))
+                    // Above the chat bubble (zIndex 3): on close he hops
+                    // back THROUGH the bubble's fading rectangle, and
+                    // behind it he vanished until the fade finished.
+                    .zIndex(4)
+                if showBubbleChat {
+                    bubbleChat(in: geo)
+                }
+            }
         }
         .allowsHitTesting(focus == nil)
         .accessibilityHidden(focus != nil)
@@ -57,6 +89,15 @@ struct HomeFeedView: View {
             }
         }
         .task { await store.observeBrowserTasks() }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+            guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
+            else { return }
+            let overlap = UIScreen.main.bounds.height - frame.origin.y
+            withAnimation(.easeInOut(duration: 0.25)) {
+                keyboardHeight = max(0, overlap)
+            }
+        }
         .onChange(of: candidateIDs, initial: true) { _, _ in receiveFeedUpdates() }
         .onChange(of: focus == nil && !showConversation && !showProfile && !showYourWork && !showNotifications) { _, available in
             if available { receiveFeedUpdates() }
@@ -65,10 +106,6 @@ struct HomeFeedView: View {
         .sheet(isPresented: $showProfile) { ProfileHubView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showYourWork) { YourWorkView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showNotifications) { NavigationStack { SettingsPermissionsView() }.presentationDragIndicator(.visible) }
-        .confirmationDialog(store.isPaused ? "Resume Hygge?" : "Pause Hygge?", isPresented: $showPauseConfirm, titleVisibility: .visible) {
-            Button(store.isPaused ? "Resume" : "Pause everything") { store.setPaused(!store.isPaused) }
-            Button("Cancel", role: .cancel) {}
-        }
         .onChange(of: store.pendingTaskOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingTaskOpenID = nil
             openChat(store.tasks.first { $0.id == id })
@@ -96,7 +133,7 @@ struct HomeFeedView: View {
                     Button("Your work") { showYourWork = true }
                         .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
                         .frame(minHeight: 44).padding(.top, 8)
-                    Color.clear.frame(height: 145)
+                    Color.clear.frame(height: 175)
                 }
                 .scrollTargetLayout()
                 .background(GeometryReader { geometry in
@@ -175,6 +212,155 @@ struct HomeFeedView: View {
         let time = hour < 12 ? "Morning" : hour < 18 ? "Afternoon" : "Evening"
         return name.isEmpty ? "Good \(time.lowercased())" : "\(time), \(name)"
     }
+    // MARK: - Free-roaming flame & speech-bubble chat
+
+    private var flameFrameW: CGFloat { CGFloat(playStore.settings.homeFlameSize) + 14 }
+    private var flameFrameH: CGFloat { CGFloat(playStore.settings.homeFlameSize) * 1.25 + 18 }
+    private var screenSize: CGSize { UIScreen.main.bounds.size }
+
+    /// All placement math happens in window coordinates (stable no matter
+    /// how SwiftUI insets or shrinks the feed geometry for the keyboard),
+    /// then converts into the geometry's local space for `.position`.
+    private func windowCenter(for placement: FlamePlacement?) -> CGPoint {
+        let home = CGPoint(x: screenSize.width - flameFrameW / 2 - 14,
+                           y: screenSize.height - flameFrameH / 2 - 2)
+        guard let p = placement else { return home }
+        return CGPoint(
+            x: min(max(CGFloat(p.x) * screenSize.width, flameFrameW / 2 + 4),
+                   screenSize.width - flameFrameW / 2 - 4),
+            y: min(max(CGFloat(p.y) * screenSize.height, flameFrameH / 2 + 50),
+                   screenSize.height - flameFrameH / 2 + 14))
+    }
+
+    private func flameWindowCenter() -> CGPoint {
+        centerOverride ?? windowCenter(for: playStore.settings.placement)
+    }
+
+    private func flameCenter(in geo: GeometryProxy) -> CGPoint {
+        let wc = flameWindowCenter()
+        let o = geo.frame(in: .global).origin
+        return CGPoint(x: wc.x - o.x, y: wc.y - o.y)
+    }
+
+    /// A finished carry (never a flick — the actor sends nil for those)
+    /// becomes his new home, persisted in the flame settings.
+    private func commitDrag(_ translation: CGSize?) {
+        defer { dragStartCenter = nil }
+        guard let translation, let start = dragStartCenter else { return }
+        let placement = FlamePlacement(
+            x: Double((start.x + translation.width) / screenSize.width),
+            y: Double((start.y + translation.height) / screenSize.height))
+        playStore.settings.placement = placement
+        // Dragged while chatting: that's where he should stay on close.
+        if showBubbleChat { returnPlacement = placement }
+    }
+
+    /// Quick hop: his limbs crouch, launch and land (see FlameActor's
+    /// travel hops) while the center animates from an EXPLICIT start —
+    /// measuring the start after mutating placement would read the
+    /// target itself and teleport him.
+    private func hop(from start: CGPoint, to target: CGPoint,
+                     then: @escaping () -> Void) {
+        let distance = hypot(target.x - start.x, target.y - start.y)
+        if reduceMotion || distance < 8 {
+            centerOverride = nil
+            then()
+            return
+        }
+        let duration = min(0.85, max(0.45, Double(distance) / 1400 + 0.35))
+        centerOverride = start
+        flameTraveling = true
+        withAnimation(.easeInOut(duration: duration)) { centerOverride = target }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(duration))
+            flameTraveling = false
+            centerOverride = nil
+            then()
+        }
+    }
+
+    /// Tapped anywhere, he jumps down to his corner first; then the chat
+    /// grows out of him as a speech bubble instead of a bottom sheet.
+    private func flameTapped() {
+        if showBubbleChat { closeBubble(); return }
+        returnPlacement = playStore.settings.placement
+        let start = flameWindowCenter()
+        playStore.settings.placement = nil
+        hop(from: start, to: windowCenter(for: nil)) {
+            withAnimation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.82)) {
+                showBubbleChat = true
+            }
+        }
+    }
+
+    /// Closing sends him hopping back to wherever he was living before.
+    private func closeBubble() {
+        withAnimation(reduceMotion ? nil : .easeIn(duration: 0.2)) {
+            showBubbleChat = false
+        }
+        guard let back = returnPlacement else { return }
+        returnPlacement = nil
+        let start = flameWindowCenter()
+        playStore.settings.placement = back
+        hop(from: start, to: windowCenter(for: back)) {}
+    }
+
+    private func bubbleChat(in geo: GeometryProxy) -> some View {
+        let size = geo.size
+        let origin = geo.frame(in: .global).origin
+        let width = min(screenSize.width - 24, 390)
+        // Keyboard up: he stays exactly where he is (the keyboard covers
+        // his corner); only the bubble shrinks to the space above it.
+        let bubbleBottomWindow = keyboardHeight > 0
+            ? screenSize.height - keyboardHeight - 8
+            : screenSize.height - flameFrameH * 0.78 - 2
+        let height = min(screenSize.height * 0.84,
+                         max(280, bubbleBottomWindow - 56))
+        return ZStack {
+            Color.clear
+            VStack(alignment: .trailing, spacing: 0) {
+                ZStack(alignment: .top) {
+                    ConversationView(background: HyggeTheme.card, showsHeader: false)
+                    Capsule()
+                        .fill(HyggeTheme.secondary.opacity(0.55))
+                        .frame(width: 38, height: 5)
+                        .padding(.top, 8)
+                        .frame(width: 72, height: 24)
+                        .contentShape(Rectangle())
+                        .gesture(DragGesture(minimumDistance: 8).onEnded { value in
+                            if value.translation.height > 55 { closeBubble() }
+                        })
+                        .accessibilityElement()
+                        .accessibilityLabel("Drag down to close chat")
+                        .accessibilityIdentifier("chatBubbleGrabber")
+                }
+                .frame(width: width, height: height)
+                .background(HyggeTheme.card, in: RoundedRectangle(cornerRadius: 26))
+                .clipShape(RoundedRectangle(cornerRadius: 26))
+                .overlay(RoundedRectangle(cornerRadius: 26)
+                    .stroke(HyggeTheme.hairline, lineWidth: 1))
+                .shadow(color: .black.opacity(0.28), radius: 24, y: 10)
+                // The bubble's tail, reaching down toward him.
+                Rectangle()
+                    .fill(HyggeTheme.card)
+                    .frame(width: 22, height: 22)
+                    .rotationEffect(.degrees(45))
+                    .padding(.trailing, 58)
+                    .offset(y: -9)
+            }
+            .position(x: screenSize.width - width / 2 - 12 - origin.x,
+                      y: bubbleBottomWindow - height / 2 - origin.y)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Chat with Hygge")
+            .accessibilityIdentifier("chatBubble")
+        }
+        .frame(width: size.width, height: size.height)
+        .transition(.asymmetric(
+            insertion: .scale(scale: 0.55, anchor: .bottomTrailing).combined(with: .opacity),
+            removal: .opacity))
+        .zIndex(3)
+    }
+
     private var flameState: FlameState {
         if store.needsYouCount > 0 { return .needsYou(store.needsYouCount) }
         return store.isAgentWorking ? .working : .asleep

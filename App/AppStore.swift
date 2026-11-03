@@ -196,6 +196,10 @@ final class AppStore {
     private(set) var activeRunCount = 0
     private(set) var liveBrowserSessionCount = 0
     var isAgentWorking: Bool { activeRunCount > 0 || tasks.contains { $0.status == .running || $0.status == .approved } }
+    /// A browser session is being kept open for a task (the backend
+    /// returns a nil session id once it closes). Drives the Home
+    /// flame's laptop typing.
+    var hasActiveBrowserSession: Bool { tasks.contains { $0.browserSessionID != nil } }
 
     func noteRunStarted() { activeRunCount += 1 }
     func noteRunFinished() { activeRunCount = max(0, activeRunCount - 1) }

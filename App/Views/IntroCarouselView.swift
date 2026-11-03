@@ -201,14 +201,18 @@ private struct PersistentFlame: View {
     private let animations: [FlameAnimation] = [.walk, .laptop, .notify]
 
     var body: some View {
-        ZStack {
-            ForEach(animations.indices, id: \.self) { i in
-                AnimatedFlame(animation: animations[i], size: size)
-                    .opacity(i == page ? 1 : 0)
+        // Gyro lean, breath and idle life — but no touch vocabulary:
+        // swipes here belong to the pager underneath.
+        InteractiveFlame(interactive: false, hitHeight: size * 1.25) {
+            ZStack {
+                ForEach(animations.indices, id: \.self) { i in
+                    AnimatedFlame(animation: animations[i], size: size)
+                        .opacity(i == page ? 1 : 0)
+                }
             }
+            .animation(.easeInOut(duration: 0.45), value: page)
+            .frame(width: size, height: size * 1.25)
         }
-        .animation(.easeInOut(duration: 0.45), value: page)
-        .frame(width: size, height: size * 1.25)
         .accessibilityHidden(true)
     }
 }
