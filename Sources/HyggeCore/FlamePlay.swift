@@ -4,6 +4,7 @@ import Foundation
 /// remap every one of these to any reaction below.
 public enum FlameGestureKind: String, CaseIterable, Codable, Equatable, Sendable, Identifiable {
     case tapHead, tapBody, tapFeet
+    case doubleTap, longPress
     case swipeUp, swipeDown, swipeLeft, swipeRight
     case pinchIn, pinchOut
     case shake
@@ -15,6 +16,8 @@ public enum FlameGestureKind: String, CaseIterable, Codable, Equatable, Sendable
         case .tapHead: return "Tap his head"
         case .tapBody: return "Tap his body"
         case .tapFeet: return "Tap his feet"
+        case .doubleTap: return "Double tap"
+        case .longPress: return "Press and hold"
         case .swipeUp: return "Flick up"
         case .swipeDown: return "Flick down"
         case .swipeLeft: return "Flick left"
@@ -102,6 +105,23 @@ public enum FlameGestureClassifier {
         return .deciding
     }
 
+    /// An armed flick expires if the finger is still down: either it has
+    /// simply been down too long (a fast drag, not a flick), or it has
+    /// slowed right down — the touch is a carry after all.
+    public static func flickExpires(elapsed: Double, velocity: Double) -> Bool {
+        guard elapsed.isFinite, velocity.isFinite else { return true }
+        if elapsed >= 0.28 { return true }
+        return elapsed >= 0.16 && velocity < 350
+    }
+
+    /// Two taps close together in time read as one double tap.
+    public static func isDoubleTap(previousAt: Double?, now: Double,
+                                   window: Double = 0.45) -> Bool {
+        guard let previousAt, previousAt.isFinite, now.isFinite else { return false }
+        let gap = now - previousAt
+        return gap >= 0 && gap <= window
+    }
+
     /// Was a drag released as a flick? A flick's predicted end flies far
     /// beyond where the finger actually stopped (release velocity), while
     /// a carried drag's prediction barely overshoots its travel — so a
@@ -187,6 +207,7 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
 
     public static let defaultReactions: [FlameGestureKind: FlameReactionKind] = [
         .tapHead: .pat, .tapBody: .poke, .tapFeet: .footTapDance,
+        .doubleTap: .laugh, .longPress: .wave,
         .swipeUp: .bigJump, .swipeDown: .duck,
         .swipeLeft: .sideHop, .swipeRight: .sideHop,
         .pinchIn: .shrinkStartle, .pinchOut: .puffUp,
@@ -275,6 +296,25 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
 
 public enum FlameIdleAction: String, CaseIterable, Equatable, Sendable {
     case lookLeft, footTap, lookRight, stretch, miniHop, wiggle
+    case wave, laugh, pointUp, walkAbout, turnAround, yawn
+
+    /// Quiet beats come a little sooner; bigger bits get more room.
+    public var delayFactor: Double {
+        switch self {
+        case .lookLeft: return 0.85
+        case .footTap: return 1.15
+        case .lookRight: return 0.7
+        case .stretch: return 1.3
+        case .miniHop: return 1.0
+        case .wiggle: return 0.9
+        case .wave: return 1.2
+        case .laugh: return 1.1
+        case .pointUp: return 1.0
+        case .walkAbout: return 1.4
+        case .turnAround: return 1.25
+        case .yawn: return 1.5
+        }
+    }
 }
 
 public struct FlameIdleStep: Equatable, Sendable {
@@ -282,24 +322,40 @@ public struct FlameIdleStep: Equatable, Sendable {
     public var delayFactor: Double
 }
 
-/// Cycles idle behaviors so a quiet stretch never looks on rails: every
-/// action appears once per cycle, at a slightly different spacing.
+/// Deals idle behaviors from a shuffled bag: every action appears once
+/// per bag, never twice in a row (including across bags), and the order
+/// changes each round — a quiet stretch never looks on rails.
 public struct FlameIdlePlanner: Equatable, Sendable {
+    private var bag: [FlameIdleAction] = []
     private var index = 0
-    private let steps: [FlameIdleStep] = [
-        .init(action: .lookLeft, delayFactor: 0.85),
-        .init(action: .footTap, delayFactor: 1.15),
-        .init(action: .lookRight, delayFactor: 0.7),
-        .init(action: .stretch, delayFactor: 1.3),
-        .init(action: .miniHop, delayFactor: 1.0),
-        .init(action: .wiggle, delayFactor: 0.9),
-    ]
+    private var last: FlameIdleAction?
+    private var state: UInt64
 
-    public init() {}
+    public init(seed: UInt64 = 0x9E3779B97F4A7C15) {
+        state = seed == 0 ? 0x9E3779B97F4A7C15 : seed
+    }
 
     public mutating func next() -> FlameIdleStep {
-        defer { index = (index + 1) % steps.count }
-        return steps[index]
+        if index >= bag.count { refill() }
+        let action = bag[index]
+        index += 1
+        last = action
+        return FlameIdleStep(action: action, delayFactor: action.delayFactor)
+    }
+
+    private mutating func refill() {
+        var fresh = FlameIdleAction.allCases
+        for i in stride(from: fresh.count - 1, through: 1, by: -1) {
+            fresh.swapAt(i, Int(nextRandom() % UInt64(i + 1)))
+        }
+        if fresh.count > 1, fresh.first == last { fresh.swapAt(0, 1) }
+        bag = fresh
+        index = 0
+    }
+
+    private mutating func nextRandom() -> UInt64 {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return state >> 33
     }
 }
 

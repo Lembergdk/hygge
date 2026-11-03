@@ -62,6 +62,9 @@ struct FlameActor: View {
     @State private var lastInteraction = Date()
     @State private var lastPinchEnd = Date.distantPast
     @State private var longPressFired = false
+    @State private var lastTapAt: Date?
+    @State private var tapIsSecond = false
+    @State private var flickExpiryTask: Task<Void, Never>?
 
     private var settings: FlameInteractionSettings { playStore.settings }
     private var height: CGFloat { size * 1.25 }
@@ -96,14 +99,22 @@ struct FlameActor: View {
             .simultaneousGesture(dragGesture, including: interactive ? .gesture : .none)
             .simultaneousGesture(pinchGesture, including: interactive ? .gesture : .none)
             .simultaneousGesture(longPressGesture,
-                                 including: interactive && onLongPress != nil ? .gesture : .none)
+                                 including: interactive ? .gesture : .none)
             .onAppear { breathing = true; updateMotion() }
             .onDisappear {
                 motion.stop(); reactionTask?.cancel(); pendingTapTask?.cancel()
                 travelTask?.cancel()
             }
             .onChange(of: traveling) { _, now in
-                if now { startTravelHops() }
+                if now {
+                    startTravelHops()
+                } else {
+                    // Land the moment he arrives instead of finishing
+                    // whichever airborne pose was mid-hold.
+                    travelTask?.cancel()
+                    travelTask = nil
+                    Task { @MainActor in await rest() }
+                }
             }
             .onChange(of: scenePhase) { updateMotion() }
             .onChange(of: reduceMotion) { updateMotion() }
@@ -165,7 +176,66 @@ struct FlameActor: View {
         }
     }
 
+    private func armFlickExpiry(after delay: Double) {
+        flickExpiryTask?.cancel()
+        flickExpiryTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, dragPhase == .flickArmed,
+                  touchBeganAt != nil else { return }
+            demoteFlick()
+        }
+    }
+
+    /// A flick that never got released was a fast drag: pick him up.
+    private func demoteFlick() {
+        flickExpiryTask?.cancel()
+        if movable {
+            startCarry()
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                displayDrag = CGSize(width: dragTranslation.width,
+                                     height: dragTranslation.height + carryLift)
+            }
+            if !reduceMotion {
+                var p = FlamePose.rest
+                p.face = .surprised; p.armSL = 118; p.armSR = -118
+                p.legSL = 16; p.legSR = -16; p.dy = -2
+                withAnimation(.easeOut(duration: 0.15)) { pose = p }
+            }
+        } else {
+            dragPhase = .tracking
+            if !reduceMotion {
+                withAnimation(.easeOut(duration: 0.15)) { pose = .rest }
+            }
+        }
+    }
+
+    private func startCarry() {
+        flickExpiryTask?.cancel()
+        displayDrag = dragVisualOffset
+        dragPhase = .carrying
+        isDragging = true
+        reactionTask?.cancel()
+        spinAccum = 0
+        lastDragAngle = nil
+        pendingNausea = false
+        resetSprings()
+        onDragBegan?()
+    }
+
+    /// Catch up to the finger (plus the below-finger hang) with a fast
+    /// spring — no snap after the buffer.
+    private func carryStep(_ value: DragGesture.Value) {
+        let k = min(1, lastSampleDT * 18)
+        displayDrag.width += (value.translation.width - displayDrag.width) * k
+        displayDrag.height += (value.translation.height + carryLift - displayDrag.height) * k
+        trackSpin(value.location)
+        heldPose(value)
+    }
+
     private func beginTouch(_ value: DragGesture.Value) {
+        tapIsSecond = FlameGestureClassifier.isDoubleTap(
+            previousAt: lastTapAt?.timeIntervalSinceReferenceDate,
+            now: Date().timeIntervalSinceReferenceDate)
         touchBeganAt = Date()
         dragPhase = .deciding
         smoothVX = 0; smoothVY = 0
@@ -234,39 +304,36 @@ struct FlameActor: View {
                     case .flick:
                         dragPhase = .flickArmed
                         anticipationPose(value)
+                        armFlickExpiry(after: max(0.05, 0.30 - elapsed))
                     case .carry:
-                        if movable {
-                            dragPhase = .carrying
-                            isDragging = true
-                            spinAccum = 0
-                            lastDragAngle = nil
-                            pendingNausea = false
-                            resetSprings()
-                            displayDrag = .zero
-                            onDragBegan?()
-                        } else {
-                            dragPhase = .tracking
-                        }
+                        if movable { startCarry() } else { dragPhase = .tracking }
                     case .deciding:
                         break
                     }
                 case .flickArmed:
-                    anticipationPose(value)
+                    if FlameGestureClassifier.flickExpires(
+                        elapsed: elapsed, velocity: hypot(smoothVX, smoothVY)) {
+                        // Still holding after a fast start: it was a drag.
+                        demoteFlick()
+                        if dragPhase == .carrying { carryStep(value) }
+                    } else {
+                        anticipationPose(value)
+                    }
                 case .carrying:
-                    // Catch up to the finger (plus the below-finger hang)
-                    // with a fast spring — no snap after the buffer.
-                    let k = min(1, lastSampleDT * 18)
-                    displayDrag.width += (value.translation.width - displayDrag.width) * k
-                    displayDrag.height += (value.translation.height + carryLift - displayDrag.height) * k
-                    trackSpin(value.location)
-                    heldPose(value)
+                    carryStep(value)
                 case .tracking:
                     break
                 }
             }
             .onEnded { value in
                 lastInteraction = Date()
-                let phase = dragPhase
+                flickExpiryTask?.cancel()
+                var phase = dragPhase
+                let touchDuration = touchBeganAt.map { Date().timeIntervalSince($0) } ?? 0
+                if phase == .flickArmed, touchDuration >= 0.35, movable {
+                    startCarry()
+                    phase = .carrying
+                }
                 touchBeganAt = nil
                 dragPhase = nil
                 displayDrag = .zero
@@ -319,12 +386,33 @@ struct FlameActor: View {
                     direction = value.startLocation.x < size * 0.5 ? 1 : -1
                 default: direction = 0
                 }
+                // A long touch let go gently was a drag, not a flick,
+                // however far the finger travelled.
+                let isSwipeKind = kind == .swipeUp || kind == .swipeDown
+                    || kind == .swipeLeft || kind == .swipeRight
+                if isSwipeKind, touchDuration >= 0.35,
+                   !FlameGestureClassifier.isFlickRelease(
+                    translationX: Double(value.translation.width),
+                    translationY: Double(value.translation.height),
+                    predictedX: Double(value.predictedEndTranslation.width),
+                    predictedY: Double(value.predictedEndTranslation.height)) {
+                    return
+                }
                 let predicted = hypot(value.predictedEndTranslation.width,
                                       value.predictedEndTranslation.height)
                 let intensity = min(1.5, max(0.8, Double(predicted) / 220))
-                fire(kind, direction: direction, intensity: intensity)
                 if kind == .tapHead || kind == .tapBody || kind == .tapFeet {
-                    scheduleTap()
+                    if tapIsSecond {
+                        lastTapAt = nil
+                        pendingTapTask?.cancel()
+                        fire(.doubleTap, direction: direction, intensity: 1.15)
+                    } else {
+                        lastTapAt = Date()
+                        fire(kind, direction: direction, intensity: intensity)
+                        scheduleTap()
+                    }
+                } else {
+                    fire(kind, direction: direction, intensity: intensity)
                 }
             }
     }
@@ -408,7 +496,13 @@ struct FlameActor: View {
 
     private var longPressGesture: some Gesture {
         LongPressGesture(minimumDuration: 0.6, maximumDistance: 12)
-            .onEnded { _ in longPressFired = true; onLongPress?() }
+            .onEnded { _ in
+                guard !traveling else { return }
+                longPressFired = true
+                lastInteraction = Date()
+                fire(.longPress, direction: 0, intensity: 1)
+                onLongPress?()
+            }
     }
 
     private func scheduleTap() {
@@ -702,6 +796,22 @@ struct FlameActor: View {
             }
         case .miniHop:
             await hop(height: CGFloat(7 * settings.liveliness), face: .normal)
+        case .wave:
+            await run(.wave, direction: 1, jump: CGFloat(settings.jumpHeight), live: 1)
+        case .laugh:
+            await run(.laugh, direction: 0, jump: CGFloat(settings.jumpHeight), live: 1)
+        case .pointUp:
+            await run(.pointUp, direction: -1, jump: CGFloat(settings.jumpHeight), live: 1)
+        case .walkAbout:
+            await run(.walkAbout, direction: Bool.random() ? 1 : -1,
+                      jump: CGFloat(settings.jumpHeight), live: 1)
+        case .turnAround:
+            await run(.turnAround, direction: 0, jump: CGFloat(settings.jumpHeight), live: 1)
+        case .yawn:
+            await pose(.easeInOut(duration: 0.5), hold: 1.0) { p in
+                p.face = .sleepy; p.sx = 0.97; p.sy = 1.06; p.dy = -2
+                p.armSL = 132; p.armSR = -118
+            }
         case .wiggle:
             for rot in [-3.5, 3.5, -2.0] where !Task.isCancelled {
                 await pose(.easeInOut(duration: 0.1), hold: 0.1) { p in

@@ -53,6 +53,9 @@ struct InteractiveFlame<Content: View>: View {
     @State private var lastInteraction = Date()
     @State private var lastPinchEnd = Date.distantPast
     @State private var longPressFired = false
+    @State private var lastTapAt: Date?
+    @State private var tapIsSecond = false
+    @State private var touchActive = false
 
     private var settings: FlameInteractionSettings { playStore.settings }
 
@@ -90,7 +93,7 @@ struct InteractiveFlame<Content: View>: View {
             .simultaneousGesture(dragGesture, including: interactive ? .gesture : .none)
             .simultaneousGesture(pinchGesture, including: interactive ? .gesture : .none)
             .simultaneousGesture(longPressGesture,
-                                 including: interactive && onLongPress != nil ? .gesture : .none)
+                                 including: interactive ? .gesture : .none)
             .onAppear {
                 breathing = true
                 updateMotion()
@@ -123,9 +126,18 @@ struct InteractiveFlame<Content: View>: View {
             .updating($dragTranslation) { value, state, _ in
                 state = value.translation
             }
-            .onChanged { _ in lastInteraction = Date() }
+            .onChanged { _ in
+                lastInteraction = Date()
+                if !touchActive {
+                    touchActive = true
+                    tapIsSecond = FlameGestureClassifier.isDoubleTap(
+                        previousAt: lastTapAt?.timeIntervalSinceReferenceDate,
+                        now: Date().timeIntervalSinceReferenceDate)
+                }
+            }
             .onEnded { value in
                 lastInteraction = Date()
+                touchActive = false
                 if longPressFired {
                     longPressFired = false
                     return
@@ -152,9 +164,18 @@ struct InteractiveFlame<Content: View>: View {
                 let predicted = hypot(value.predictedEndTranslation.width,
                                       value.predictedEndTranslation.height)
                 let intensity = min(1.5, max(0.8, Double(predicted) / 220))
-                fire(kind, direction: direction, intensity: intensity)
                 if kind == .tapHead || kind == .tapBody || kind == .tapFeet {
-                    scheduleTap()
+                    if tapIsSecond {
+                        lastTapAt = nil
+                        pendingTapTask?.cancel()
+                        fire(.doubleTap, direction: direction, intensity: 1.15)
+                    } else {
+                        lastTapAt = Date()
+                        fire(kind, direction: direction, intensity: intensity)
+                        scheduleTap()
+                    }
+                } else {
+                    fire(kind, direction: direction, intensity: intensity)
                 }
             }
     }
@@ -183,6 +204,8 @@ struct InteractiveFlame<Content: View>: View {
         LongPressGesture(minimumDuration: 0.6, maximumDistance: 12)
             .onEnded { _ in
                 longPressFired = true
+                lastInteraction = Date()
+                fire(.longPress, direction: 0, intensity: 1)
                 onLongPress?()
             }
     }
@@ -328,6 +351,27 @@ struct InteractiveFlame<Content: View>: View {
             await pose(dy: -2, sx: 0.96, sy: 1.07, .easeInOut(duration: 0.35), hold: 0.7)
         case .miniHop:
             await hop(height: CGFloat(7 * settings.liveliness))
+        case .wave:
+            for rot in [4.0, -4.0, 4.0] where !Task.isCancelled {
+                await pose(dy: -2, rot: rot, .easeInOut(duration: 0.12), hold: 0.12)
+            }
+        case .laugh:
+            await hop(height: CGFloat(6 * settings.liveliness))
+            await hop(height: CGFloat(6 * settings.liveliness))
+        case .pointUp:
+            await pose(dy: -3, sx: 0.95, sy: 1.08, .easeOut(duration: 0.2), hold: 0.5)
+            await hop(height: CGFloat(9 * settings.liveliness))
+        case .walkAbout:
+            let d: CGFloat = Bool.random() ? 1 : -1
+            await pose(dx: d * 12, .easeInOut(duration: 0.5), hold: 0.5)
+            await pose(dx: 0, .easeInOut(duration: 0.5), hold: 0.5)
+        case .turnAround:
+            await pose(sx: 0.05, .easeIn(duration: 0.14), hold: 0.14)
+            await pose(sx: -1, .easeOut(duration: 0.14), hold: 0.5)
+            await pose(sx: -0.05, .easeIn(duration: 0.14), hold: 0.14)
+            await pose(sx: 1, .easeOut(duration: 0.14), hold: 0.2)
+        case .yawn:
+            await pose(dy: -2, sx: 0.97, sy: 1.06, .easeInOut(duration: 0.5), hold: 1.0)
         case .wiggle:
             for rot in [-3.5, 3.5, -2.0] where !Task.isCancelled {
                 await pose(rot: rot, .easeInOut(duration: 0.1), hold: 0.1)

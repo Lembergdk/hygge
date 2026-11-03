@@ -102,9 +102,44 @@ final class FlamePlayTests: XCTestCase {
 
     func testIdlePlannerCyclesWithVariedDelays() {
         var planner = FlameIdlePlanner()
-        let sequence = (0..<7).map { _ in planner.next().action }
-        XCTAssertEqual(Set(sequence.dropLast()).count, 6)
-        XCTAssertEqual(sequence.last, sequence.first)
+        let count = FlameIdleAction.allCases.count
+        let sequence = (0..<(count * 2)).map { _ in planner.next().action }
+        // Every behavior appears once per bag, never twice in a row, and
+        // not in the same fixed order every time (not on rails).
+        for action in FlameIdleAction.allCases {
+            XCTAssertEqual(sequence.filter { $0 == action }.count, 2, "\(action)")
+        }
+        for i in 1..<sequence.count {
+            XCTAssertNotEqual(sequence[i], sequence[i - 1], "repeat at \(i)")
+        }
+        XCTAssertNotEqual(Array(sequence.prefix(count)),
+                          Array(sequence.suffix(count)))
+        XCTAssertGreaterThanOrEqual(count, 10)
+    }
+
+    func testFlickExpiresWhenTouchIsHeld() {
+        // Still down well past the flick window: it was a fast drag.
+        XCTAssertTrue(FlameGestureClassifier.flickExpires(elapsed: 0.30, velocity: 900))
+        // Slowed right down while still touching: carry, don't fling.
+        XCTAssertTrue(FlameGestureClassifier.flickExpires(elapsed: 0.20, velocity: 200))
+        // Fresh and fast: flick still armed.
+        XCTAssertFalse(FlameGestureClassifier.flickExpires(elapsed: 0.12, velocity: 900))
+        XCTAssertFalse(FlameGestureClassifier.flickExpires(elapsed: 0.05, velocity: 100))
+    }
+
+    func testDoubleTapWindow() {
+        XCTAssertTrue(FlameGestureClassifier.isDoubleTap(previousAt: 1.0, now: 1.25))
+        XCTAssertFalse(FlameGestureClassifier.isDoubleTap(previousAt: 1.0, now: 1.60))
+        XCTAssertFalse(FlameGestureClassifier.isDoubleTap(previousAt: nil, now: 1.0))
+        XCTAssertFalse(FlameGestureClassifier.isDoubleTap(previousAt: 2.0, now: 1.0))
+    }
+
+    func testDoubleTapAndLongPressDefaults() {
+        let settings = FlameInteractionSettings()
+        XCTAssertEqual(settings.reaction(for: .doubleTap), .laugh)
+        XCTAssertEqual(settings.reaction(for: .longPress), .wave)
+        XCTAssertFalse(FlameGestureKind.doubleTap.label.isEmpty)
+        XCTAssertFalse(FlameGestureKind.longPress.label.isEmpty)
     }
 
     func testShakeDetectorCooldown() {
