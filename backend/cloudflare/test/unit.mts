@@ -17,7 +17,7 @@ test("tier routing: routine spark, failures escalate", () => {
 });
 
 test("gateway headers: direct calls unchanged, gateway calls fail closed on payloads", () => {
-  const direct = llmRequestHeaders({ ...CFG, apiKey: "meta-key" });
+  const direct = llmRequestHeaders({ ...CFG, apiKey: "meta-key" }, "muse-spark-1.3");
   assert.deepEqual(direct, {
     "Content-Type": "application/json",
     Authorization: "Bearer meta-key",
@@ -26,8 +26,10 @@ test("gateway headers: direct calls unchanged, gateway calls fail closed on payl
   const prod = llmRequestHeaders({
     ...CFG, apiKey: "meta-key", gatewayToken: "run-token",
     agentName: "hygge-browser-agent", agentId: "hygge-production",
-  });
-  assert.equal(prod.Authorization, "Bearer meta-key");
+  }, "muse-wonder-1.0");
+  // Gateway injects its stored provider key only when the
+  // provider Authorization header is absent.
+  assert.equal(prod.Authorization, undefined);
   assert.equal(prod["cf-aig-authorization"], "Bearer run-token");
   // Unset collect flag = metadata only, never raw bodies.
   assert.equal(prod["cf-aig-collect-log-payload"], "false");
@@ -37,8 +39,26 @@ test("gateway headers: direct calls unchanged, gateway calls fail closed on payl
 
   const staging = llmRequestHeaders({
     ...CFG, apiKey: "meta-key", gatewayToken: "run-token", gatewayCollectPayload: true,
-  });
+  }, "muse-spark-1.3");
   assert.equal(staging["cf-aig-collect-log-payload"], "true");
+});
+
+test("gateway custom costs: Meta list prices per token, unknown models unpriced", () => {
+  const spark = llmRequestHeaders(
+    { ...CFG, apiKey: "meta-key", gatewayToken: "run-token" }, "muse-spark-1.3");
+  assert.deepEqual(JSON.parse(spark["cf-aig-custom-cost"]), {
+    per_token_in: 0.00000125, per_token_out: 0.00000425, per_cache_read_token: 1.5e-7,
+  });
+
+  const wonder = llmRequestHeaders(
+    { ...CFG, apiKey: "meta-key", gatewayToken: "run-token" }, "muse-wonder-1.0");
+  assert.deepEqual(JSON.parse(wonder["cf-aig-custom-cost"]), {
+    per_token_in: 0.000004, per_token_out: 0.00002, per_cache_read_token: 2e-7,
+  });
+
+  const unknown = llmRequestHeaders(
+    { ...CFG, apiKey: "meta-key", gatewayToken: "run-token" }, "some-future-model");
+  assert.equal(unknown["cf-aig-custom-cost"], undefined);
 });
 
 test("parseDecision tolerates prose and fences", () => {

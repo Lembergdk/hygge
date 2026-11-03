@@ -288,13 +288,17 @@ export async function runMission(opts: {
   skill?: SharedSkill | null; skillCandidate?: { body: SkillBody } | null;
   existingSessionID?: string | null; restoreState?: any;
   onSession?: (id: string) => void;
-  traceAgentId?: string; tracePayloads?: boolean;
+  traceAgentId?: string; traceSessionId?: string; traceSessionName?: string;
+  tracePayloads?: boolean;
 }): Promise<any> {
   const task: any = opts.task;
   const agentId = opts.traceAgentId ?? "hygge-dev";
   return withSpan("invoke_agent hygge-browser-agent", {
     "gen_ai.operation.name": "invoke_agent",
-    ...agentAttrs("hygge-browser-agent", agentId, task.id ? String(task.id) : null),
+    ...agentAttrs("hygge-browser-agent", agentId, task.id ? String(task.id) : null, {
+      id: opts.traceSessionId,
+      name: opts.traceSessionName,
+    }),
     "hygge.task.kind": String(task.kind ?? ""),
     "hygge.task.target_url": String(task.target_url ?? ""),
   }, async (span) => {
@@ -310,6 +314,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
                                    decider, fillCredentialValue, maxSteps = MAX_STEPS,
                                    skill = null, skillCandidate = null,
                                    existingSessionID = null, restoreState = null,
+                                   traceAgentId = "hygge-dev", traceSessionId, traceSessionName,
                                    tracePayloads = false, onSession }: {
   browser: any; task: any; hints?: string[]; hasCredential?: boolean;
   hasEmailCode?: boolean; fillEmailCodeValue?: any;
@@ -317,6 +322,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
   decider: any; fillCredentialValue?: any; maxSteps?: number;
   skill?: SharedSkill | null; skillCandidate?: { body: SkillBody } | null;
   existingSessionID?: string | null; restoreState?: any;
+  traceAgentId?: string; traceSessionId?: string; traceSessionName?: string;
   tracePayloads?: boolean;
   onSession?: (id: string) => void;
 }): Promise<any> {
@@ -383,6 +389,11 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
   let failures = 0;
   let emailedCodeSteps = 0; // Brief 04 two-factor window: type + submit
   const actionKeys = new Map<string, number>();
+  const traceConversationId = task.id ? String(task.id) : undefined;
+  const traceIdentity = agentAttrs("hygge-browser-agent", traceAgentId, traceConversationId, {
+    id: traceSessionId,
+    name: traceSessionName,
+  });
 
   for (let step = 1; step <= maxSteps; step++) {
     if (interrupted()) return paused();
@@ -435,6 +446,16 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     const tierLabel = decision.tier ? `${decision.tier.model} (${decision.tier.reason})` : null;
     const stamp = { modelTier: tierLabel, model: decision.tier?.model ?? null,
                     skillId: skill?.id ?? null, skillVersion: skill?.version ?? null };
+    const toolCallId = `${traceConversationId ?? traceSessionId ?? "mission"}:step-${step}`;
+    const recordToolApproval = (state: "requested" | "approved") => withSpan(`tool_approval ${decision.action}`, {
+      ...traceIdentity,
+      "gen_ai.operation.name": "execute_tool",
+      "cloudflare.agents.operation.name": "tool.approval",
+      "cloudflare.agents.tool.approval.state": state,
+      "gen_ai.tool.name": String(decision.action),
+      "gen_ai.tool.call.id": toolCallId,
+      "gen_ai.tool.type": "function",
+    }, async () => {});
 
     if (emailedCodeStep && decision.valueRef !== "emailCode.code" && decision.action !== "click" && decision.action !== "needsHuman") {
       trace.push({ action: "needsHuman", target: "", urlString: snapshot.currentURLString,
@@ -477,16 +498,22 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint, help: help("verification", `I need you to finish a ${checkpoint} on ${site}. Your place is saved.`, [], "Complete check"), ...routing() };
     }
     if (needsActionApproval(task, decision) && decision.consentGranted !== true) {
+      await recordToolApproval("requested");
       const request = help("approval", `${decision.preview || decision.reason || "This step changes something outside Hygge."}\nProposed action: ${decision.action} “${decision.target}”${decision.value ? ` — ${decision.value}` : ""}`, [], "Approve and continue");
       return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID,
         help: request, pendingAction: { decision, fingerprint: actionFingerprint(decision, snapshot, task.drafted_payload) },
         sessionProbe, resumedSession, ...routing() };
     }
+    if (decision.consentGranted === true) await recordToolApproval("approved");
     let result: any;
     try {
       result = await withSpan(`execute_tool ${decision.action}`, {
+        ...traceIdentity,
         "gen_ai.operation.name": "execute_tool",
+        "cloudflare.agents.operation.name": "tool.execute",
         "gen_ai.tool.name": String(decision.action),
+        "gen_ai.tool.call.id": toolCallId,
+        "gen_ai.tool.type": "function",
         ...(tracePayloads ? {
           "gen_ai.tool.call.arguments": clip(JSON.stringify({ target: decision.target ?? "", valueRef: decision.valueRef ?? null, reason: decision.reason ?? "" })),
         } : {}),

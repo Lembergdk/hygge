@@ -14,24 +14,48 @@ export interface LLMConfig {
   /// prompts/replies; production keeps metadata + usage only).
   agentName?: string;
   agentId?: string;
+  /// Durable per-user session identity for Agents grouping.
+  /// A per-call conversation ID can still identify one mission
+  /// or onboarding conversation inside that session.
+  sessionId?: string;
+  sessionName?: string;
+  /// Default conversation when a caller does not supply one.
+  conversationId?: string;
   tracePayloads?: boolean;
   /// Cloudflare AI Gateway: when baseUrl routes through a gateway,
-  /// this scoped Run token authenticates at the gateway (the
-  /// provider key above still goes through as Authorization).
+  /// this scoped Run token authenticates at the gateway and the
+  /// provider key stays in the gateway's stored keys (BYOK), so
+  /// no provider Authorization is sent. Without it, requests go
+  /// direct with apiKey as Authorization.
   gatewayToken?: string;
   /// Whether the gateway may store raw request/response bodies in
   /// its logs. Undefined is treated as false (metadata only).
   gatewayCollectPayload?: boolean;
 }
 
-/// Headers for one chat-completions request. Gateway headers are
-/// only sent when a gateway token is configured, so a direct
-/// provider baseUrl keeps working unchanged.
-export function llmRequestHeaders(cfg: LLMConfig): Record<string, string> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${cfg.apiKey}`,
-  };
+/// Meta Model API list prices in USD per token (Standard mode;
+/// spark $1.25/$0.15 cached/$4.25 and wonder $4/$0.20 cached/$20
+/// per 1M in/out). The gateway has no built-in pricing for the
+/// custom provider, so these go out as cf-aig-custom-cost and
+/// gateway logs/analytics price each request from its token
+/// usage. Meta publishes no cache-write rate, so cache writes
+/// price at the input rate (the gateway default when only a
+/// read rate is given).
+export const MODEL_PRICES_USD_PER_TOKEN: Record<string, { input: number; output: number; cacheRead: number }> = {
+  "muse-spark-1.3": { input: 0.00000125, output: 0.00000425, cacheRead: 0.00000015 },
+  "muse-wonder-1.0": { input: 0.000004, output: 0.00002, cacheRead: 0.0000002 },
+};
+
+/// Headers for one chat-completions request. With a gateway
+/// token, the gateway injects its stored provider key — it only
+/// does so when Authorization is absent, so the provider key
+/// must not be sent. Without a gateway token this is a direct
+/// provider call with apiKey as Authorization.
+export function llmRequestHeaders(cfg: LLMConfig, model: string): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (!cfg.gatewayToken) {
+    headers.Authorization = `Bearer ${cfg.apiKey}`;
+  }
   if (cfg.gatewayToken) {
     headers["cf-aig-authorization"] = `Bearer ${cfg.gatewayToken}`;
     headers["cf-aig-collect-log-payload"] = cfg.gatewayCollectPayload ? "true" : "false";
@@ -39,6 +63,14 @@ export function llmRequestHeaders(cfg: LLMConfig): Record<string, string> {
       agent: cfg.agentName ?? "hygge-browser-agent",
       agent_id: cfg.agentId ?? "hygge-dev",
     });
+    const price = MODEL_PRICES_USD_PER_TOKEN[model];
+    if (price) {
+      headers["cf-aig-custom-cost"] = JSON.stringify({
+        per_token_in: price.input,
+        per_token_out: price.output,
+        per_cache_read_token: price.cacheRead,
+      });
+    }
   }
   return headers;
 }
@@ -74,6 +106,42 @@ export function selectTier(cfg: LLMConfig, ctx: TierContext) {
   return pick("spark", ctx.skillCoverage === "active" ? "active shared skill loaded" : "routine browsing decision");
 }
 
+interface ChatUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+  input_token_details?: { cached_tokens?: number };
+  completion_tokens_details?: { reasoning_tokens?: number };
+  output_token_details?: { reasoning_tokens?: number };
+}
+
+/// Current GenAI message shape used by session replay: a role
+/// plus typed parts, rather than a legacy flat `content` string.
+export function genAiTextMessage(role: string, text: string, finishReason?: string | null) {
+  return {
+    role,
+    parts: [{ type: "text", content: text }],
+    ...(finishReason ? { finish_reason: finishReason } : {}),
+  };
+}
+
+export function traceUsageAttributes(usage: ChatUsage | undefined) {
+  const attrs: Record<string, number> = {};
+  if (!usage) return attrs;
+  if (typeof usage.prompt_tokens === "number") attrs["gen_ai.usage.input_tokens"] = usage.prompt_tokens;
+  if (typeof usage.completion_tokens === "number") attrs["gen_ai.usage.output_tokens"] = usage.completion_tokens;
+  const cached = usage.prompt_tokens_details?.cached_tokens ?? usage.input_token_details?.cached_tokens;
+  if (typeof cached === "number") attrs["gen_ai.usage.cache_read.input_tokens"] = cached;
+  const reasoning = usage.completion_tokens_details?.reasoning_tokens ?? usage.output_token_details?.reasoning_tokens;
+  if (typeof reasoning === "number") attrs["gen_ai.usage.reasoning.output_tokens"] = reasoning;
+  const total = typeof usage.total_tokens === "number"
+    ? usage.total_tokens
+    : (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+  if (total > 0) attrs["cloudflare.agents.usage.total_tokens"] = total;
+  return attrs;
+}
+
 export class LLMClient {
   cfg: LLMConfig;
   constructor(cfg: LLMConfig) {
@@ -85,22 +153,53 @@ export class LLMClient {
   }
 
   private chatAttrs(model: string, conversationId?: string) {
+    const effectiveConversationId = conversationId ?? this.cfg.conversationId;
     return {
       "gen_ai.operation.name": "chat",
+      "gen_ai.provider.name": "meta",
       "gen_ai.request.model": model,
       "gen_ai.system": "meta",
-      ...agentAttrs(this.cfg.agentName ?? "hygge-browser-agent", this.cfg.agentId ?? "hygge-dev", conversationId),
+      ...agentAttrs(
+        this.cfg.agentName ?? "hygge-browser-agent",
+        this.cfg.agentId ?? "hygge-dev",
+        effectiveConversationId,
+        { id: this.cfg.sessionId ?? effectiveConversationId, name: this.cfg.sessionName },
+      ),
     };
   }
 
   private payloadAttrs(span: { setAttribute(k: string, v: string): void },
-                       system: string, user: string, output?: string) {
+                       system: string, user: string, output?: string, finishReason?: string | null) {
     if (!this.cfg.tracePayloads) return;
-    span.setAttribute("gen_ai.system_instructions", clip(system));
-    span.setAttribute("gen_ai.input.messages", clip(JSON.stringify([{ role: "user", content: user }])));
+    span.setAttribute("gen_ai.system_instructions", clip(JSON.stringify([{ type: "text", content: system }])));
+    span.setAttribute("gen_ai.input.messages", clip(JSON.stringify([genAiTextMessage("user", user)])));
     if (output !== undefined) {
-      span.setAttribute("gen_ai.output.messages", clip(JSON.stringify([{ role: "assistant", content: output }])));
+      span.setAttribute(
+        "gen_ai.output.messages",
+        clip(JSON.stringify([genAiTextMessage("assistant", output, finishReason)])),
+      );
     }
+  }
+
+  private responseAttrs(span: { setAttribute(k: string, v: string | number): void },
+                        response: { id?: string; model?: string; finishReason?: string | null }, fallbackModel: string) {
+    if (response.id) span.setAttribute("gen_ai.response.id", response.id);
+    span.setAttribute("gen_ai.response.model", response.model ?? fallbackModel);
+    if (response.finishReason) {
+      span.setAttribute("gen_ai.response.finish_reasons", JSON.stringify([response.finishReason]));
+      span.setAttribute("cloudflare.agents.response.finish_reason", response.finishReason);
+    }
+  }
+
+  private usageAttrs(span: { setAttribute(k: string, v: number): void }, usage: ChatUsage | undefined) {
+    for (const [key, value] of Object.entries(traceUsageAttributes(usage))) {
+      span.setAttribute(key, value);
+    }
+  }
+
+  private gatewayLogAttr(span: { setAttribute(k: string, v: string): void }, response: Response) {
+    const logId = response.headers.get("cf-aig-log-id") ?? response.headers.get("cf-aig-logid");
+    if (logId) span.setAttribute("cloudflare.ai_gateway.log.id", logId.slice(0, 256));
   }
 
   async complete({ model, system, user, conversationId }: { model: string; system: string; user: string; conversationId?: string }): Promise<string> {
@@ -108,7 +207,7 @@ export class LLMClient {
       this.payloadAttrs(span, system, user);
       const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
-        headers: llmRequestHeaders(this.cfg),
+        headers: llmRequestHeaders(this.cfg, model),
         body: JSON.stringify({
           model,
           messages: [
@@ -118,14 +217,21 @@ export class LLMClient {
         }),
       });
       if (!res.ok) throw new Error(`LLM ${model} returned ${res.status}`);
+      this.gatewayLogAttr(span, res);
       const data = (await res.json()) as {
-        choices?: { message?: { content?: string } }[];
-        usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+        id?: string;
+        model?: string;
+        choices?: { finish_reason?: string | null; message?: { content?: string } }[];
+        usage?: ChatUsage;
       };
-      if (data.usage?.prompt_tokens !== undefined) span.setAttribute("gen_ai.usage.input_tokens", data.usage.prompt_tokens);
-      if (data.usage?.completion_tokens !== undefined) span.setAttribute("gen_ai.usage.output_tokens", data.usage.completion_tokens);
+      this.usageAttrs(span, data.usage);
+      this.responseAttrs(span, {
+        id: data.id,
+        model: data.model,
+        finishReason: data.choices?.[0]?.finish_reason,
+      }, model);
       const text = data.choices?.[0]?.message?.content ?? "";
-      this.payloadAttrs(span, system, user, text);
+      this.payloadAttrs(span, system, user, text, data.choices?.[0]?.finish_reason);
       return text;
     });
   }
@@ -138,7 +244,7 @@ export class LLMClient {
     this.payloadAttrs(span, system, user);
     const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
-      headers: llmRequestHeaders(this.cfg),
+      headers: llmRequestHeaders(this.cfg, model),
       body: JSON.stringify({
         model,
         stream: true,
@@ -150,10 +256,14 @@ export class LLMClient {
     });
     if (!res.ok) throw new Error(`LLM ${model} returned ${res.status}`);
     if (!res.body) throw new Error("LLM stream had no body");
+    this.gatewayLogAttr(span, res);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let full = "";
+    let responseId: string | undefined;
+    let responseModel: string | undefined;
+    let finishReason: string | null | undefined;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -167,11 +277,15 @@ export class LLMClient {
         if (data === "[DONE]") continue;
         try {
           const chunk = JSON.parse(data) as {
-            choices?: { delta?: { content?: string } }[];
-            usage?: { prompt_tokens?: number; completion_tokens?: number };
+            id?: string;
+            model?: string;
+            choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
+            usage?: ChatUsage;
           };
-          if (chunk.usage?.prompt_tokens !== undefined) span.setAttribute("gen_ai.usage.input_tokens", chunk.usage.prompt_tokens);
-          if (chunk.usage?.completion_tokens !== undefined) span.setAttribute("gen_ai.usage.output_tokens", chunk.usage.completion_tokens);
+          responseId ??= chunk.id;
+          responseModel ??= chunk.model;
+          finishReason ??= chunk.choices?.[0]?.finish_reason ?? undefined;
+          this.usageAttrs(span, chunk.usage);
           const delta = chunk.choices?.[0]?.delta?.content ?? "";
           if (delta) {
             full += delta;
@@ -182,7 +296,8 @@ export class LLMClient {
         }
       }
     }
-    this.payloadAttrs(span, system, user, full);
+    this.responseAttrs(span, { id: responseId, model: responseModel, finishReason }, model);
+    this.payloadAttrs(span, system, user, full, finishReason);
     return full;
     });
   }
