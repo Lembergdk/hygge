@@ -98,7 +98,7 @@ struct CloudBrowserView: View {
                     BrowserLiveViewport(session: session, interactive: !fullscreen)
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                         .overlay { GeometryReader { geometry in
-                            Color.clear.task(id: "\(geometry.size)-\(session.connected)-\(fullscreen)") { if !fullscreen { session.resize(geometry.size) } }
+                            Color.clear.task(id: "\(geometry.size)-\(session.connected)-\(session.ownsControl)-\(fullscreen)") { if !fullscreen { session.resize(geometry.size) } }
                         }.allowsHitTesting(false) }
                     if let problem = session.problem {
                         HStack {
@@ -173,7 +173,7 @@ private struct BrowserFullscreen: View {
           ZStack(alignment: .bottom) {
             BrowserLiveViewport(session: session, interactive: true, revealControls: reveal)
                 .frame(width: geometry.size.width, height: geometry.size.height)
-                .task(id: "\(geometry.size)-\(session.connected)") { session.resize(geometry.size) }
+                .task(id: "\(geometry.size)-\(session.connected)-\(session.ownsControl)") { session.resize(geometry.size) }
             if showingControls && !session.keyboardVisible {
                 HStack(spacing: 12) {
                     if session.ownsControl {
