@@ -19,6 +19,9 @@ struct HomeFeedView: View {
     /// draws him along the way. Driving .position itself through an
     /// optional override snapped him off-screen for a frame on close.
     @State private var hopOffset: CGSize = .zero
+    /// Downward drag on the chat bubble's grabber: the bubble follows
+    /// the finger, then either springs back or closes past the threshold.
+    @State private var bubbleDragOffset: CGFloat = 0
     /// While the chat bubble is open he perches a little higher, fully
     /// on screen under its tail, instead of clipped by the bottom edge.
     @State private var chatLift: CGFloat = 0
@@ -280,24 +283,35 @@ struct HomeFeedView: View {
     /// Quick hop: his limbs crouch, launch and land (see FlameActor's
     /// travel hops) while the center animates from an EXPLICIT start —
     /// measuring the start after mutating placement would read the
-    /// target itself and teleport him.
+    /// target itself and teleport him. `prepare` (the placement/lift
+    /// writes that move layout to the target) runs INSIDE the pin's
+    /// no-animation transaction, so layout, offset and lift change in
+    /// one render: drawn = target + (start - target) = start, exactly
+    /// where he already is. Clearing the perch lift in a separate
+    /// transaction after the pin let an intermediate frame render
+    /// with mismatched layout/offset/lift — a visible shift before
+    /// the hop even started.
     private func hop(from start: CGPoint, to target: CGPoint,
+                     prepare: () -> Void = {},
                      then: @escaping () -> Void) {
         let distance = hypot(target.x - start.x, target.y - start.y)
+        var instant = Transaction()
+        instant.disablesAnimations = true
         if reduceMotion || distance < 8 {
-            hopOffset = .zero
+            withTransaction(instant) {
+                prepare()
+                hopOffset = .zero
+            }
             then()
             return
         }
         let duration = min(0.85, max(0.45, Double(distance) / 1400 + 0.35))
-        // Placement already holds the target at both call sites, so
-        // layout is there; pin him to the start with an offset in a
-        // no-animation transaction, let that frame land, then animate
-        // the offset home. Interpolating from exactly where he is
-        // drawn now is what keeps the first hop frame on screen.
-        var instant = Transaction()
-        instant.disablesAnimations = true
+        // Pin him to the start with an offset, let that frame land,
+        // then animate the offset home. Interpolating from exactly
+        // where he is drawn now is what keeps the first hop frame
+        // on screen.
         withTransaction(instant) {
+            prepare()
             hopOffset = CGSize(width: start.x - target.x,
                                height: start.y - target.y)
         }
@@ -317,8 +331,9 @@ struct HomeFeedView: View {
         if showBubbleChat { closeBubble(); return }
         returnPlacement = playStore.settings.placement
         let start = flameWindowCenter()
-        playStore.settings.placement = nil
-        hop(from: start, to: windowCenter(for: nil)) {
+        bubbleDragOffset = 0
+        hop(from: start, to: windowCenter(for: nil),
+            prepare: { playStore.settings.placement = nil }) {
             withAnimation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.82)) {
                 showBubbleChat = true
                 chatLift = -chatLiftAmount
@@ -339,12 +354,16 @@ struct HomeFeedView: View {
             return
         }
         returnPlacement = nil
-        playStore.settings.placement = back
-        // Fold the perch lift into the hop: clearing it inside hop's
-        // no-animation pin (hop reads it via the start point) keeps
-        // his drawn position continuous.
-        hop(from: start, to: windowCenter(for: back)) {}
-        chatLift = 0
+        // Placement and the perch lift move inside hop's pin
+        // transaction (see hop): one render lands layout on the
+        // target with the offset holding him exactly at `start` —
+        // his perched spot under the bubble — so the hop begins
+        // there, with no shift first.
+        hop(from: start, to: windowCenter(for: back),
+            prepare: {
+                playStore.settings.placement = back
+                chatLift = 0
+            }) {}
     }
 
     private func bubbleChat(in geo: GeometryProxy) -> some View {
@@ -363,18 +382,41 @@ struct HomeFeedView: View {
             VStack(alignment: .trailing, spacing: 0) {
                 ZStack(alignment: .top) {
                     ConversationView(background: HyggeTheme.card, showsHeader: false)
-                    Capsule()
-                        .fill(HyggeTheme.secondary.opacity(0.55))
-                        .frame(width: 38, height: 5)
-                        .padding(.top, 8)
-                        .frame(width: 72, height: 24)
-                        .contentShape(Rectangle())
-                        .gesture(DragGesture(minimumDistance: 8).onEnded { value in
-                            if value.translation.height > 55 { closeBubble() }
-                        })
-                        .accessibilityElement()
-                        .accessibilityLabel("Drag down to close chat")
-                        .accessibilityIdentifier("chatBubbleGrabber")
+                    // Grabber: a wide hit strip across the top, not just
+                    // the visible pill. It must outrank the transcript
+                    // ScrollView directly underneath (plain .gesture
+                    // loses to its pan recognizer, which made the
+                    // handle feel dead), and the bubble follows the
+                    // finger so the drag reads as a drag.
+                    ZStack(alignment: .top) {
+                        Color.clear
+                        Capsule()
+                            .fill(HyggeTheme.secondary.opacity(0.55))
+                            .frame(width: 38, height: 5)
+                            .padding(.top, 8)
+                    }
+                    .frame(width: 160, height: 32)
+                    .contentShape(Rectangle())
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 4)
+                            .onChanged { value in
+                                bubbleDragOffset = max(0, value.translation.height)
+                            }
+                            .onEnded { value in
+                                if value.translation.height > 55
+                                    || value.predictedEndTranslation.height > 140 {
+                                    closeBubble()
+                                } else {
+                                    withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.85)) {
+                                        bubbleDragOffset = 0
+                                    }
+                                }
+                            }
+                    )
+                    .accessibilityElement()
+                    .accessibilityLabel("Drag down to close chat")
+                    .accessibilityIdentifier("chatBubbleGrabber")
+                    .accessibilityAction(named: "Close chat") { closeBubble() }
                 }
                 .frame(width: width, height: height)
                 .background(HyggeTheme.card, in: RoundedRectangle(cornerRadius: 26))
@@ -392,6 +434,7 @@ struct HomeFeedView: View {
             }
             .position(x: screenSize.width - width / 2 - 12 - origin.x,
                       y: bubbleBottomWindow - height / 2 - origin.y)
+            .offset(y: bubbleDragOffset)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Chat with Hygge")
             .accessibilityIdentifier("chatBubble")
