@@ -50,6 +50,10 @@ struct HomeFeedView: View {
                 onDragBegan: { dragStartCenter = flameWindowCenter() }
                 onDragEnded: { translation in commitDrag(translation) }
                     .position(flameCenter(in: geo))
+                    // Above the chat bubble (zIndex 3): on close he hops
+                    // back THROUGH the bubble's fading rectangle, and
+                    // behind it he vanished until the fade finished.
+                    .zIndex(4)
                 if showBubbleChat {
                     bubbleChat(in: geo)
                 }
