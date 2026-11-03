@@ -8,8 +8,8 @@
 
 <p align="center">
   Hygge (Danish, pronounced “hoo-gah”) means being cozy and spending quality
-  time with the people you love. This app gets you more of that — more money,
-  fewer worries — by finding work for you and handling the boring parts of
+  time with the people you love. This app gets you more of that — more time for living,
+  fewer worries about money — by finding work for you and handling the boring parts of
   managing it. You stay in charge of every decision.
 </p>
 
