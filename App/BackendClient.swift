@@ -204,8 +204,8 @@ struct BackendClient {
         return response.tasks.compactMap(\.mobile_task)
     }
 
-    func rejectTask(id: String) async throws {
-        let _: BackendTaskResult = try await post("tasks/\(id)/reject", body: [String: String]())
+    func rejectTask(id: String, helpID: UUID? = nil) async throws {
+        let _: BackendTaskResult = try await post("tasks/\(id)/reject", body: helpID.map { ["helpID": $0.uuidString] } ?? [:])
     }
 
     func createSession(url: String) async throws -> BrowserSessionSnapshot {

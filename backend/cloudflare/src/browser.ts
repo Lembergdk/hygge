@@ -47,67 +47,75 @@ export class BrowserRunBrowser {
   /// shows its login form and the mission re-logs in via the vault.
   async createSession(url: string, restore?: SessionState | null): Promise<Snapshot> {
     const browser = await launch(this.binding, { keep_alive: 600_000 });
-    const page = await browser.newPage();
-    // Experience parity with an end user's browser: no safe-mode
-    // restrictions are imposed anywhere (JavaScript and cookies
-    // stay enabled, nothing is content-blocked), the viewport is
-    // a normal laptop size instead of the 800x600 automation
-    // default, and the UA keeps the real engine/platform/version
-    // minus the "Headless" token. Datacenter egress and a fresh
-    // profile per session remain inherent to server-side
-    // browsing; the user's saved sign-in restores on top below.
-    await page.setJavaScriptEnabled(true).catch(() => {});
-    await page.setViewport({ width: 1365, height: 900 }).catch(() => {});
+    let id: string | undefined;
     try {
-      const ua = (await page.evaluate(() => navigator.userAgent)) as unknown as string;
-      if (ua.includes("HeadlessChrome")) {
-        const clean = ua.replace("HeadlessChrome", "Chrome");
-        // Browser Run ignores puppeteer's setUserAgent; the CDP
-        // emulation override is what sticks (header + JS alike).
-        let applied = false;
-        try {
-          const cdp = await (page as any).createCDPSession();
-          await cdp.send("Emulation.setUserAgentOverride", { userAgent: clean });
-          applied = true;
-        } catch { /* fall through */ }
-        if (!applied) {
-          try { await page.setUserAgent(clean); } catch { /* header below still applies */ }
-        }
-        // Browser Run may silently ignore both overrides above at
-        // the JS level; the header override always reaches servers.
-        await page.setExtraHTTPHeaders({ "User-Agent": clean }).catch(() => {});
-      }
-    } catch { /* keep the default UA */ }
-    if (restore?.cookies?.length) {
-      await (page as Page).setCookie(...(restore.cookies as never[])).catch(() => {});
-    }
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    if (restore && Object.keys(restore.localStorage).length) {
-      await page
-        .evaluate((items: Record<string, string>) => {
-          for (const [k, v] of Object.entries(items)) {
-            try { window.localStorage.setItem(k, v); } catch { /* storage blocked */ }
+      const page = await browser.newPage();
+      // Experience parity with an end user's browser: no safe-mode
+      // restrictions are imposed anywhere (JavaScript and cookies
+      // stay enabled, nothing is content-blocked), the viewport is
+      // a normal laptop size instead of the 800x600 automation
+      // default, and the UA keeps the real engine/platform/version
+      // minus the "Headless" token. Datacenter egress and a fresh
+      // profile per session remain inherent to server-side
+      // browsing; the user's saved sign-in restores on top below.
+      await page.setJavaScriptEnabled(true).catch(() => {});
+      await page.setViewport({ width: 1365, height: 900 }).catch(() => {});
+      try {
+        const ua = (await page.evaluate(() => navigator.userAgent)) as unknown as string;
+        if (ua.includes("HeadlessChrome")) {
+          const clean = ua.replace("HeadlessChrome", "Chrome");
+          // Browser Run ignores puppeteer's setUserAgent; the CDP
+          // emulation override is what sticks (header + JS alike).
+          let applied = false;
+          try {
+            const cdp = await (page as any).createCDPSession();
+            await cdp.send("Emulation.setUserAgentOverride", { userAgent: clean });
+            applied = true;
+          } catch { /* fall through */ }
+          if (!applied) {
+            try { await page.setUserAgent(clean); } catch { /* header below still applies */ }
           }
-        }, restore.localStorage)
-        .catch(() => {});
+          // Browser Run may silently ignore both overrides above at
+          // the JS level; the header override always reaches servers.
+          await page.setExtraHTTPHeaders({ "User-Agent": clean }).catch(() => {});
+        }
+      } catch { /* keep the default UA */ }
+      if (restore?.cookies?.length) {
+        await (page as Page).setCookie(...(restore.cookies as never[])).catch(() => {});
+      }
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      if (restore && Object.keys(restore.localStorage).length) {
+        await page
+          .evaluate((items: Record<string, string>) => {
+            for (const [k, v] of Object.entries(items)) {
+              try { window.localStorage.setItem(k, v); } catch { /* storage blocked */ }
+            }
+          }, restore.localStorage)
+          .catch(() => {});
+      }
+      const sessionID = crypto.randomUUID();
+      id = sessionID;
+      const live = new BrowserLive(page);
+      const observation = new BrowserObservation();
+      this.sessions.set(id, { id, browser, page, live, observation });
+      browser.once("disconnected", () => {
+        live.finish("This browser session has expired.");
+        void observation.close();
+        this.sessions.delete(sessionID);
+      });
+      return await this.snapshot(id) as Snapshot;
+    } catch (error) {
+      if (id) await this.closeSession(id).catch(() => {});
+      else await browser.close().catch(() => {});
+      throw error;
     }
-    const id = crypto.randomUUID();
-    const live = new BrowserLive(page);
-    const observation = new BrowserObservation();
-    this.sessions.set(id, { id, browser, page, live, observation });
-    browser.once("disconnected", () => {
-      live.finish("This browser session has expired. Return to chat to continue.");
-      void observation.close();
-      this.sessions.delete(id);
-    });
-    return this.snapshot(id) as Promise<Snapshot>;
   }
 
   hasSession(id: string): boolean {
     const session = this.sessions.get(id);
     if (!session) return false;
     if (!session.browser.connected || session.page.isClosed() || session.live.ended) {
-      session.live.finish("This browser session has ended. Return to chat to continue.");
+      session.live.finish("This browser session has ended.");
       this.sessions.delete(id);
       return false;
     }
@@ -159,7 +167,7 @@ export class BrowserRunBrowser {
 
   async snapshot(id: string): Promise<Snapshot | null> {
     const s = this.sessions.get(id);
-    if (!s) return null;
+    if (!s) throw new Error("session ended");
     const page = s.page;
     const observation = await s.observation.capture(page);
     const shot = (await page.screenshot({ type: "png" })) as unknown as Uint8Array;
@@ -199,7 +207,7 @@ export class BrowserRunBrowser {
     legacyHuman = false,
   ): Promise<Snapshot | null> {
     const s = this.sessions.get(id);
-    if (!s) return null;
+    if (!s) throw new Error("session ended");
     const page = s.page;
     if (s.live.control.human && !legacyHuman) throw new Error("browser is under human control");
     if (action === "navigate" && value) {

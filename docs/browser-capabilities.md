@@ -103,3 +103,30 @@ Not included: Playwright migration, arbitrary model JavaScript/CDP execution,
 Quick Actions PDF generation, crawl jobs, multi-tab management, or generic file
 uploads/downloads. Those are separate product capabilities rather than necessary
 parts of the current interactive account-setup workflow.
+
+## Failure feedback and recovery
+
+Browser exceptions are classified into allowlisted reasons (missing or changed control,
+invalid action, timeout, navigation failure, ended session, or unknown failure). Production
+spans include `hygge.failure.code` without enabling tool payload logging. Mission spans also
+record the last failed action's code when available. Exception bodies, URLs and input values
+are not copied into this feedback.
+
+The decider receives each action's structured failure, recovery guidance and unconfirmed
+outcome, plus the previous attempt's failure on retry. Timeouts explicitly require checking
+whether the action already took effect. Human-check decisions provide a separate short
+`userMessage`; technical reasoning is no longer used as the chat message. Terminal failures
+use grounded, reason-specific fallback copy with concrete recovery choices.
+
+When tasks are refreshed, expired browser checkpoints become a durable recovery request.
+The prior session and page-bound consent are invalidated. Active mission owners are excluded
+from this reconciliation. Opening a new session continues the original task scope and checks
+current state before proceeding. Stopping a task clears help, session and pending consent on
+the server; iOS persists the stopped state so the outstanding-request badge clears. Stale help
+IDs cannot approve, resume or stop a newer request. Stop controls are available in chat for
+all pending help types, and in the browser's recovery view.
+
+Regression coverage includes the target-only navigation no-op seen in production, sensitive
+error redaction, feedback supplied to the model, expired session replacement, retry with a
+fresh session, stale choices, and stopped-state persistence. These checks do not claim live
+site acceptance or successful CAPTCHA completion.

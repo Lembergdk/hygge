@@ -1,3 +1,4 @@
+import { classifyBrowserFailure, failureFeedback } from "./browser-failure.ts";
 import { safePageURL, sensitiveElement } from "./browser-observation.ts";
 import { BrowserControlInterrupted } from "./browser-control.ts";
 import { help, informationHelp, actionFingerprint, needsActionApproval } from "./task-help.ts";
@@ -47,6 +48,8 @@ const SYSTEM = [
   '"valueRef":"credential.username|credential.secret|emailCode.code|draft.<key>","reason":"short",',
   '"effect":"reversible|accountCreation|public|permanent|destructive","preview":"exact proposed content or changes for consequential actions",',
   '"questions":[{"text":"A necessary question","suggestedRefs":["draft.location"]}]}.',
+  "When a tool fails, use its failure code and nextStep, inspect the page and verify effects before retrying. A timeout does not mean nothing happened. Previous attempts may have partially completed; never duplicate a submission. Explain uncertainty honestly.",
+  "For needsHuman, include userMessage: one or two warm, plain-language sentences saying what you need and what the user should do. Keep technical reasoning in reason; never expose internal diagnostics or claim an expired session is saved.",
   "AUTONOMY: handle safe reversible choices, navigation, preparation, and recovery yourself.",
   "Use the provided facts before asking. Do not ask users to make routine setup decisions.",
   "Ask only for unavailable personal facts, human-only checks, or consequential approval.",
@@ -89,6 +92,8 @@ export class LLMDecider {
       imageDataURL: ctx.snapshot.visionSafe === true && ctx.snapshot.screenshotBase64 ? `data:image/png;base64,${ctx.snapshot.screenshotBase64}` : undefined,
       user: JSON.stringify({
         mission: ctx.mission,
+        previousAttempt: ctx.previousFailure ? { ...failureFeedback(ctx.previousFailure.code),
+          lastActionFailure: ctx.previousFailure.lastActionCode ? failureFeedback(ctx.previousFailure.lastActionCode) : null } : null,
         plan: "No predefined steps. Decide from the page in front of you.",
         memoryHints: ctx.hints,
         sharedSkill: ctx.skill ? { id: ctx.skill.id, version: ctx.skill.version, body: ctx.skill.body } : null,
@@ -111,13 +116,12 @@ export class LLMDecider {
                 screenshotAvailable: ctx.snapshot.visionSafe === true,
                 fileInputs: ctx.snapshot.elements.filter((e: any) => e.inputType === "file") },
         soFar: ctx.history.slice(-12).map((h: any) => ({ action: h.browserAction ?? h.action, target: h.target,
-          succeeded: h.succeeded, result: String(h.summary ?? "").slice(0, 1200) })),
+          succeeded: h.succeeded, failure: h.failure ? failureFeedback(h.failure.code) : null, result: String(h.summary ?? "").slice(0, 1200) })),
       }),
     });
     const decision = parseDecision(text) as any;
     if (!decision || !ACTIONS.has(decision.action)) {
-      return { action: "needsHuman", target: "", reason: `unparseable model reply: ${String(text).slice(0, 120)}`,
-               tier };
+      throw new Error("No usable browser decision");
     }
     return { ...decision, tier };
   }
@@ -279,7 +283,8 @@ async function execute({ browser, sessionID, decision, task, fillCredentialValue
     return { succeeded: items.length > 0, items,
              summary: items.length ? `Extracted ${items.length}: ${items.join(" | ")}` : "No listing-like content found" };
   }
-  await (browser as BrowserRunBrowser).act(sessionID, { action: decision.action, target: decision.target, value });
+  const after = await (browser as BrowserRunBrowser).act(sessionID, { action: decision.action, target: decision.target, value });
+  if (after === null) throw new Error("session ended");
   return { succeeded: true, summary: `${decision.action}: ${decision.targetLabel ?? decision.target ?? "page"}` };
 }
 
@@ -318,7 +323,18 @@ export async function runMission(opts: {
     "hygge.task.kind": String(task.kind ?? ""),
     "hygge.task.target_url": String(task.target_url ?? ""),
   }, async (span) => {
-    const result = await runMissionInner(opts);
+    const result = await runMissionInner(opts).catch((error) => ({ status: "failed", trace: [], extractedItems: [],
+      log: ["Browser attempt interrupted"], sessionID: null, failure: classifyBrowserFailure(error) }));
+    if (result.status === "failed") {
+      result.failure = failureFeedback(result.failure?.code ?? "unknown");
+      const lastFailure = result.trace?.findLast((entry: any) => entry.failure)?.failure;
+      if (lastFailure) result.failure.lastActionCode = lastFailure.code;
+      const finalActionFailure = result.trace?.at(-1)?.failure;
+      const explanation = finalActionFailure ? failureFeedback(finalActionFailure.code).userMessage : result.failure.userMessage;
+      result.help = help("recovery", `${explanation} I can open a new session and check what happened before continuing, or you can stop here.`, [], "Open new session");
+      span.setAttribute("hygge.failure.code", result.failure.code);
+      if (lastFailure) span.setAttribute("hygge.failure.last_action_code", lastFailure.code);
+    }
     span.setAttribute("hygge.mission.status", String(result?.status ?? ""));
     return result;
   });
@@ -413,11 +429,16 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
 
   for (let step = 1; step <= maxSteps; step++) {
     if (interrupted()) return paused();
-    const snapshot = await browser.snapshot(snap.sessionID);
+    let snapshot: Snapshot | null;
+    try { snapshot = await browser.snapshot(snap.sessionID); }
+    catch (error) {
+      return { status: "failed", failure: classifyBrowserFailure(error), trace, extractedItems, log,
+        sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
+    }
     // Human checkpoint guard: CAPTCHA / 2FA / ID checks pause for the
     // user with the session kept open. Enforced here — before the
     // model may act — so no decision can attempt to get past one.
-    if (!snapshot) return { status: "failed", trace, extractedItems, log: [...log, "Browser session ended"], sessionID: snap.sessionID, ...routing() };
+    if (!snapshot) return { status: "failed", trace, extractedItems, log: [...log, "Browser session ended"], failure: failureFeedback("session_ended"), sessionID: snap.sessionID, ...routing() };
     const checkpoint = detectCheckpoint(snapshot);
     // Brief 04 narrow exception: when a code arrived in the user's
     // own Hygge inbox, a two-factor page gets a two-step window —
@@ -445,7 +466,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
         decision = await decider.decide({
         conversationId: task.id ? String(task.id) : undefined,
         mission: task.goal, taskKind: task.kind, draft: task.drafted_payload,
-        hints, hasCredential, hasEmailCode, hasProfilePhoto, snapshot, history: trace,
+        hints, hasCredential, hasEmailCode, hasProfilePhoto, snapshot, history: trace, previousFailure: task.failure,
         skill, skillCandidate, authoringMode, site,
         restoredSession: Boolean(restoreState) || resumedSession, sessionProbe,
         tierContext: { taskKind: task.kind, failures, repeatedAction: repeated, skillCoverage },
@@ -455,8 +476,8 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       delete task.authorized_action;
     } catch (e: any) {
       failures += 1;
-      log.push(`Decider error at step ${step}: ${e.message}; escalating tier and retrying`);
-      if (failures >= 3) return { status: "failed", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
+      log.push(`No usable browser decision at step ${step}; retrying`);
+      if (failures >= 3) return { failure: failureFeedback("model_unavailable"), status: "failed", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
       continue;
     }
     const matches = snapshot.elements.filter((e: any) => e.label === decision.target);
@@ -511,7 +532,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     if (decision.action === "needsHuman") {
       trace.push({ action: "needsHuman", target: decision.target ?? "", urlString: snapshot.currentURLString,
                    summary: decision.reason || "Human checkpoint", succeeded: false, ...stamp });
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, help: help("verification", decision.reason || "This site needs a check only you can finish.", [], "Complete check"), sessionProbe, resumedSession, ...routing() };
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, help: help("verification", typeof decision.userMessage === "string" && decision.userMessage.trim() ? decision.userMessage.trim().slice(0, 400) : "This site needs a check only you can finish. Open the browser to complete it, or stop here.", [], "Complete check"), sessionProbe, resumedSession, ...routing() };
     }
 
     if (emailedCodeStep && decision.valueRef !== "emailCode.code" && decision.action !== "click") {
@@ -542,14 +563,23 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
         } : {}),
       }, async (toolSpan) => {
         const operation = () => execute({ browser, sessionID: snap!.sessionID, decision, task, fillCredentialValue, fillEmailCodeValue, uploadProfilePhoto });
-        const r = browser.agentStep ? await browser.agentStep(snap!.sessionID, epoch, operation) : await operation();
+        let r: any;
+        try { r = browser.agentStep ? await browser.agentStep(snap!.sessionID, epoch, operation) : await operation(); }
+        catch (error) {
+          if (error instanceof BrowserControlInterrupted || interrupted()) throw error;
+          const failure = classifyBrowserFailure(error);
+          r = { succeeded: false, summary: failure.summary, failure };
+          toolSpan.setAttribute("hygge.failure.code", failure.code);
+          toolSpan.setAttribute("hygge.tool.outcome", failure.outcome);
+        }
         toolSpan.setAttribute("hygge.tool.succeeded", Boolean(r?.succeeded));
         if (tracePayloads) toolSpan.setAttribute("gen_ai.tool.call.result", clip(String(r?.summary ?? "")));
         return r;
       });
     } catch (e: any) {
       if (e instanceof BrowserControlInterrupted || interrupted()) return paused();
-      result = { succeeded: false, summary: `Action failed (deviation): ${e.message.slice(0, 140)}` };
+      const failure = classifyBrowserFailure(e);
+      result = { succeeded: false, summary: failure.summary, failure };
     }
     if (interrupted()) return paused();
     if (result.items?.length) extractedItems.push(...result.items);
@@ -561,14 +591,14 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
                  target: decision.targetLabel ?? decision.target ?? "", targetRef: decision.target ?? "",
                  urlString: snapshot.currentURLString,
                  summary: `${result.summary}${decision.reason ? ` — ${decision.reason}` : ""}`,
-                 succeeded: result.succeeded, ...stamp });
+                 succeeded: result.succeeded, failure: result.failure, ...stamp });
     if ((actionKeys.get(key) ?? 0) >= 4) {
       log.push("Stopped: agent repeated the same action without progress");
-      return { status: "failed", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
+      return { status: "failed", failure: failureFeedback("repeated_action"), trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
     }
   }
   log.push(`Stopped: step budget (${maxSteps}) exhausted`);
-  return { status: "failed", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
+  return { failure: failureFeedback("step_limit"), status: "failed", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
 }
 
 /**
@@ -581,7 +611,7 @@ export function distillHints({ domain, trace, extractedItems = [], existing = []
   for (const t of trace) {
     if (t.succeeded && t.action === "click") add(`Clicking "${t.target}" worked on ${domain}`);
     if (t.succeeded && t.action === "type" && !/password/i.test(t.target)) add(`Typing into "${t.target}" worked on ${domain}`);
-    if (!t.succeeded && t.action !== "needsHuman") add(`"${t.target}" was NOT found on ${domain} — look for a different label/element`);
+    if (!t.succeeded && t.failure?.code === "target_missing") add(`"${t.target}" was NOT found on ${domain} — look for a different label/element`);
   }
   if (extractedItems.length) add(`Listings were readable directly from the landing page on ${domain}`);
   if (trace.some((t: any) => /vault/i.test(t.summary))) add(`Vault credential login worked on ${domain}`);

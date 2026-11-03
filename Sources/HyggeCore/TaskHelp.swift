@@ -37,6 +37,18 @@ extension AgentTask {
     public var connectsExistingAccount: Bool { draftedPayload["setupMode"] == "connect" }
     public var needsChatHelp: Bool { status == .needsHuman || status == .failed }
 
+    /// Clear the outstanding request only after the server accepted this choice.
+    @discardableResult
+    public mutating func stopHelp(helpID: UUID) -> Bool {
+        guard needsChatHelp, help?.id == helpID else { return false }
+        status = .rejected
+        help = nil
+        pendingReply = nil
+        browserSessionID = nil
+        informationRequests = []
+        return true
+    }
+
     /// Supplying information continues the original authorization. It never
     /// grants approval for a new public, permanent, or destructive action.
     public mutating func prepareReply(helpID: UUID, answers: [String: String] = [:], approved: Bool = false) -> Bool {

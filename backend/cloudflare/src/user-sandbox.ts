@@ -1,4 +1,5 @@
-import { help, applyHelpReply, mobileTask, canResumeWithInboxCode } from "./task-help.ts";
+import { classifyBrowserFailure } from "./browser-failure.ts";
+import { help, applyHelpReply, mobileTask, canResumeWithInboxCode, reconcileEndedSession, rejectTaskHelp } from "./task-help.ts";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { json } from "./env.ts";
@@ -746,9 +747,14 @@ export class UserSandbox extends DurableObject<Env> {
 
   private async runInteractiveTaskInner(task: any, browser: BrowserRunBrowser) {
     try { return await this.runTask(task, browser); }
-    catch {
+    catch (error) {
       task.status = "failed";
-      task.help = help("recovery", "The connection to this site was interrupted. I'll check the current page before continuing.", [], "Check and continue");
+      task.failure = classifyBrowserFailure(error);
+      task.help = help("recovery", `${task.failure.userMessage} I can check where we left off in a new session, or you can stop here.`, [], "Open new session");
+      const sessionID = task.session_id;
+      task.session_id = null;
+      task.pending_action = null;
+      if (sessionID) await browser.closeSession(sessionID).catch(() => {});
       task.authorized_action = null; // uncertainty must never replay one-shot approval
       this.saveTask(task);
       return task;
@@ -874,6 +880,7 @@ export class UserSandbox extends DurableObject<Env> {
       existingSessionID: task.session_id ?? null,
       restoreState,
     });
+    task.failure = result.failure ?? null;
     task.help = result.help ?? (result.status === "failed"
       ? help("recovery", "I couldn't finish this step after trying another route. We can check the site before trying again.", [], "Try again") : null);
     task.pending_action = result.pendingAction ?? null;
@@ -1604,7 +1611,12 @@ export class UserSandbox extends DurableObject<Env> {
       }
       if (request.method === "GET" && parts.join("/") === "tasks") {
         const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks ORDER BY created_at")] as Row[];
-        return json({ tasks: rows.map((r) => { const t = JSON.parse(String(r.task)); return { ...t, mobile_task: mobileTask(t) }; }) });
+        return json({ tasks: rows.map((r) => {
+          const t = JSON.parse(String(r.task));
+          if (reconcileEndedSession(t, Boolean(t.session_id && browser.hasSession(t.session_id)),
+              this.activeMissions.has(t.id) || this.browserResumes.has(t.id))) this.saveTask(t);
+          return { ...t, mobile_task: mobileTask(t) };
+        }) });
       }
       if (request.method === "POST" && parts[0] === "tasks") {
         const task = this.loadTask(parts[1]);
@@ -1623,16 +1635,11 @@ export class UserSandbox extends DurableObject<Env> {
           return json({ error: "approval required: POST /tasks/{id}/approve" }, 403);
         }
         if (parts[2] === "reject") {
-          if (!["awaiting_approval", "needsHuman", "failed"].includes(task.status)) {
-            return json({ error: `cannot reject from ${task.status}` }, 409);
-          }
-          task.status = "rejected";
-          task.log.push("Rejected by user");
-          if (task.session_id) {
-            await browser.closeSession(task.session_id).catch(() => {});
-            task.session_id = null;
-          }
+          const sessionID = task.session_id;
+          const error = rejectTaskHelp(task, body.helpID);
+          if (error) return json({ error }, 409);
           this.saveTask(task);
+          if (sessionID) await browser.closeSession(sessionID).catch(() => {});
           return json(task);
         }
         if (parts[2] === "approve" || parts[2] === "run") {

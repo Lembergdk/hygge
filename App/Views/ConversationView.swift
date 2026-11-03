@@ -51,7 +51,7 @@ struct ConversationView: View {
                                             } else if task.status == .running || task.status == .approved {
                                                 ProgressView("I’m continuing…").padding(.leading, 33)
                                             } else {
-                                                Text(task.status == .succeeded ? "Done — this step is finished." : task.status == .rejected ? "Not continued." : "Answered.")
+                                                Text(task.status == .succeeded ? "Done — this step is finished." : task.status == .rejected ? "Not continued." : task.needsChatHelp ? "There’s an updated request below." : "Answered.")
                                                     .font(.caption).foregroundStyle(HyggeTheme.secondary).padding(.leading, 33)
                                             }
                                         }
@@ -302,12 +302,10 @@ struct ConversationView: View {
                     }.buttonStyle(SettingsActionStyle(filled: false))
                     if let mailError { Text(mailError).font(.footnote) }
                 }
-                if help.kind == .approval {
-                    Button("Don't do this") {
-                        Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id) }
-                    }.buttonStyle(SettingsActionStyle(filled: false))
-                }
             }
+            Button(help.kind == .approval ? "Don't do this" : "Stop this task") {
+                Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id) }
+            }.buttonStyle(SettingsActionStyle(filled: false))
         }
         .foregroundStyle(HyggeTheme.ink)
         .padding(16).hyggeCard(radius: 20).padding(.leading, 33)

@@ -92,3 +92,35 @@ export function canResumeWithInboxCode(task: any): boolean {
   return task.interaction_version === 1 && task.status === "needsHuman" && task.help?.kind === "verification"
     && task.checkpoint === "two-factor check" && task.email_code_available === true && task.scheduled_scan !== true;
 }
+
+/** Expiration invalidates page-bound consent and replaces the dead checkpoint once. */
+export function reconcileEndedSession(task: any, sessionAvailable: boolean, active: boolean): boolean {
+  if (active || sessionAvailable || !task.session_id || task.interaction_version !== 1
+      || !["needsHuman", "failed", "running"].includes(task.status)) return false;
+  task.session_id = null;
+  task.status = "needsHuman";
+  task.pending_action = null;
+  task.authorized_action = null;
+  task.checkpoint = null;
+  task.information_requests = [];
+  task.failure = { code: "session_ended" };
+  task.help = help("recovery", "This browser session ended before we finished. I can open a new session and check where we left off, or you can stop here.", [], "Open new session");
+  return true;
+}
+
+/** Synchronous transition: persist this before awaiting browser cleanup. */
+export function rejectTaskHelp(task: any, helpID?: string): string | null {
+  if (task.status === "rejected") return null;
+  if (helpID && String(task.help?.id).toLowerCase() !== String(helpID).toLowerCase()) return "This request has changed. Refresh the conversation.";
+  if (!["awaiting_approval", "needsHuman", "failed"].includes(task.status)) return "This task is no longer waiting for a choice.";
+  task.status = "rejected";
+  task.session_id = null;
+  task.help = null;
+  task.pending_action = null;
+  task.authorized_action = null;
+  task.checkpoint = null;
+  task.information_requests = [];
+  task.log ??= [];
+  task.log.push("Stopped by user");
+  return null;
+}
