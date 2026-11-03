@@ -288,12 +288,12 @@ struct ConversationView: View {
                             siteName: store.siteName(id: task.siteID), domain: task.domain, taskID: task.id)
                     case .verification:
                         if task.kind == .bookCalendar {
-                            Task { await store.replyToTask(taskID: task.id, helpID: help.id) }
+                            Task { await store.replyToTask(taskID: task.id, helpID: help.id, choiceLabel: help.actionLabel) }
                         } else { takeBrowserControl = true; browserTask = task }
                     case .approval:
                         Task { await store.replyToTask(taskID: task.id, helpID: help.id, approved: true) }
                     case .recovery:
-                        Task { await store.replyToTask(taskID: task.id, helpID: help.id) }
+                        Task { await store.replyToTask(taskID: task.id, helpID: help.id, choiceLabel: help.actionLabel) }
                     case .information: break
                     }
                 }.buttonStyle(SettingsActionStyle())
@@ -314,7 +314,8 @@ struct ConversationView: View {
                 }
             }
             Button(help.kind == .approval ? "Don't do this" : "Stop this task") {
-                Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id) }
+                let label = help.kind == .approval ? "Don't do this" : "Stop this task"
+                Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id, choiceLabel: label) }
             }.buttonStyle(SettingsActionStyle(filled: false))
         }
         .foregroundStyle(HyggeTheme.ink)
@@ -410,6 +411,7 @@ struct ConversationView: View {
             HStack(spacing: 9) {
                 Button("Yes, do it") {
                     pendingAction = nil
+                    store.appendChat(fromAgent: false, text: "Yes, do it")
                     Task {
                         let replyText = await store.performChatAction(action)
                         store.appendChat(fromAgent: true, text: replyText)
@@ -420,6 +422,7 @@ struct ConversationView: View {
                 .background(HyggeTheme.ember, in: Capsule()).foregroundStyle(.white)
                 Button("Not now") {
                     pendingAction = nil
+                    store.appendChat(fromAgent: false, text: "Not now")
                     store.appendChat(fromAgent: true, text: "Okay — nothing changed.")
                 }
                 .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)

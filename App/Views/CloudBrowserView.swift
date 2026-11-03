@@ -135,10 +135,10 @@ struct CloudBrowserView: View {
                     if let task, task.needsChatHelp, let help = task.help, help.kind == .recovery {
                         Text(help.message).multilineTextAlignment(.center)
                         Button(help.actionLabel) {
-                            Task { await store.replyToTask(taskID: task.id, helpID: help.id) }
+                            Task { await store.replyToTask(taskID: task.id, helpID: help.id, choiceLabel: help.actionLabel) }
                         }.buttonStyle(SettingsActionStyle())
                         Button("Stop this task") {
-                            Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id); openChat() }
+                            Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id, choiceLabel: "Stop this task"); openChat() }
                         }.buttonStyle(SettingsActionStyle(filled: false))
                     } else {
                         Text(task?.status == .succeeded || task?.status == .rejected ? "This session has finished." : "Connecting to \(title)…")

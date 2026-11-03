@@ -600,6 +600,8 @@ final class AppStore {
         guard saved, let taskID = request.taskID,
               let index = tasks.firstIndex(where: { $0.id == taskID }) else { save(); return }
         attachCredential(&tasks[index])
+        // The thread shows the choice, never the login itself.
+        appendChat(fromAgent: false, text: "I've added my \(request.siteName) login.")
         save()
         if isPaused {
             lastMessage = "Saved for later — Hygge is paused, so joining \(request.siteName) will wait until you resume."
@@ -698,11 +700,18 @@ final class AppStore {
             text: "\(siteName(id: tasks[index].siteID)): \(help.message)" + (help.questions.first.map { "\n\n" + $0.text } ?? ""), taskID: taskID, helpID: help.id))
     }
 
-    func replyToTask(taskID: UUID, helpID: UUID, answers: [String: String] = [:], approved: Bool = false) async {
+    /// Answer a chat help request. Whatever the user tapped or typed
+    /// is consolidated into the thread as their own message — typed
+    /// answers verbatim, approvals as a fixed line, and button-only
+    /// replies (retry, check-and-continue) as the button's label —
+    /// so the history never reads as Hygge talking to itself.
+    func replyToTask(taskID: UUID, helpID: UUID, answers: [String: String] = [:], approved: Bool = false,
+                     choiceLabel: String? = nil) async {
         guard let original = tasks.first(where: { $0.id == taskID }), original.help?.id == helpID else { return }
         if original.help?.kind == .recovery,
            let remote = try? await backend.setupTasks(),
            let current = remote.first(where: { $0.id == taskID }), current.help?.id != helpID {
+            if let choiceLabel { appendChat(fromAgent: false, text: choiceLabel) }
             if let index = tasks.firstIndex(where: { $0.id == taskID }) { tasks[index] = current }
             surfaceTaskHelp(taskID: taskID)
             if current.status == .succeeded {
@@ -720,11 +729,13 @@ final class AppStore {
             appendChat(fromAgent: false, text: answers.keys.sorted().compactMap { answers[$0] }.joined(separator: "\n"))
         } else if approved {
             appendChat(fromAgent: false, text: "Approve and continue.")
+        } else if let choiceLabel {
+            appendChat(fromAgent: false, text: choiceLabel)
         }
         await approveAndRun(taskID: taskID)
     }
 
-    func declineTaskHelp(taskID: UUID, helpID: UUID) async {
+    func declineTaskHelp(taskID: UUID, helpID: UUID, choiceLabel: String? = nil) async {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].help?.id == helpID else { return }
         if let id = tasks[index].backendTaskID {
             do { try await backend.rejectTask(id: id, helpID: helpID) }
@@ -732,6 +743,9 @@ final class AppStore {
         }
         guard let current = tasks.firstIndex(where: { $0.id == taskID }),
               tasks[current].stopHelp(helpID: helpID) else { return }
+        // Recorded only once the stop really saved, so the thread
+        // never shows the user stopping something that still runs.
+        if let choiceLabel { appendChat(fromAgent: false, text: choiceLabel) }
         appendChat(fromAgent: true, text: "Okay — I won't continue that step.")
         save()
     }
@@ -769,6 +783,7 @@ final class AppStore {
             tasks[index].pendingReply = nil
         }
         conversationTaskID = taskID
+        appendChat(fromAgent: false, text: "Done — over to you.")
         appendChat(fromAgent: true, text: "Thanks — I’ll check your changes and carry on.")
     }
 
