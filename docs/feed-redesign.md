@@ -1,6 +1,8 @@
-# Compact home feed
+# Visual home feed
 
-Home shows a short title and useful secondary line for site suggestions, real opportunities, pending reviews, chat requests and witnessed activity. Cards open scrollable detail sheets; live browser cards retain the shared live stream.
+Home tells different stories through different card compositions. Invitations use a site icon and a small setup journey, opportunities have a category illustration header and pay/location, reviews show a portrait or action icon and an approval label, questions use a coral chat cue, earnings feature the bundled wallet and actual amount, and completions use a sage seal. Routine updates stay smaller. Live browser cards retain the shared live stream.
+
+Tapping a detail-bearing card moves it into the foreground with matched geometry over a dimmed feed. Its details scroll inside the floating card. Back to feed, tapping the backdrop, dragging down on the top bar, and accessibility escape return to the same feed position. Chat questions open the relevant chat; profile and chat retain their existing sheets.
 
 - Tap: open details, review, browser or the relevant chat.
 - Short swipe right: expose the named primary action. Tap it to continue.
@@ -9,7 +11,7 @@ Home shows a short title and useful secondary line for site suggestions, real op
 - Another card's swipe closes the previously exposed action. Vertical pans remain feed scrolling.
 - VoiceOver offers equivalent named actions. Reduce Motion removes rotation and spring travel.
 
-The collapsed surface has no primary/secondary action buttons or dismissal X. Review sheets carry the actual draft and explicit Send/Publish/Add to calendar action. A swipe never approves those actions. Setup and preparing an application retain the existing authorization and backend gates.
+The collapsed surface has no primary/secondary action buttons or dismissal X. Foreground reviews carry the actual draft and explicit Send/Publish/Add to calendar action. A swipe never approves those actions. Setup and preparing an application retain the existing authorization and backend gates.
 
 Dismissing a site or opportunity uses its existing persisted status and offers Undo. Dismissing task/help/activity cards archives their presentation to Earlier on this device. It does not cancel work, reject an approval, mark a question answered or change the agent's authorization. A new task status/help request gets a new presentation key and resurfaces. The account cache retains archive IDs across launch and clears them on account reset; they are not sent as backend state.
 
@@ -18,6 +20,8 @@ Artwork uses bundled Hygge assets and SF Symbols. The production site/listing mo
 ## Local preview
 
 Debug only: launch with `--settings-preview --feed-preview`. This seeds the production views with isolated local fixtures and uses the existing preview storage and disabled production networking. It is not present in release routing.
+
+Add `--browser-preview` with the existing loopback browser fixture for a real local live stream. Add `--feed-catalog` to render `Documents/feed-object-overview.png` from production SwiftUI components. The catalog covers 24 states: site suggestion, opportunity, live work, profile/application/message/calendar reviews, question/verification/login/recovery help, public-action chat review, earnings, account/profile completion, application/message/calendar outcomes, search, site learning, filed mail, permission reminder, pause, and caught-up state. Its data is illustrative and never uploaded.
 
 ## Validation
 
