@@ -721,24 +721,27 @@ export class UserSandbox extends DurableObject<Env> {
     if (task.help?.kind === "approval") throw new Error("Review this action in chat before continuing.");
     if (["succeeded", "rejected", "failed"].includes(task.status)) throw new Error("Return to chat to review this task.");
     if (this.browserResumes.has(task.id)) return;
-    this.browserResumes.add(task.id);
     const previous = this.activeMissions.get(task.id);
-    return () => this.ctx.waitUntil((async () => {
-      // Called only after control release; wait out any stale model decision.
-      await previous;
-      const current = this.loadTask(task.id);
-      if (!current || current.session_id !== sessionID || current.help?.kind === "approval"
-          || !["needsHuman", "running", "approved"].includes(current.status)) return;
-      if (this.browser().controlState(sessionID)?.human) return;
-      current.help = null;
-      current.pending_action = null;
-      current.authorized_action = null;
-      current.information_requests = [];
-      current.status = "running";
-      current.log.push("User handed back the browser; inspect the current page before continuing.");
-      this.saveTask(current);
-      await this.runInteractiveTask(current, this.browser());
-    })().finally(() => this.browserResumes.delete(task.id)));
+    return () => {
+      if (this.browserResumes.has(task.id)) return;
+      this.browserResumes.add(task.id);
+      this.ctx.waitUntil((async () => {
+        // Called only after control release; wait out any stale model decision.
+        await previous;
+        const current = this.loadTask(task.id);
+        if (!current || current.session_id !== sessionID || current.help?.kind === "approval"
+            || !["needsHuman", "running", "approved"].includes(current.status)) return;
+        if (this.browser().controlState(sessionID)?.human) return;
+        current.help = null;
+        current.pending_action = null;
+        current.authorized_action = null;
+        current.information_requests = [];
+        current.status = "running";
+        current.log.push("User handed back the browser; inspect the current page before continuing.");
+        this.saveTask(current);
+        await this.runInteractiveTask(current, this.browser());
+      })().finally(() => this.browserResumes.delete(task.id)));
+    };
   }
 
   private async runInteractiveTaskInner(task: any, browser: BrowserRunBrowser) {
@@ -921,7 +924,9 @@ export class UserSandbox extends DurableObject<Env> {
     // resumes in the same session. Never close it under them.
     if (browser.controlState(result.sessionID)?.human) {
       task.status = "needsHuman";
-      task.help = help("verification", "You’re in control. Let me know when I can continue.", [], "Continue in browser");
+      if (task.help?.kind !== "approval") {
+        task.help = help("verification", "You’re in control. Let me know when I can continue.", [], "Continue in browser");
+      }
     } else if (result.status !== "needs_human" && result.status !== "needs_info") {
       await browser.closeSession(result.sessionID).catch(() => {});
       task.session_id = null;
