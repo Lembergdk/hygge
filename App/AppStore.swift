@@ -23,6 +23,7 @@ struct StoreSnapshot: Codable {
     var profilePhotoNeedsUpload = false
     var profilePhotoIsLegacy = false
     var pendingProfileEdit: Bool = false
+    var archivedFeedIDs: Set<String> = []
     var hasOnboarded: Bool
     var sites: [TargetSite]
     var siteMemory: SiteMemoryRepository
@@ -50,6 +51,7 @@ struct StoreSnapshot: Codable {
         profilePhotoNeedsUpload = try c.decodeIfPresent(Bool.self, forKey: .profilePhotoNeedsUpload) ?? (profilePhotoData != nil)
         profilePhotoIsLegacy = try c.decodeIfPresent(Bool.self, forKey: .profilePhotoIsLegacy) ?? (profilePhotoData != nil)
         pendingProfileEdit = try c.decodeIfPresent(Bool.self, forKey: .pendingProfileEdit) ?? false
+        archivedFeedIDs = try c.decodeIfPresent(Set<String>.self, forKey: .archivedFeedIDs) ?? []
         hasOnboarded = try c.decodeIfPresent(Bool.self, forKey: .hasOnboarded) ?? false
         sites = try c.decodeIfPresent([TargetSite].self, forKey: .sites) ?? SeedSites.all
         siteMemory = try c.decodeIfPresent(SiteMemoryRepository.self, forKey: .siteMemory) ?? SiteMemoryRepository()
@@ -73,6 +75,7 @@ struct StoreSnapshot: Codable {
 @MainActor
 @Observable
 final class AppStore {
+    var archivedFeedIDs: Set<String> = []
     var profile = EarningsProfile()
     // Server-owned photo with an offline cache and durable pending upload.
     var profilePhotoData: Data?
@@ -412,6 +415,11 @@ final class AppStore {
         notificationPrimerVisible = false
     }
 
+    func undoNotificationDismissal() {
+        UserDefaults.standard.set(false, forKey: Self.pushPrimerResolvedKey)
+        notificationPrimerVisible = true
+    }
+
     /// Drain delegate arrivals, keep registration in step with the
     /// current permission answer, and refresh the primer. Called at
     /// launch and on every foregrounding; all of it is idempotent.
@@ -610,8 +618,8 @@ final class AppStore {
         save()
     }
 
-    func undoSiteDismissal() {
-        guard let id = dismissedProposalID, let index = proposals.firstIndex(where: { $0.id == id }), proposals[index].status == .dismissed else { return }
+    func undoSiteDismissal(proposalID: UUID? = nil) {
+        guard let id = proposalID ?? dismissedProposalID, let index = proposals.firstIndex(where: { $0.id == id }), proposals[index].status == .dismissed else { return }
         proposals[index].status = .proposed
         dismissedProposalID = nil
         save()
@@ -1178,6 +1186,7 @@ final class AppStore {
     /// Fresh-install local state (demo content only). Shared by
     /// Start over and sign-out; callers decide how it is persisted.
     private func resetLocalState() {
+        archivedFeedIDs = []
         profile = EarningsProfile()
         profilePhotoData = nil
         profilePhotoNeedsUpload = false
@@ -1611,6 +1620,13 @@ final class AppStore {
         }
     }
 
+    /// Feed presentation is local to this account cache. Archiving a card never
+    /// cancels a task or answers a pending approval; it remains in Earlier.
+    func setFeedArchived(_ id: String, archived: Bool) {
+        if archived { archivedFeedIDs.insert(id) } else { archivedFeedIDs.remove(id) }
+        writeCache()
+    }
+
     func retryProfileSync() async { await pushStateNow() }
 
     // MARK: - Persistence
@@ -1637,6 +1653,7 @@ final class AppStore {
                                      opportunities: opportunities, tasks: tasks, applications: applications,
                                      proposals: proposals, accountStates: accountStates,
                                      chatTranscript: chatTranscript, activityEvents: activityEvents, isPaused: isPaused, lastVisitAt: lastVisitAt, beliefs: beliefs, searchEvidence: searchEvidence, feedbackEvents: feedbackEvents, learningProfile: learningProfile)
+        snapshot.archivedFeedIDs = archivedFeedIDs
         snapshot.profilePhotoData = profilePhotoData
         snapshot.profilePhotoNeedsUpload = profilePhotoNeedsUpload
         snapshot.profilePhotoIsLegacy = profilePhotoIsLegacy
@@ -1649,6 +1666,7 @@ final class AppStore {
     private func load() -> Bool {
         guard let url = storeURL, let data = try? Data(contentsOf: url),
               let snapshot = try? JSONDecoder().decode(StoreSnapshot.self, from: data) else { return false }
+        archivedFeedIDs = snapshot.archivedFeedIDs
         profile = snapshot.profile
         profilePhotoData = snapshot.profilePhotoData
         profilePhotoNeedsUpload = snapshot.profilePhotoNeedsUpload
