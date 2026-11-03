@@ -123,6 +123,7 @@ struct FloatingFlame: View {
     var state: FlameState
     var dimmed: Bool = false
     var traveling = false
+    var browsing = false
     var onTap: () -> Void
     var onLongPress: (() -> Void)? = nil
     var onDragBegan: (() -> Void)? = nil
@@ -138,16 +139,16 @@ struct FloatingFlame: View {
     /// Drop him by that slack so his *feet* sit near the feed's edge.
     private var feetDrop: CGFloat { size * 1.25 * 0.165 + 6 }
 
-    private var isWorking: Bool { if case .working = state { return true }; return false }
     private var needsYou: Bool { if case .needsYou = state { return true }; return false }
 
     var body: some View {
         // The flame is a character, not a button in a disc (mocks):
-        // big, sticker-like, soft shadow only — now a layered rig with
-        // moving limbs and faces; the laptop clip still covers "working".
+        // big, sticker-like, soft shadow only — a layered rig with
+        // moving limbs and faces; a live browser session brings out
+        // the rig's own laptop and he types on it.
         FlameActor(size: size,
-                   clipOverride: isWorking ? .laptop : nil,
                    attention: needsYou,
+                   browsing: browsing,
                    movable: onDragEnded != nil,
                    traveling: traveling,
                    onTap: onTap,

@@ -9,6 +9,9 @@ struct FlameActor: View {
     var size: CGFloat
     var clipOverride: FlameAnimation? = nil
     var attention = false
+    /// A live browser session: the laptop comes out, typing replaces
+    /// every idle behavior, and gestures play with the laptop up.
+    var browsing = false
     var interactive = true
     var movable = false
     var traveling = false
@@ -28,6 +31,8 @@ struct FlameActor: View {
     @State private var pose = FlamePose.rest
     @State private var breathing = false
     @State private var walkCycle = false
+    @State private var laptopOn = false
+    @State private var typingTap: Int = 0
     @State private var pinchScale: CGFloat = 1
     @GestureState private var dragTranslation: CGSize = .zero
     @State private var isDragging = false
@@ -85,7 +90,8 @@ struct FlameActor: View {
     var body: some View {
         RiggedFlame(pose: pose, size: size,
                     walking: walkCycle && !reduceMotion,
-                    clipOverride: clipOverride)
+                    clipOverride: clipOverride,
+                    laptop: laptopOn, typingTap: typingTap)
             .scaleEffect(x: breathing && !reduceMotion ? 0.995 : 1,
                          y: breathing && !reduceMotion ? 1.02 : 1, anchor: .bottom)
             .animation(.easeInOut(duration: 1.7).repeatForever(autoreverses: true),
@@ -100,7 +106,17 @@ struct FlameActor: View {
             .simultaneousGesture(pinchGesture, including: interactive ? .gesture : .none)
             .simultaneousGesture(longPressGesture,
                                  including: interactive ? .gesture : .none)
-            .onAppear { breathing = true; updateMotion() }
+            .onAppear {
+                breathing = true
+                var instant = Transaction()
+                instant.disablesAnimations = true
+                withTransaction(instant) { laptopOn = browsing }
+                updateMotion()
+            }
+            .onChange(of: browsing) { _, now in
+                laptopOn = now
+                if !now { typingTap = 0 }
+            }
             .onDisappear {
                 motion.stop(); reactionTask?.cancel(); pendingTapTask?.cancel()
                 travelTask?.cancel()
@@ -125,12 +141,14 @@ struct FlameActor: View {
             .onChange(of: preview) { _, request in
                 if let request { perform(request.reaction, direction: 1, intensity: 1) }
             }
-            .task(id: idleLoopActive) { await runIdleLoop() }
+            .task(id: IdleKey(active: idleLoopActive, browsing: browsing)) { await runIdleLoop() }
     }
 
     private var idleLoopActive: Bool {
         settings.idleEnabled && !reduceMotion && scenePhase == .active
     }
+
+    private struct IdleKey: Equatable { var active: Bool; var browsing: Bool }
 
     private var dragVisualOffset: CGSize {
         switch dragPhase {
@@ -754,10 +772,43 @@ struct FlameActor: View {
 
     // MARK: - Idle life
 
+    /// The laptop clip, recreated on the rig: seated bob, eyes scanning
+    /// lines on the unseen screen, stick arms tapping alternately every
+    /// quarter second (the clip tapped every 6 frames at 24fps), then a
+    /// glance up before the next round.
+    private func runTyping() async {
+        let scan = size * 0.020
+        for i in 0..<10 where !Task.isCancelled {
+            typingTap = i.isMultiple(of: 2) ? -1 : 1
+            let sweep = -scan + 2 * scan * Double(i) / 9
+            await pose(.easeInOut(duration: 0.22), hold: 0.25) { p in
+                p.dy = i.isMultiple(of: 2) ? 0 : -1.5
+                p.faceDX = sweep
+                p.faceDY = size * 0.011
+            }
+        }
+        typingTap = 0
+        await pose(.easeOut(duration: 0.25), hold: 0.5) { p in
+            p.face = .happy
+        }
+    }
+
     private func runIdleLoop() async {
-        try? await Task.sleep(for: .seconds(2.5))
+        try? await Task.sleep(for: .seconds(browsing ? 0.6 : 2.5))
         var pointNext = false
         while !Task.isCancelled {
+            if browsing {
+                // A live session overrides all idle life: he types.
+                guard !Task.isCancelled, reactionTask == nil, !isDragging,
+                      Date().timeIntervalSince(lastInteraction) > 0.8 else {
+                    try? await Task.sleep(for: .seconds(0.3))
+                    continue
+                }
+                await runTyping()
+                if !Task.isCancelled { await rest() }
+                try? await Task.sleep(for: .seconds(0.5))
+                continue
+            }
             let step = idlePlanner.next()
             let wait = settings.idleInterval * step.delayFactor / max(0.5, settings.liveliness)
             try? await Task.sleep(for: .seconds(wait))

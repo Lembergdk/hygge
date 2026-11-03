@@ -44,7 +44,8 @@ struct HomeFeedView: View {
                 // He lives where he was dropped (placement persists in the
                 // flame settings); nil placement is his bottom-right home.
                 FloatingFlame(state: flameState, dimmed: flameDimmed,
-                              traveling: flameTraveling) {
+                              traveling: flameTraveling,
+                              browsing: store.hasActiveBrowserSession) {
                     flameTapped()
                 }
                 onDragBegan: { dragStartCenter = flameWindowCenter() }

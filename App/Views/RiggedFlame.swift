@@ -25,6 +25,7 @@ struct FlamePose: Equatable {
     var legSR: Double = 0
     var face: FlameFaceKind = .normal
     var faceDX: CGFloat = 0
+    var faceDY: CGFloat = 0
     var sickTint: Double = 0
     var backTurned = false
 
@@ -39,6 +40,11 @@ struct RiggedFlame: View {
     var size: CGFloat
     var walking = false
     var clipOverride: FlameAnimation? = nil
+    /// Laptop prop in front of him (browser session live): typing arms
+    /// replace the hanging arms, tips hidden behind the lid like the
+    /// original clip. typingTap: -1 screen-left arm down, 1 right, 0 up.
+    var laptop = false
+    var typingTap: Int = 0
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -113,16 +119,38 @@ struct RiggedFlame: View {
                             .opacity(pose.sickTint)
                     }
                 }
-            layer("FlameRigArmScreenLeft")
-                .rotationEffect(.degrees(pose.armSL - swing * 16),
-                                anchor: UnitPoint(x: 0.254, y: 0.559))
-            layer("FlameRigArmScreenRight")
-                .rotationEffect(.degrees(pose.armSR + swing * 16),
-                                anchor: UnitPoint(x: 0.728, y: 0.559))
+            // Conditional layers, not opacities: the actor's breathing
+            // animation is repeatForever over this subtree and would
+            // capture an opacity change into an endless fade in/out.
+            if laptop {
+                layer("FlameRigTypingArmScreenLeft")
+                    .rotationEffect(.degrees(pose.armSL + (typingTap < 0 ? -5 : 0)),
+                                    anchor: UnitPoint(x: 0.226, y: 0.538))
+                    .zIndex(2)
+                layer("FlameRigTypingArmScreenRight")
+                    .rotationEffect(.degrees(pose.armSR + (typingTap > 0 ? 5 : 0)),
+                                    anchor: UnitPoint(x: 0.771, y: 0.538))
+                    .zIndex(2)
+            } else {
+                layer("FlameRigArmScreenLeft")
+                    .rotationEffect(.degrees(pose.armSL - swing * 16),
+                                    anchor: UnitPoint(x: 0.254, y: 0.559))
+                    .zIndex(2)
+                layer("FlameRigArmScreenRight")
+                    .rotationEffect(.degrees(pose.armSR + swing * 16),
+                                    anchor: UnitPoint(x: 0.728, y: 0.559))
+                    .zIndex(2)
+            }
             if !pose.backTurned {
                 layer(pose.face.asset)
-                    .offset(x: pose.faceDX)
+                    .offset(x: pose.faceDX, y: pose.faceDY)
                     .transition(.opacity)
+                    // Under the lid when it's up, so his cheeks are cut
+                    // by its top edge like the original clip.
+                    .zIndex(laptop ? 3 : 5)
+            }
+            if laptop {
+                layer("FlameRigLaptop").zIndex(4)
             }
         }
         .offset(x: pose.dx, y: pose.dy + bob)
