@@ -80,6 +80,7 @@ export function detectCheckpoint(snapshot: Snapshot): string | null {
     snapshot.title ?? "",
     snapshot.currentURLString ?? "",
     ...(snapshot.elements ?? []).map((e) => e.label),
+    ...(snapshot.notices ?? []),
   ].join("\n");
   for (const { pattern, why } of CHECKPOINT_PATTERNS) {
     if (pattern.test(haystack)) return why;

@@ -715,13 +715,13 @@ final class AppStore {
     func declineTaskHelp(taskID: UUID, helpID: UUID) async {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].help?.id == helpID else { return }
         if let id = tasks[index].backendTaskID {
-            do { try await backend.rejectTask(id: id) }
+            do { try await backend.rejectTask(id: id, helpID: helpID) }
             catch { appendChat(fromAgent: true, text: "I couldn't save that choice. Please try again."); return }
         }
-        guard let current = tasks.firstIndex(where: { $0.id == taskID }) else { return }
-        tasks[current].status = .rejected
-        tasks[current].help = nil
+        guard let current = tasks.firstIndex(where: { $0.id == taskID }),
+              tasks[current].stopHelp(helpID: helpID) else { return }
         appendChat(fromAgent: true, text: "Okay — I won't continue that step.")
+        save()
     }
 
     @ObservationIgnored private var browserResumeIDs: Set<UUID> = []

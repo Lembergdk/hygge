@@ -43,6 +43,13 @@ jobs:
       - run: npm ci
       - run: ./node_modules/.bin/tsc --noEmit
       - run: npm test
+      - name: Bundle Worker without deploying
+        run: npx wrangler deploy --dry-run -c wrangler.staging.jsonc --outdir /tmp/hygge-browser-test-bundle
+      - name: Browser capabilities in isolated Chrome
+        run: npm run test:browser
+        env:
+          BROWSER_TEST_EXECUTABLE: /usr/bin/google-chrome
+          BROWSER_TEST_BUNDLE: /tmp/hygge-browser-test-bundle/index.js
 
   deploy-staging:
     needs: [core-tests, backend-tests]

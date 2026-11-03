@@ -32,6 +32,23 @@ final class TaskHelpTests: XCTestCase {
         task.status = .running
         XCTAssertFalse(task.prepareReply(helpID: request.id, approved: true))
     }
+    func testStoppingClearsBadgeAndSurvivesReloadWithoutAcceptingStaleHelp() throws {
+        var task = task()
+        let request = TaskHelp(kind: .recovery, message: "Session ended")
+        task.help = request
+        task.browserSessionID = "expired"
+        task.pendingReply = TaskReply(helpID: request.id)
+        XCTAssertFalse(task.stopHelp(helpID: UUID()))
+        XCTAssertTrue(task.needsChatHelp)
+        XCTAssertTrue(task.stopHelp(helpID: request.id))
+        let restored = try JSONDecoder().decode(AgentTask.self, from: JSONEncoder().encode(task))
+        XCTAssertEqual(restored.status, .rejected)
+        XCTAssertFalse(restored.needsChatHelp)
+        XCTAssertNil(restored.help)
+        XCTAssertNil(restored.pendingReply)
+        XCTAssertNil(restored.browserSessionID)
+        XCTAssertFalse(task.prepareReply(helpID: request.id))
+    }
     func testOldCachesStillDecodeAndHelpLinksSurviveRoundTrip() throws {
         var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(task())) as! [String: Any]
         for key in ["help", "pendingReply", "backendTaskID"] { object.removeValue(forKey: key) }

@@ -130,7 +130,7 @@ test("model receives only photo availability and observed file labels", async ()
   await decider.decide({ hasProfilePhoto: true, snapshot: snap(), history: [], tierContext: {},
     photoBytes: "private-image-bytes", photoURL: "private-url" });
   assert.equal(JSON.parse(prompt).hasProfilePhoto, true);
-  assert.deepEqual(JSON.parse(prompt).page.fileInputs, ["Profile photo"]);
+  assert.deepEqual(JSON.parse(prompt).page.fileInputs, [{ label: "Profile photo", kind: "type", inputType: "file" }]);
   assert.ok(!prompt.includes("private-image-bytes"));
   assert.ok(!prompt.includes("private-url"));
 });

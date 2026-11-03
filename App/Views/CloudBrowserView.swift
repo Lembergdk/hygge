@@ -22,7 +22,7 @@ struct BrowserLiveViewport: View {
                 VStack(spacing: 12) {
                     if session.isRecovering { ProgressView().tint(HyggeTheme.sageDeep) }
                     Text(session.status).font(.subheadline.weight(.medium))
-                    if session.ended { Text("Return to chat to continue.").font(.caption) }
+                    if session.ended { Text("This session is no longer available.").font(.caption) }
                     else if session.requiresSignIn { Text("Sign in to Hygge again.").font(.caption) }
                     else if session.retryStopped {
                         if showsRecoveryActions {
@@ -73,7 +73,7 @@ struct CloudBrowserView: View {
     @State private var fullscreen = false
     @State private var autoControlAttempted = false
     private var task: AgentTask? { store.tasks.first { $0.id == taskID } }
-    private var sessionID: String? { task?.browserSessionID ?? existingSessionID }
+    private var sessionID: String? { if let task { return task.browserSessionID }; return existingSessionID }
     private var title: String { task.map { store.siteName(id: $0.siteID) } ?? URL(string: urlString)?.host ?? "Browser" }
 
     var body: some View {
@@ -131,8 +131,18 @@ struct CloudBrowserView: View {
             } else {
                 VStack(spacing: 16) {
                     AnimatedFlame(animation: task?.needsChatHelp == true ? .notify : .laptop, size: 68)
-                    Text(task?.status == .succeeded ? "This session has finished." : "Connecting to \(title)…")
-                    Button("Back to chat") { openChat() }.buttonStyle(SettingsActionStyle())
+                    if let task, task.needsChatHelp, let help = task.help, help.kind == .recovery {
+                        Text(help.message).multilineTextAlignment(.center)
+                        Button(help.actionLabel) {
+                            Task { await store.replyToTask(taskID: task.id, helpID: help.id) }
+                        }.buttonStyle(SettingsActionStyle())
+                        Button("Stop this task") {
+                            Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id); openChat() }
+                        }.buttonStyle(SettingsActionStyle(filled: false))
+                    } else {
+                        Text(task?.status == .succeeded || task?.status == .rejected ? "This session has finished." : "Connecting to \(title)…")
+                    }
+                    Button("Back to chat") { openChat() }.buttonStyle(SettingsActionStyle(filled: false))
                 }.padding(24)
             }
         }

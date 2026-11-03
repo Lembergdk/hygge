@@ -112,7 +112,7 @@ final class LiveBrowserSession {
                     normallyClosed: ws.closeCode == .normalClosure) {
                 case .ended:
                     self.ended = true
-                    self.problem = "This browser session has ended. Return to chat to continue."
+                    self.problem = "This browser session has ended."
                     return
                 case .signInRequired:
                     self.requiresSignIn = true
@@ -166,7 +166,7 @@ final class LiveBrowserSession {
             if let id = value["requestID"] as? String { replies.removeValue(forKey: id)?.resume(throwing: URLError(.cannotLoadFromNetwork)) }
         case "ended":
             ended = true; connected = false; ownsControl = false; keyboardVisible = false
-            problem = "This browser session has ended. Return to chat to continue."
+            problem = "This browser session has ended."
             socket?.cancel(with: .normalClosure, reason: nil)
         default: break
         }
