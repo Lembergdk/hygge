@@ -8,6 +8,8 @@ final class PushNotificationsTests: XCTestCase {
     func testPushRouteParsing() {
         XCTAssertEqual(PushDeepLink.parse(route: "task/\(taskID.uuidString.lowercased())"), .task(taskID))
         XCTAssertEqual(PushDeepLink.parse(route: "feed/\(feedID.uuidString.lowercased())"), .feedItem(feedID))
+        XCTAssertEqual(PushDeepLink.parse(route: "email/\(feedID.uuidString.lowercased())"), .email(feedID))
+        XCTAssertEqual(PushDeepLink.parse(route: "email/not-a-uuid"), .home)
         XCTAssertEqual(PushDeepLink.parse(route: "home"), .home)
         XCTAssertEqual(PushDeepLink.parse(route: nil), .home)
         XCTAssertEqual(PushDeepLink.parse(route: ""), .home)
@@ -26,6 +28,8 @@ final class PushNotificationsTests: XCTestCase {
         XCTAssertEqual(PushDeepLink.parse(kind: "needs_you", ref: taskID.uuidString.lowercased(), refKind: nil),
                        .home)
         XCTAssertEqual(PushDeepLink.parse(kind: "new_work", ref: nil, refKind: nil), .home)
+        XCTAssertEqual(PushDeepLink.parse(kind: "message_waiting", ref: feedID.uuidString.lowercased(), refKind: nil),
+                       .email(feedID))
     }
 
     func testDeviceTokenHexEncoding() {

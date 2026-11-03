@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import {
   APNS_JWT_TTL_MS, ApnsJwtCache, MemoryPushDb, apnsConfigFromEnv, apnsHostFor,
   buildPushPayload, consecutiveFailures, handleDeviceTokenRequest, importApnsKey,
-  isBadTokenResult, needsHumanEvent, normalizeDeviceToken, notifyUser,
+  isBadTokenResult, messageWaitingEvent, needsHumanEvent, normalizeDeviceToken, notifyUser,
   pemToPkcs8, planTickNotifications, sendToToken, shouldNotifyNeedsHuman,
   signApnsJwt, type ApnsConfig, type PushFetch,
 } from "../src/push.ts";
@@ -109,20 +109,28 @@ test("APNs config: missing pieces mean unconfigured; host follows environment", 
 
 // ---- payload --------------------------------------------------------------
 
-test("payload is title + reference only, with no room for sensitive fields", () => {
-  const needs = buildPushPayload(needsHumanEvent("task-1"));
+test("payload is descriptive title + body + reference, still with no room for secrets", () => {
+  const needs = buildPushPayload(needsHumanEvent("task-1", "Rover: I need a detail to continue. Which dates are you free?"));
   assert.deepEqual(Object.keys(needs).sort(), ["aps", "hyggeKind", "hyggeRef", "hyggeRoute"]);
   assert.deepEqual(Object.keys(needs.aps).sort(), ["alert", "sound"]);
-  assert.equal(typeof needs.aps.alert, "string"); // title only: no body can exist
-  assert.equal(needs.aps.alert, "Hygge needs you");
+  assert.deepEqual(Object.keys(needs.aps.alert).sort(), ["body", "title"]);
+  assert.equal(needs.aps.alert.title, "Hygge"); // messages wear the sender's name
+  assert.equal(needs.aps.alert.body, "Rover: I need a detail to continue. Which dates are you free?");
   assert.equal(needs.hyggeRoute, "task/task-1");
-  const work = buildPushPayload({ kind: "new_work", refKind: "feed", refId: "item-1" });
-  assert.equal(work.aps.alert, "New work found");
-  assert.equal(work.hyggeRoute, "feed/item-1");
-  assert.equal(buildPushPayload({ kind: "new_work", refKind: "feed", refId: null }).hyggeRoute, "home");
-  for (const payload of [needs, work]) {
+  // A code-shaped run never rides a push, whatever the source text said.
+  const coded = buildPushPayload(needsHumanEvent("task-2", "Your code is 731904, enter it now"));
+  assert.equal(JSON.stringify(coded).includes("731904"), false);
+  // Long bodies truncate at a word boundary.
+  const long = buildPushPayload(needsHumanEvent("task-3", "x ".repeat(200)));
+  assert.ok(long.aps.alert.body.length <= 181 && long.aps.alert.body.endsWith("…"), long.aps.alert.body);
+  const mail = buildPushPayload(messageWaitingEvent("mail-1", { siteName: "Rover", subject: "New message from Alex" }));
+  assert.equal(mail.aps.alert.title, "Hygge");
+  assert.match(mail.aps.alert.body, /Rover emailed/);
+  assert.equal(mail.hyggeRoute, "email/mail-1");
+  assert.equal(buildPushPayload({ kind: "new_work", refKind: "feed", refId: null, title: "New work found", body: "Fresh work is waiting in your feed." }).hyggeRoute, "home");
+  for (const payload of [needs, mail]) {
     const serialized = JSON.stringify(payload).toLowerCase();
-    for (const banned of ["password", "secret", "code", "token", "credential", "body", "subject", "pay", "$", "£"]) {
+    for (const banned of ["password", "secret", "token", "credential"]) {
       assert.equal(serialized.includes(banned), false, `payload must not contain ${banned}: ${serialized}`);
     }
   }
@@ -141,11 +149,29 @@ test("needsHuman notifies only on a fresh, non-scan transition", () => {
 test("a scan tick plans at most one push; needs-you wins; paused/empty plan none", () => {
   assert.deepEqual(planTickNotifications({ paused: true, surfacedIds: ["s1"], needsYouItemIds: ["n1"] }), []);
   assert.deepEqual(planTickNotifications({ paused: false, surfacedIds: [], needsYouItemIds: [] }), []);
-  assert.deepEqual(planTickNotifications({ paused: false, surfacedIds: ["s1", "s2"], needsYouItemIds: [] }),
-    [{ kind: "new_work", refKind: "feed", refId: "s1" }]);
-  const both = planTickNotifications({ paused: false, surfacedIds: ["s1"], needsYouItemIds: ["n1", "n2"] });
+  // Descriptive feed push: the first listing named, the rest counted.
+  const work = planTickNotifications({
+    paused: false, surfacedIds: ["s1", "s2", "s3"], needsYouItemIds: [],
+    firstSurfaced: { siteName: "Rover", title: "Weekend dog sitting for Milo", payLabel: "£25/night", locationLabel: "Leeds", isRemote: false },
+  });
+  assert.equal(work.length, 1);
+  assert.equal(work[0].kind, "new_work");
+  assert.equal(work[0].refId, "s1");
+  assert.equal(work[0].title, "New work on Rover");
+  assert.equal(work[0].body, "Weekend dog sitting for Milo · £25/night · Leeds (+2 more)");
+  // Needs-you wins and names the site.
+  const both = planTickNotifications({
+    paused: false, surfacedIds: ["s1"], needsYouItemIds: ["n1", "n2"],
+    firstNeedsYou: { siteName: "Rover", title: "Your saved login for Rover needs you" },
+  });
   assert.equal(both.length, 1);
-  assert.deepEqual(both[0], { kind: "needs_you", refKind: "feed", refId: "n1" });
+  assert.equal(both[0].kind, "needs_you");
+  assert.equal(both[0].refId, "n1");
+  assert.equal(both[0].title, "Rover needs you");
+  assert.match(both[0].body, /saved login for Rover/);
+  // Without details the fallbacks stay calm and generic.
+  const plain = planTickNotifications({ paused: false, surfacedIds: ["s1"], needsYouItemIds: [] });
+  assert.equal(plain[0].title, "New work found");
 });
 
 // ---- token registration -------------------------------------------------------
@@ -275,7 +301,7 @@ test("BadDeviceToken deletes; other errors keep the token, counted once, no retr
   const { fetchFn, calls } = fakeFetch((url) =>
     url.endsWith(TOKEN_A) ? errResponse(400, "BadDeviceToken") : errResponse(500, "InternalServerError"));
   const result = await notifyUser(db, testConfig(pem), "user-1",
-    { kind: "new_work", refKind: "feed", refId: "item-1" }, { fetchFn, jwtCache: new ApnsJwtCache() });
+    { kind: "new_work", refKind: "feed", refId: "item-1", title: "New work found", body: "Fresh work is waiting in your feed." }, { fetchFn, jwtCache: new ApnsJwtCache() });
   assert.deepEqual(result, { outcome: "failed", attempted: 2, delivered: 0, removedTokens: 1 });
   assert.equal(calls.length, 2); // exactly one attempt per token
   assert.deepEqual((await db.listTokens("user-1")).map((t) => t.token), [TOKEN_B]);
@@ -340,14 +366,14 @@ test("suppression counts failed events, not fan-out attempts", async () => {
   }
   const failing = fakeFetch(() => errResponse(500, "InternalServerError"));
   const first = await notifyUser(db, testConfig(pem), "user-1",
-    { kind: "new_work", refKind: "feed", refId: "i" }, { fetchFn: failing.fetchFn, jwtCache: new ApnsJwtCache() });
+    { kind: "new_work", refKind: "feed", refId: "i", title: "New work found", body: "Fresh work is waiting in your feed." }, { fetchFn: failing.fetchFn, jwtCache: new ApnsJwtCache() });
   assert.equal(first.attempted, 6);
   assert.equal(first.delivered, 0);
   assert.equal(consecutiveFailures(await db.recentLog("user-1", 50)), 1,
     "six failed attempts in one event count once");
   const ok = fakeFetch(okResponse);
   const second = await notifyUser(db, testConfig(pem), "user-1",
-    { kind: "new_work", refKind: "feed", refId: "i2" }, { fetchFn: ok.fetchFn, jwtCache: new ApnsJwtCache() });
+    { kind: "new_work", refKind: "feed", refId: "i2", title: "New work found", body: "Fresh work is waiting in your feed." }, { fetchFn: ok.fetchFn, jwtCache: new ApnsJwtCache() });
   assert.equal(second.outcome, "sent");
 });
 
@@ -357,7 +383,7 @@ test("every attempt lands in push_log, success and failure alike", async () => {
   await db.upsertToken("user-1", TOKEN_B, "ios", AT);
   const { fetchFn } = fakeFetch((url) => (url.endsWith(TOKEN_A) ? okResponse() : errResponse(429, "TooManyRequests")));
   const result = await notifyUser(db, testConfig(pem), "user-1",
-    { kind: "new_work", refKind: "feed", refId: "i" }, { fetchFn, jwtCache: new ApnsJwtCache() });
+    { kind: "new_work", refKind: "feed", refId: "i", title: "New work found", body: "Fresh work is waiting in your feed." }, { fetchFn, jwtCache: new ApnsJwtCache() });
   assert.equal(result.outcome, "partial");
   assert.equal(db.log.length, 2);
   assert.deepEqual(db.log.map((r) => r.apnsStatus).sort(), ["429:TooManyRequests", "ok"]);

@@ -4,13 +4,20 @@ Transactional only. A push exists to keep one promise — "I'll tell
 you in the morning — sooner if something needs you" — and nothing
 else notifies. No marketing, no digests, no re-engagement, ever.
 
+Format (user's call, 2026-11-03, superseding the brief's
+title-only draft): messages from Hygge wear the sender's name
+(`Hygge`) with the actual message as the body; feed pushes name
+their content. Every tap opens the exact element that triggered
+it.
+
 ## Triggers (the complete list)
 
 | # | Server event | Where it fires | Push |
 |---|---|---|---|
-| 1 | A task freshly enters `needsHuman` (approval checkpoint, human-only check, or information request) | `UserSandbox.runTask` → `shouldNotifyNeedsHuman` | `needs_you`, deep link to the task |
-| 2 | A scheduled-scan tick surfaces new feed items | `POST /scheduled-scan/tick` → `planTickNotifications(summary)` | `new_work`, deep link to the first new item |
-| 2b | A scheduled-scan tick opens a needs-you episode (login failure / human check) | same tick hook | `needs_you`, deep link to the episode's feed item |
+| 1 | A task freshly enters `needsHuman` (approval checkpoint, human-only check, or information request) | `UserSandbox.runTask` → `shouldNotifyNeedsHuman` | `needs_you`, title `Hygge`, body = the chat card's own words, deep link to the task |
+| 2 | A scheduled-scan tick surfaces new feed items | `POST /scheduled-scan/tick` → `planTickNotifications(summary)` | `new_work`, title `New work on <site>`, body names the first listing (title · its own pay label · place) + count, deep link to that listing |
+| 2b | A scheduled-scan tick opens a needs-you episode (login failure / human check) | same tick hook | `needs_you`, title `<Site> needs you`, body = the episode card's title, deep link to the episode item |
+| 3 | Authenticated mail from a tracked (or work-ruled) sender mentions a client message | `UserSandbox.handleEmailInbound` → triage highlights | `message_waiting`, title `Hygge`, body `<Site> emailed: "<subject>"`, deep link to that filed mail; at most one per sender per day |
 
 Rules that bound both:
 
@@ -28,8 +35,11 @@ Rules that bound both:
   Brief 01 server-side pause flag first.
 - **No token, no send.** Denied permission means no token was ever
   registered, so there is nothing to attempt.
-- Filed mail (Brief 04), successes, proposals, and everything else
-  do **not** notify: the brief lists exactly the triggers above.
+- Other filed mail (Brief 04), successes, proposals, and
+  everything else do **not** notify: the triggers above are the
+  complete list. Trigger 3 needs an aligned sender-authentication
+  pass on top of the tracked/work-ruled sender, so forged mail
+  can never raise a push.
 
 ## Payload
 
@@ -37,26 +47,30 @@ The only shape `buildPushPayload` (backend `src/push.ts`) can emit:
 
 ```json
 {
-  "aps": { "alert": "Hygge needs you", "sound": "default" },
+  "aps": { "alert": { "title": "Hygge", "body": "Rover: I need a detail to continue. Which dates are you free?" }, "sound": "default" },
   "hyggeKind": "needs_you",
-  "hyggeRef": "<task-or-feed-item-id>",
+  "hyggeRef": "<task-or-feed-item-or-mail-id>",
   "hyggeRoute": "task/<id>"
 }
 ```
 
-- `alert` is a bare **title string** — there is no body field, so
-  no detail can leak through one. Titles are the brief's proposed
-  neutral copy: "Hygge needs you" / "New work found" (final copy is
-  Mikael's call at review).
-- No credentials, no codes, no amounts, no mail subjects, no
-  profile data. A 2FA code never travels by push (Brief 04's
-  pipeline owns codes). A schema test asserts the exact key set.
-- **No badge number is sent** (chosen default): the server keeps
-  no badge count, and an invented one would drift from the feed.
-- Routes: `task/<uuid>`, `feed/<uuid>`, `home`. The app parses
-  them in `PushDeepLink` (HyggeCore); anything unknown lands on
-  Home. A task route opens that task's detail sheet; a feed route
-  lifts the named listing to the top of Home.
+- Titles and bodies pass one formatting path (`pushSafeText`):
+  whitespace collapsed, code-shaped digit runs redacted,
+  truncated at a word boundary (title ≤60, body ≤180 chars).
+- No credentials, no codes, no earnings claims. Pay appears only
+  as the listing's own label; a mail subject arrives already
+  code-redacted from the email pipeline. A 2FA code never travels
+  by push (Brief 04's pipeline owns codes). Schema tests assert
+  the exact key set, the truncation, and the code redaction.
+- **No badge number is sent**: the server keeps no badge count,
+  and an invented one would drift from the feed.
+- Routes: `task/<uuid>`, `feed/<uuid>`, `email/<uuid>`, `home`.
+  The app parses them in `PushDeepLink` (HyggeCore); anything
+  unknown lands on Home. Each route opens the exact element it
+  names, after a fresh pull: the task's chat help card, the
+  listing's (or episode's) own detail, that one filed mail. A
+  route naming something already handled lands on Home with one
+  plain line — never a substituted element.
 
 ## Token lifecycle
 

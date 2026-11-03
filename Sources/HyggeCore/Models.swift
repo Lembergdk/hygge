@@ -166,13 +166,19 @@ public struct Opportunity: Codable, Identifiable, Equatable, Sendable {
     public var rankScore: Double?
     /// Distance in km when the listing stated it. Nil means unknown.
     public var distanceKm: Double?
+    /// Set when this feed item is not work but a blocked look
+    /// asking for the user ("login" or "humanCheck", from a
+    /// scheduled scan). Cards and detail offer the fix for that
+    /// block instead of an application draft.
+    public var needsYouKind: String?
 
     public init(id: UUID = UUID(), siteID: String, title: String, summary: String,
                 category: OpportunityCategory, payLabel: String, estimatedHourly: Double?,
                 locationLabel: String, isRemote: Bool, requiredSkills: [String],
                 urlString: String, estimatedGross: Double? = nil, currencyCode: String = "USD",
                 isDemo: Bool = false, status: OpportunityStatus = .new,
-                rankScore: Double? = nil, distanceKm: Double? = nil) {
+                rankScore: Double? = nil, distanceKm: Double? = nil,
+                needsYouKind: String? = nil) {
         self.id = id
         self.siteID = siteID
         self.title = title
@@ -190,6 +196,7 @@ public struct Opportunity: Codable, Identifiable, Equatable, Sendable {
         self.status = status
         self.rankScore = rankScore
         self.distanceKm = distanceKm
+        self.needsYouKind = needsYouKind
     }
 }
 

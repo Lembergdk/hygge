@@ -45,7 +45,7 @@ import {
   unknownAccessRecord, withdrawProposalsForSite, type Eligibility, type ProbeOutcome, type SiteAccessRecord,
 } from "./web-access.ts";
 import {
-  apnsConfigFromEnv, d1PushDb, needsHumanEvent, notifyUser, planTickNotifications,
+  apnsConfigFromEnv, d1PushDb, messageWaitingEvent, needsHumanEvent, notifyUser, planTickNotifications,
   shouldNotifyNeedsHuman, type PushEvent,
 } from "./push.ts";
 
@@ -820,6 +820,23 @@ export class UserSandbox extends DurableObject<Env> {
           `Filed mail from ${s.senderDomain || "a site"}: ${s.subject || "(no subject)"}`,
           detail, null);
       }
+      // A client message may be waiting: the one mail event worth
+      // a push. Authenticated tracked (or work-ruled) senders only,
+      // at most one per sender per day — the rest stay in the
+      // journal. The tap opens this exact filed mail.
+      const mentionsMessage = (delivery.triage?.highlights ?? []).some((h) => h.kind === "client_message");
+      if (mentionsMessage && triage.decision === "work" && triage.relation !== "owner"
+        && delivery.triage?.senderAuthenticated === true) {
+        const day = delivery.receivedAt.slice(0, 10);
+        const capKey = `mailPush:${s.senderDomain.toLowerCase()}:${day}`;
+        const already = [...this.ctx.storage.sql.exec("SELECT value FROM kv WHERE key = ?", capKey)] as Row[];
+        if (!already.length) {
+          this.ctx.storage.sql.exec("INSERT OR REPLACE INTO kv (key, value) VALUES (?, '1')", capKey);
+          this.schedulePush([messageWaitingEvent(summaryId, {
+            siteName: triage.site?.name ?? s.senderDomain, subject: s.subject,
+          })]);
+        }
+      }
     }
     return { filed: true, kind: delivery.kind, relation: triage.relation, decision: triage.decision };
   }
@@ -1223,9 +1240,18 @@ export class UserSandbox extends DurableObject<Env> {
     if (result.status === "succeeded") this.healScanEpisodes(domain);
     // Brief 07: a fresh needsHuman entry (approval, human check, or
     // information request) is push trigger #1. Scan missions are
-    // excluded — their episodes notify once per tick instead.
+    // excluded — their episodes notify once per tick instead. The
+    // body is the same words the chat card shows: the site, the
+    // ask, and the first question.
     if (shouldNotifyNeedsHuman(statusBeforeRun, task.status, { scheduledScan: task.scheduled_scan === true })) {
-      this.schedulePush([needsHumanEvent(String(task.id))]);
+      const helpText = (task.help?.message as string | undefined)?.trim() ?? "";
+      const firstQuestion = (task.help?.questions?.[0]?.text as string | undefined)?.trim() ?? "";
+      const siteRow = this.stateStore().list("sites")
+        .map((row) => scanSiteFromRow(String(row.id), row.data))
+        .find((site) => site && domainOfUrl(site.startURLString) === domain);
+      const siteName = siteRow?.name ?? domain;
+      const message = [helpText, firstQuestion].filter(Boolean).join(" ");
+      this.schedulePush([needsHumanEvent(String(task.id), message ? `${siteName}: ${message}` : undefined)]);
     }
     return task;
   }
