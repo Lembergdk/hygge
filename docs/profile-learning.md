@@ -101,11 +101,12 @@ starts cold — no backfill.
 
 **Recording hooks:** `AppStore.recordFeedback` at `reject(taskID:reason:)`
 (the "Not now" menu now passes its reason through instead of discarding
-it), `approveProposal` / `dismissProposal`, successful task outcomes
-(`recordTaskEvent`: signup/profile/apply), and application stage
-changes (`setApplicationStage`, `completeWork`). Events ride the
-existing Brief 01 push. On the server, `deriveIgnoredEvents` runs every
-scan tick.
+it), `approveProposal` / `dismissProposal`, and successful task outcomes
+(`recordTaskEvent`: signup/profile/apply). (Manual application stage
+changes were a fourth hook until the Your-work surface was removed;
+historical `booked`/`completed` events remain in the log.) Events ride
+the existing Brief 01 push. On the server, `deriveIgnoredEvents` runs
+every scan tick.
 
 **Ignored:** `IGNORED_AFTER_DAYS = 7` days surfaced with no action,
 no application, and no prior feedback event (deterministic

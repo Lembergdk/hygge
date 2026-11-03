@@ -44,11 +44,11 @@ struct FeedCatalogBoard: View {
                 sample("20 · Site learning", style: .update, title: "Found a smoother way to sign in", subtitle: "Workroom", icon: "map")
                 sample("21 · Email filed", style: .update, title: "A new message about your project", subtitle: "Contra", icon: "envelope")
                 sample("22 · Permission reminder", style: .update, title: "A heads-up when you need it", subtitle: "New work and things that need your OK", icon: "bell")
-                sample("23 · Paused", style: .update, title: "Hygge is paused", subtitle: "Your work is here when you’re ready", icon: "pause")
+                sample("23 · Paused", style: .update, title: "Hygge is paused", subtitle: "Everything is here when you’re ready", icon: "pause")
                 VStack(alignment: .leading, spacing: 14) {
                     Text("24 · Empty / caught up").font(.headline).foregroundStyle(HyggeTheme.secondary)
                     Text("You’re all caught up.").font(.system(.title3, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
-                    Text("No filler card. Earlier and Your work remain accessible.").font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                    Text("No filler card. The journal's Earlier section starts expanded.").font(.subheadline).foregroundStyle(HyggeTheme.secondary)
                 }
             }
             Text("Tap → the object lifts forward and expands. Short swipe → reveal. Long swipe → trigger on release. Public actions always open review.")
