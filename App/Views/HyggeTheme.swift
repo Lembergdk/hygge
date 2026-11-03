@@ -123,11 +123,11 @@ struct FloatingFlame: View {
     var state: FlameState
     var dimmed: Bool = false
     var traveling = false
+    var preview: FlamePreviewRequest? = nil
     var onTap: () -> Void
-    var onLongPress: () -> Void
+    var onLongPress: (() -> Void)? = nil
     var onDragBegan: (() -> Void)? = nil
-    var onDragMove: ((CGSize) -> Void)? = nil
-    var onDragEnded: (() -> Void)? = nil
+    var onDragEnded: ((CGSize?) -> Void)? = nil
     @Environment(FlamePlayStore.self) private var playStore
 
     /// Tunable in Flame Lab. Default 122: about half again the 81pt flame
@@ -149,12 +149,12 @@ struct FloatingFlame: View {
         FlameActor(size: size,
                    clipOverride: isWorking ? .laptop : nil,
                    attention: needsYou,
-                   movable: onDragMove != nil,
+                   movable: onDragEnded != nil,
                    traveling: traveling,
+                   preview: preview,
                    onTap: onTap,
                    onLongPress: onLongPress,
                    onDragBegan: onDragBegan,
-                   onDragMove: onDragMove,
                    onDragEnded: onDragEnded)
             .overlay(alignment: .topLeading) {
                 if case .needsYou(let count) = state, count > 0 {

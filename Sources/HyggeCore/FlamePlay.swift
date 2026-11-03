@@ -80,6 +80,18 @@ public enum FlameGestureClassifier {
         return nil
     }
 
+    /// Was a drag released as a flick? A flick's predicted end flies far
+    /// beyond where the finger actually stopped (release velocity), while
+    /// a carried drag's prediction barely overshoots its travel — so a
+    /// movable flame can tell "put me here" from "fling and react".
+    public static func isFlickRelease(translationX: Double, translationY: Double,
+                                      predictedX: Double, predictedY: Double) -> Bool {
+        guard swipe(predictedX: predictedX, predictedY: predictedY) != nil else { return false }
+        let travelled = hypot(translationX, translationY)
+        let predicted = hypot(predictedX, predictedY)
+        return predicted - travelled >= 80
+    }
+
     /// Full gesture classification for a finished touch on the flame.
     /// Swipes win; otherwise a short touch is a tap in the zone it landed
     /// (`tapNormalizedY` is 0 at the flame's top, 1 at his feet).

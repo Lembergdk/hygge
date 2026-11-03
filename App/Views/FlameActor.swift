@@ -17,8 +17,9 @@ struct FlameActor: View {
     var onLongPress: (() -> Void)? = nil
     var onGesture: ((FlameGestureKind, FlameReactionKind) -> Void)? = nil
     var onDragBegan: (() -> Void)? = nil
-    var onDragMove: ((CGSize) -> Void)? = nil
-    var onDragEnded: (() -> Void)? = nil
+    /// Final drag translation to commit as his new spot, or nil when the
+    /// release was a flick (he reacts instead of moving).
+    var onDragEnded: ((CGSize?) -> Void)? = nil
 
     @Environment(FlamePlayStore.self) private var playStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -33,6 +34,15 @@ struct FlameActor: View {
     @State private var spinAccum: Double = 0
     @State private var lastDragAngle: Double?
     @State private var pendingNausea = false
+    // Secondary-motion springs for carried limbs.
+    @State private var armSLVel: Double = 0
+    @State private var armSRVel: Double = 0
+    @State private var legSLVel: Double = 0
+    @State private var legSRVel: Double = 0
+    @State private var rotVel: Double = 0
+    @State private var smoothVX: Double = 0
+    @State private var smoothVY: Double = 0
+    @State private var lastDragSample: (time: Date, translation: CGSize)?
     @State private var reactionTask: Task<Void, Never>?
     @State private var pendingTapTask: Task<Void, Never>?
     @State private var idlePlanner = FlameIdlePlanner()
@@ -66,8 +76,10 @@ struct FlameActor: View {
                        value: breathing)
             .scaleEffect(pinchScale, anchor: .bottom)
             .rotationEffect(.degrees(-tilt.x * settings.gyroLeanDegrees), anchor: .bottom)
-            .offset(x: tilt.x * 8 * settings.liveliness + (isDragging ? 0 : dragTranslation.width * 0.12),
-                    y: tilt.y * 5 + (isDragging ? 0 : dragTranslation.height * 0.10))
+            .offset(x: tilt.x * 8 * settings.liveliness
+                        + (isDragging ? dragTranslation.width : dragTranslation.width * 0.12),
+                    y: tilt.y * 5
+                        + (isDragging ? dragTranslation.height : dragTranslation.height * 0.10))
             .frame(width: size, height: height)
             .contentShape(Rectangle())
             .simultaneousGesture(dragGesture, including: interactive ? .gesture : .none)
@@ -110,10 +122,12 @@ struct FlameActor: View {
                     spinAccum = 0
                     lastDragAngle = nil
                     pendingNausea = false
+                    resetSprings()
+                    smoothVX = 0; smoothVY = 0
+                    lastDragSample = (Date(), value.translation)
                     onDragBegan?()
                 }
                 if isDragging {
-                    onDragMove?(value.translation)
                     trackSpin(value.location)
                     heldPose(value)
                 }
@@ -123,10 +137,30 @@ struct FlameActor: View {
                 if longPressFired { longPressFired = false; return }
                 if isDragging {
                     isDragging = false
-                    onDragEnded?()
+                    resetSprings()
                     if pendingNausea {
+                        onDragEnded?(value.translation)
                         perform(.nauseous, direction: 0, intensity: 1.2)
+                    } else if FlameGestureClassifier.isFlickRelease(
+                        translationX: Double(value.translation.width),
+                        translationY: Double(value.translation.height),
+                        predictedX: Double(value.predictedEndTranslation.width),
+                        predictedY: Double(value.predictedEndTranslation.height)),
+                              let kind = FlameGestureClassifier.classify(
+                        translationX: Double(value.translation.width),
+                        translationY: Double(value.translation.height),
+                        predictedX: Double(value.predictedEndTranslation.width),
+                        predictedY: Double(value.predictedEndTranslation.height),
+                        tapNormalizedY: 0.5) {
+                        // A flick is a reaction, not a relocation.
+                        onDragEnded?(nil)
+                        let predicted = hypot(value.predictedEndTranslation.width,
+                                              value.predictedEndTranslation.height)
+                        let dir: CGFloat = kind == .swipeLeft ? -1 : (kind == .swipeRight ? 1 : 0)
+                        fire(kind, direction: dir,
+                             intensity: min(1.5, max(0.9, Double(predicted) / 220)))
                     } else {
+                        onDragEnded?(value.translation)
                         land()
                     }
                     return
@@ -170,21 +204,54 @@ struct FlameActor: View {
         lastDragAngle = angle
     }
 
-    /// Carried like a plush toy: arms up, legs dangling with the swing,
-    /// face surprised, leaning into the direction of travel.
+    private func resetSprings() {
+        armSLVel = 0; armSRVel = 0; legSLVel = 0; legSRVel = 0; rotVel = 0
+    }
+
+    /// One under-damped spring step: limbs chase their targets with lag
+    /// and overshoot, so they trail, swing and settle like soft toys
+    /// instead of snapping to a pose.
+    private func spring(_ pos: Double, _ vel: inout Double,
+                        toward target: Double, dt: Double) -> Double {
+        let stiffness = 210.0, damping = 13.0
+        vel += (stiffness * (target - pos) - damping * vel) * dt
+        return pos + vel * dt
+    }
+
+    /// Carried like a plush toy, with secondary motion: arms up but
+    /// trailing the hand, legs dangling and pendulum-swinging against
+    /// travel, body leaning and stretching with speed.
     private func heldPose(_ value: DragGesture.Value) {
         guard !reduceMotion else { return }
-        let vx = Double(value.predictedEndTranslation.width - value.translation.width)
-        let swing = min(45, max(-45, -vx * 0.10))
-        var p = FlamePose.rest
-        p.face = pendingNausea ? .dizzy : .surprised
-        p.armSL = 118 + swing * 0.4
-        p.armSR = -118 + swing * 0.4
-        p.legSL = swing
-        p.legSR = swing * 0.8 - 8
-        p.rot = min(14, max(-14, vx * 0.03))
+        let now = Date()
+        var dt = 1.0 / 60
+        if let last = lastDragSample {
+            let raw = now.timeIntervalSince(last.time)
+            if raw > 0.001 {
+                dt = min(raw, 0.05)
+                let vx = Double(value.translation.width - last.translation.width) / raw
+                let vy = Double(value.translation.height - last.translation.height) / raw
+                smoothVX += (vx - smoothVX) * 0.35
+                smoothVY += (vy - smoothVY) * 0.35
+            }
+        }
+        lastDragSample = (now, value.translation)
+        let vx = smoothVX, vy = smoothVY
+        let speed = hypot(vx, vy)
+        let trail = min(58, max(-58, -vx * 0.045))          // limbs lag behind travel
+        let lift = min(26, max(-14, -vy * 0.016))           // rising hand lifts limbs
+        var p = pose
+        p.armSL = spring(p.armSL, &armSLVel, toward: 118 + trail + lift, dt: dt)
+        p.armSR = spring(p.armSR, &armSRVel, toward: -118 + trail + lift, dt: dt)
+        p.legSL = spring(p.legSL, &legSLVel, toward: trail * 0.95, dt: dt)
+        p.legSR = spring(p.legSR, &legSRVel, toward: trail * 0.8 - 8, dt: dt)
+        p.rot = spring(p.rot, &rotVel, toward: min(16, max(-16, vx * 0.016)), dt: dt)
+        p.face = pendingNausea ? .dizzy : (speed > 90 ? .surprised : .normal)
+        p.sx = 1 + min(0.05, abs(vx) * 0.00003)
+        p.sy = 1 + min(0.05, max(0, -vy) * 0.00003)
         p.dy = -size * 0.02
-        withAnimation(.easeOut(duration: 0.12)) { pose = p }
+        p.dx = 0
+        pose = p
     }
 
     private func land() {

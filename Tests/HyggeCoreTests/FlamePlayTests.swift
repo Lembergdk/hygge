@@ -53,6 +53,24 @@ final class FlamePlayTests: XCTestCase {
                        FlameInteractionSettings())
     }
 
+    func testFlickVersusDragRelease() {
+        // Slow carry: finger travelled far, predicted barely beyond it.
+        XCTAssertFalse(FlameGestureClassifier.isFlickRelease(
+            translationX: 0, translationY: -140, predictedX: 0, predictedY: -165))
+        // Hard flick up: short travel, big predicted overshoot.
+        XCTAssertTrue(FlameGestureClassifier.isFlickRelease(
+            translationX: 0, translationY: -45, predictedX: 0, predictedY: -260))
+        // Fast side flick after some drag distance.
+        XCTAssertTrue(FlameGestureClassifier.isFlickRelease(
+            translationX: 90, translationY: 5, predictedX: 280, predictedY: 10))
+        // Diagonal mush is neither a clean swipe nor a flick.
+        XCTAssertFalse(FlameGestureClassifier.isFlickRelease(
+            translationX: 40, translationY: -40, predictedX: 150, predictedY: -150))
+        // Tiny movement never flicks.
+        XCTAssertFalse(FlameGestureClassifier.isFlickRelease(
+            translationX: 3, translationY: -4, predictedX: 5, predictedY: -8))
+    }
+
     func testClampedSettings() {
         var settings = FlameInteractionSettings()
         settings.homeFlameSize = 500

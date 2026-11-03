@@ -3,6 +3,9 @@ import SwiftUI
 /// The one continuous thread with Hygge — onboarding happened here, and this
 /// is the same conversation forever after. Opened by the floating flame.
 struct ConversationView: View {
+    /// Sheet presentations keep the paper background; the feed's speech
+    /// bubble passes the card color so it lifts off the feed behind it.
+    var background: Color = HyggeTheme.paper
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var input = ""
@@ -26,7 +29,7 @@ struct ConversationView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                HyggeTheme.paper.ignoresSafeArea()
+                background.ignoresSafeArea()
                 VStack(spacing: 0) {
                     HStack(spacing: 10) {
                         AnimatedFlame(animation: avatarAnimation, size: 36)
