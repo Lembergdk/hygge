@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// A quiet overview. Details live in sheets; live questions stay in chat.
+/// A visual overview. Details expand over the feed; live questions stay in chat.
 struct HomeFeedView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
