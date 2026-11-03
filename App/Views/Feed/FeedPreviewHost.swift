@@ -8,9 +8,22 @@ struct FeedPreviewHost: View {
     @State private var ready = false
     var body: some View {
         Group {
-            if ready { HomeFeedView().task { await renderCatalog() } }
+            if ready { HomeFeedView().task { await renderCatalog() }.task { await simulateArrivals() } }
             else { Color.clear.task { seed(); ready = true } }
         }.preferredColorScheme(.dark)
+    }
+    @MainActor private func simulateArrivals() async {
+        guard ProcessInfo.processInfo.arguments.contains("--feed-arrivals-preview") else { return }
+        // Isolated, repeatable incoming-data check: leave time to scroll away.
+        do { try await Task.sleep(for: .seconds(30)) } catch { return }
+        store.opportunities.insert(Opportunity(siteID: "contra", title: "Illustrations for a local bakery", summary: "Create a small set of warm illustrations for the bakery’s packaging.", category: .creative, payLabel: "$600 fixed", estimatedHourly: nil, locationLabel: "Remote", isRemote: true, requiredSkills: ["Illustration"], urlString: "https://example.com/bakery", isDemo: false), at: 0)
+        do { try await Task.sleep(for: .seconds(15)) } catch { return }
+        if let index = store.tasks.firstIndex(where: { $0.browserSessionID != nil }) {
+            let id = store.tasks[index].id
+            store.tasks[index].status = .succeeded
+            store.tasks[index].browserSessionID = nil
+            store.activityEvents.append(ActivityEvent(id: id, kind: .profileLive, sentence: "Your Workroom profile is live.", siteID: "workroom"))
+        }
     }
     @MainActor private func renderCatalog() async {
         guard ProcessInfo.processInfo.arguments.contains("--feed-catalog") else { return }

@@ -17,54 +17,14 @@ struct HomeFeedView: View {
     @State private var undo: FeedUndo?
     @State private var flameDimmed = false
     @State private var dimTask: Task<Void, Never>?
+    @State private var updateGate = FeedUpdateGate()
+    @State private var isAtTop = true
+    @State private var scrollAnchor: String?
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             HyggeTheme.paper.ignoresSafeArea()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    header.padding(.bottom, 12)
-                    if store.isPaused {
-                        Button { openFocus(.paused) } label: {
-                            FeedSummary(title: "Hygge is paused", subtitle: "Your work is here when you’re ready", icon: "pause")
-                        }.buttonStyle(.plain)
-                    } else {
-                        suggestions
-                        opportunities
-                        activeTasks
-                        decisions
-                    }
-                    if store.notificationPrimerVisible {
-                        card(id: "notifications", title: "A heads-up when you need it", subtitle: "New work and things that need your OK", icon: "bell", primaryTitle: "Permissions", open: { showNotifications = true }, primary: { showNotifications = true }, dismiss: {
-                            store.dismissNotificationPrimer()
-                            showUndo("Reminder dismissed") { store.undoNotificationDismissal() }
-                        })
-                    }
-                    updates
-                    earlier
-                    if isEmpty {
-                        Text("You’re all caught up.")
-                            .font(.system(.title3, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
-                            .padding(.top, 32)
-                    }
-                    Button("Your work") { showYourWork = true }
-                        .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
-                        .frame(minHeight: 44).padding(.top, 8)
-                    Color.clear.frame(height: 145)
-                }
-                .background(GeometryReader { geometry in
-                    Color.clear.preference(key: FeedScrollOffset.self, value: geometry.frame(in: .named("feedScroll")).minY)
-                })
-                .padding(.horizontal, 20).padding(.top, 12)
-            }
-            .coordinateSpace(name: "feedScroll")
-            .onPreferenceChange(FeedScrollOffset.self) { _ in
-                flameDimmed = true; dimTask?.cancel()
-                dimTask = Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(650))
-                    if !Task.isCancelled { flameDimmed = false }
-                }
-            }
+            feedScroll
             FloatingFlame(state: flameState, dimmed: flameDimmed) { showConversation = true } onLongPress: { showPauseConfirm = true }
                 .padding(.trailing, 18).padding(.bottom, 14)
         }
@@ -97,6 +57,10 @@ struct HomeFeedView: View {
             }
         }
         .task { await store.observeBrowserTasks() }
+        .onChange(of: candidateIDs, initial: true) { _, _ in receiveFeedUpdates() }
+        .onChange(of: focus == nil && !showConversation && !showProfile && !showYourWork && !showNotifications) { _, available in
+            if available { receiveFeedUpdates() }
+        }
         .sheet(isPresented: $showConversation, onDismiss: { store.conversationTaskID = nil }) { ConversationView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showProfile) { ProfileHubView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showYourWork) { YourWorkView().presentationDragIndicator(.visible) }
@@ -113,6 +77,76 @@ struct HomeFeedView: View {
             guard id != nil else { return }
             if focus != nil { closeFocus(openChat: true) }
             else { showConversation = true }
+        }
+    }
+
+    private var feedScroll: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    header.padding(.bottom, 12).id("feed-top")
+                    ForEach(feedRows) { row in
+                        feedRow(row).id(row.id).transition(arrivalTransition)
+                    }
+                    if isEmpty && updateGate.pendingIDs.isEmpty {
+                        Text("You’re all caught up.")
+                            .font(.system(.title3, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
+                            .padding(.top, 32)
+                    }
+                    Button("Your work") { showYourWork = true }
+                        .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
+                        .frame(minHeight: 44).padding(.top, 8)
+                    Color.clear.frame(height: 145)
+                }
+                .scrollTargetLayout()
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: FeedScrollOffset.self, value: geometry.frame(in: .named("feedScroll")).minY)
+                })
+                .onPreferenceChange(FeedScrollOffset.self) { origin in
+                    if #unavailable(iOS 18.0), let origin { trackScroll(12 - origin) }
+                }
+                .padding(.horizontal, 20).padding(.top, 12)
+            }
+            .scrollPosition(id: $scrollAnchor, anchor: .top)
+            .onChange(of: updateGate.visibleIDs) { _, _ in
+                if isAtTop { proxy.scrollTo("feed-top", anchor: .top) }
+            }
+            .coordinateSpace(name: "feedScroll")
+            .modifier(FeedScrollTracking(onOffset: trackScroll))
+            .overlay(alignment: .top) {
+                if !updateGate.pendingIDs.isEmpty {
+                    Button {
+                        // Insertion waits for the top geometry callback; the
+                        // button never inserts cards underneath a scrolled reader.
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.35)) {
+                            proxy.scrollTo("feed-top", anchor: .top)
+                        }
+                        if isAtTop { receiveFeedUpdates() }
+                    } label: {
+                        Label("New updates", systemImage: "arrow.up")
+                            .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                            .foregroundStyle(HyggeTheme.onSage)
+                            .padding(.horizontal, 20).frame(minHeight: 44)
+                            .background(HyggeTheme.sageDeep, in: Capsule())
+                            .shadow(color: .black.opacity(0.2), radius: 10, y: 4)
+                    }.buttonStyle(.plain)
+                        .accessibilityHint("Returns to the top and shows new feed entries")
+                        .padding(.top, 8).transition(.opacity)
+                }
+            }
+        }
+    }
+
+    private func trackScroll(_ offset: CGFloat) {
+        let atTop = offset <= 12
+        if isAtTop != atTop {
+            isAtTop = atTop
+            if atTop { receiveFeedUpdates() }
+        }
+        flameDimmed = true; dimTask?.cancel()
+        dimTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(650))
+            if !Task.isCancelled { flameDimmed = false }
         }
     }
 
@@ -145,8 +179,9 @@ struct HomeFeedView: View {
         if store.needsYouCount > 0 { return .needsYou(store.needsYouCount) }
         return store.isAgentWorking ? .working : .asleep
     }
-    private var pendingProposals: [ProposedSite] { store.proposals.filter { $0.status == .proposed } }
-    private var listings: [Opportunity] {
+    private var proposedSites: [ProposedSite] { store.proposals.filter { $0.status == .proposed } }
+    private var pendingProposals: [ProposedSite] { admitted(proposedSites) { "proposal-\($0.id)" } }
+    private var availableListings: [Opportunity] {
         store.opportunities.filter { !$0.isDemo && ($0.status == .new || $0.status == .saved) }
             .filter { opportunity in !store.applications.contains { $0.opportunityID == opportunity.id } }
             .sorted { lhs, rhs in
@@ -155,66 +190,78 @@ struct HomeFeedView: View {
                 return (lhs.rankScore ?? 0) > (rhs.rankScore ?? 0)
             }
     }
-    private var decisionTasks: [AgentTask] {
-        store.tasks.filter { $0.needsChatHelp || $0.status == .awaitingApproval || $0.status == .draft }
+    private var listings: [Opportunity] { admitted(availableListings) { "opportunity-\($0.id)" } }
+    private var availableDecisions: [AgentTask] {
+        store.tasks.filter { !$0.isActiveInFeed && ($0.needsChatHelp || $0.status == .awaitingApproval || $0.status == .draft) }
     }
-    private var runningTasks: [AgentTask] { store.tasks.filter { $0.status == .running || $0.status == .approved } }
-    private var events: [ActivityEvent] { store.activityEvents.sorted { $0.occurredAt > $1.occurredAt } }
+    private var decisionTasks: [AgentTask] { admitted(availableDecisions, key: taskKey) }
+    private var availableActiveTasks: [AgentTask] { store.tasks.filter(\.isActiveInFeed) }
+    private var runningTasks: [AgentTask] { admitted(availableActiveTasks, key: taskKey) }
+    private var availableEvents: [ActivityEvent] { store.activityEvents.sorted { $0.occurredAt > $1.occurredAt } }
+    private var events: [ActivityEvent] { admitted(availableEvents, key: eventKey) }
+    private var candidateIDs: [String] {
+        var ids = availableActiveTasks.map(taskKey)
+        ids += proposedSites.map { "proposal-\($0.id)" }
+        ids += availableListings.map { "opportunity-\($0.id)" }
+        ids += availableDecisions.map(taskKey)
+        if store.notificationPrimerVisible { ids.append("notifications") }
+        ids += availableEvents.map(eventKey)
+        return ids
+    }
+    private func admitted<Item>(_ items: [Item], key: (Item) -> String) -> [Item] {
+        let positions = Dictionary(uniqueKeysWithValues: updateGate.visibleIDs.enumerated().map { ($0.element, $0.offset) })
+        return items.filter { positions[key($0)] != nil }
+            .sorted { (positions[key($0)] ?? 0) < (positions[key($1)] ?? 0) }
+    }
+    private func receiveFeedUpdates() {
+        let canInsert = isAtTop && focus == nil && !showConversation && !showProfile && !showYourWork && !showNotifications
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--feed-arrivals-preview") { print("FEED_RECEIVE top=\(isAtTop) insert=\(canInsert) visible=\(updateGate.visibleIDs.count) latest=\(candidateIDs.count)") }
+        #endif
+        withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.45, dampingFraction: 0.88)) {
+            updateGate.receive(candidateIDs, atTop: canInsert)
+        }
+    }
     private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && !store.isPaused }
     private func taskKey(_ task: AgentTask) -> String { FeedFocus.taskKey(task) }
     private func eventKey(_ event: ActivityEvent) -> String { "event-\(event.id)" }
     private func isArchived(_ id: String) -> Bool { store.archivedFeedIDs.contains(id) }
 
-    private var suggestions: some View {
-        Group {
-            ForEach(pendingProposals.prefix(morePlaces ? pendingProposals.count : 1)) { proposal in
-                card(id: "proposal-\(proposal.id)", title: store.siteName(id: proposal.siteID), subtitle: proposal.rationale,
-                     icon: "link", style: .invitation, primaryTitle: "Start setup", primaryIcon: "sparkles",
-                     open: { openFocus(.proposal(proposal)) },
-                     primary: { store.approveProposal(proposalID: proposal.id, alreadyHasAccount: false) },
-                     dismiss: {
-                        store.dismissProposal(proposalID: proposal.id)
-                        showUndo("Suggestion dismissed") { store.undoSiteDismissal(proposalID: proposal.id) }
-                     })
-            }
-            if pendingProposals.count > 1 {
-                Button(morePlaces ? "Fewer suggestions" : "\(pendingProposals.count - 1) more places") { withAnimation { morePlaces.toggle() } }
-                    .font(.caption.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
-            }
-        }
+    private func proposalCard(_ proposal: ProposedSite) -> some View {
+        card(id: "proposal-\(proposal.id)", title: store.siteName(id: proposal.siteID), subtitle: proposal.rationale,
+             icon: "link", style: .invitation, primaryTitle: "Start setup", primaryIcon: "sparkles",
+             open: { openFocus(.proposal(proposal)) },
+             primary: { store.approveProposal(proposalID: proposal.id, alreadyHasAccount: false) },
+             dismiss: {
+                store.dismissProposal(proposalID: proposal.id)
+                showUndo("Suggestion dismissed", restoring: "proposal-\(proposal.id)") { store.undoSiteDismissal(proposalID: proposal.id) }
+             })
     }
-    private var opportunities: some View {
-        ForEach(listings) { opportunity in
-            card(id: "opportunity-\(opportunity.id)", title: opportunity.title,
-                 subtitle: "\(opportunity.payLabel) · \(opportunity.isRemote ? "Remote" : opportunity.locationLabel)",
-                 icon: opportunity.category == .creative ? "paintpalette" : "briefcase", style: .opportunity, primaryTitle: "Prepare draft", primaryIcon: "square.and.pencil",
-                 open: { openFocus(.opportunity(opportunity)) }, primary: { store.draftApplication(for: opportunity) },
-                 dismiss: {
-                    store.setStatus(.dismissed, for: opportunity.id)
-                    showUndo("Opportunity dismissed") { store.setStatus(opportunity.status, for: opportunity.id) }
-                 })
-        }
+    private func opportunityCard(_ opportunity: Opportunity) -> some View {
+        card(id: "opportunity-\(opportunity.id)", title: opportunity.title,
+             subtitle: "\(opportunity.payLabel) · \(opportunity.isRemote ? "Remote" : opportunity.locationLabel)",
+             icon: opportunity.category == .creative ? "paintpalette" : "briefcase", style: .opportunity, primaryTitle: "Prepare draft", primaryIcon: "square.and.pencil",
+             open: { openFocus(.opportunity(opportunity)) }, primary: { store.draftApplication(for: opportunity) },
+             dismiss: {
+                store.setStatus(.dismissed, for: opportunity.id)
+                showUndo("Opportunity dismissed", restoring: "opportunity-\(opportunity.id)") { store.setStatus(opportunity.status, for: opportunity.id) }
+             })
     }
-    private var activeTasks: some View {
-        ForEach(runningTasks.filter { !isArchived(taskKey($0)) }) { task in
-            if task.browserSessionID != nil {
-                SwipeFeedCard(id: taskKey(task), primaryTitle: "Watch", primaryIcon: "arrow.up.left.and.arrow.down.right", openCardID: $openCardID, open: { openFocus(.browser(task)) }, primary: { openFocus(.browser(task)) }, dismiss: { archive(taskKey(task)) }) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(task.connectsExistingAccount ? "Connecting your account" : task.kind == .buildProfile ? "Building your profile" : task.isSiteSetup ? "Setting up your account" : task.title)
-                        .font(.system(.subheadline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
-                    BrowserLiveAttachment(task: task) { openFocus(.browser(task)) }
-                }.padding(14).hyggeCard(radius: 22)
-                }
-                .matchedGeometryEffect(id: taskKey(task), in: focusAnimation, isSource: focus?.id != taskKey(task))
-                .opacity(focus?.id == taskKey(task) ? 0 : 1)
-            } else {
-                card(id: taskKey(task), title: "\(store.siteName(id: task.siteID)) · Working", subtitle: task.title,
-                     icon: "sparkles", primaryTitle: "Details", open: { openFocus(.task(task)) }, primary: { openFocus(.task(task)) })
+    @ViewBuilder private func activeTaskCard(_ task: AgentTask) -> some View {
+        if task.browserSessionID != nil {
+            SwipeFeedCard(id: taskKey(task), primaryTitle: task.needsChatHelp ? "Open chat" : "Watch", primaryIcon: task.needsChatHelp ? "bubble.left" : "arrow.up.left.and.arrow.down.right", openCardID: $openCardID, open: { openActiveTask(task) }, primary: { openActiveTask(task) }, dismiss: {}, allowsDismissal: false) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(task.needsChatHelp ? taskTitle(task) : task.connectsExistingAccount ? "Connecting your account" : task.kind == .buildProfile ? "Building your profile" : task.isSiteSetup ? "Setting up your account" : task.title)
+                    .font(.system(.subheadline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
+                BrowserLiveAttachment(task: task) { openFocus(.browser(task)) }
+            }.padding(14).hyggeCard(radius: 22)
             }
+            .matchedGeometryEffect(id: taskKey(task), in: focusAnimation, isSource: focus?.id != taskKey(task))
+            .opacity(focus?.id == taskKey(task) ? 0 : 1)
+        } else {
+            card(id: taskKey(task), title: "\(store.siteName(id: task.siteID)) · Working", subtitle: task.title,
+                 icon: "sparkles", primaryTitle: "Details", open: { openFocus(.task(task)) }, primary: { openFocus(.task(task)) }, allowsDismissal: false)
         }
-    }
-    private var decisions: some View {
-        ForEach(decisionTasks.filter { !isArchived(taskKey($0)) }) { task in taskCard(task) }
     }
     private func taskCard(_ task: AgentTask) -> some View {
         let chat = task.needsChatHelp
@@ -257,50 +304,98 @@ struct HomeFeedView: View {
         }
         return task.kind == .buildProfile ? "Profile ready to review" : task.title
     }
-    private var updates: some View {
-        ForEach(events.filter { $0.occurredAt > store.visitMarker && !isArchived(eventKey($0)) }) { event in eventCard(event) }
-    }
-    private var earlier: some View {
+    // One flat, stably identified row collection lets SwiftUI preserve the
+    // visible card when a live session above the reader finishes.
+    private var feedRows: [FeedRow] {
+        var rows = runningTasks.map(FeedRow.active)
+        if store.isPaused { rows.append(.paused) }
+        else {
+            rows += pendingProposals.prefix(morePlaces ? pendingProposals.count : 1).map(FeedRow.proposal)
+            if pendingProposals.count > 1 { rows.append(.morePlaces) }
+            rows += listings.map(FeedRow.opportunity)
+            rows += decisionTasks.filter { !isArchived(taskKey($0)) }.map(FeedRow.decision)
+        }
+        if store.notificationPrimerVisible && updateGate.visibleIDs.contains("notifications") { rows.append(.notifications) }
+        if !events.isEmpty { rows.append(.journal) }
+        rows += events.filter { $0.occurredAt > store.visitMarker && !isArchived(eventKey($0)) }.map(FeedRow.event)
         let older = events.filter { $0.occurredAt <= store.visitMarker || isArchived(eventKey($0)) }
-        let deferred = (decisionTasks + runningTasks).filter { isArchived(taskKey($0)) }
-        return Group {
-            if !older.isEmpty || !deferred.isEmpty {
-                Button { withAnimation { earlierExpanded.toggle() } } label: {
-                    HStack {
-                        Text("Earlier").font(.subheadline.weight(.semibold))
-                        Image(systemName: earlierExpanded ? "chevron.up" : "chevron.down").font(.caption)
-                        Spacer()
-                    }.foregroundStyle(HyggeTheme.secondary).frame(minHeight: 44)
-                }.padding(.top, 8)
-                if earlierExpanded {
-                    ForEach(deferred) { task in taskCard(task) }
-                    ForEach(older) { event in eventCard(event) }
-                }
+        let deferred = decisionTasks.filter { isArchived(taskKey($0)) }
+        if !older.isEmpty || !deferred.isEmpty {
+            rows.append(.earlier)
+            if earlierExpanded {
+                rows += deferred.map(FeedRow.decision)
+                rows += older.map(FeedRow.event)
             }
+        }
+        return rows
+    }
+    @ViewBuilder private func feedRow(_ row: FeedRow) -> some View {
+        switch row {
+        case .active(let task): activeTaskCard(task)
+        case .proposal(let proposal): proposalCard(proposal)
+        case .opportunity(let opportunity): opportunityCard(opportunity)
+        case .decision(let task): taskCard(task)
+        case .event(let event): eventCard(event)
+        case .paused:
+            Button { openFocus(.paused) } label: {
+                FeedSummary(title: "Hygge is paused", subtitle: "Your work is here when you’re ready", icon: "pause")
+            }.buttonStyle(.plain)
+        case .morePlaces:
+            Button(morePlaces ? "Fewer suggestions" : "\(pendingProposals.count - 1) more places") { withAnimation { morePlaces.toggle() } }
+                .font(.caption.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
+        case .notifications:
+            card(id: "notifications", title: "A heads-up when you need it", subtitle: "New work and things that need your OK", icon: "bell", primaryTitle: "Permissions", open: { showNotifications = true }, primary: { showNotifications = true }, dismiss: {
+                store.dismissNotificationPrimer()
+                showUndo("Reminder dismissed", restoring: "notifications") { store.undoNotificationDismissal() }
+            })
+        case .journal:
+            Text("Journal").font(.system(.title3, design: .rounded, weight: .bold))
+                .foregroundStyle(HyggeTheme.ink).padding(.top, 12)
+        case .earlier:
+            Button { withAnimation { earlierExpanded.toggle() } } label: {
+                HStack {
+                    Text("Earlier").font(.subheadline.weight(.semibold))
+                    Image(systemName: earlierExpanded ? "chevron.up" : "chevron.down").font(.caption)
+                    Spacer()
+                }.foregroundStyle(HyggeTheme.secondary).frame(minHeight: 44)
+            }.padding(.top, 8)
         }
     }
     private func eventCard(_ event: ActivityEvent) -> some View {
         card(id: eventKey(event), title: FeedEventPresentation.title(event),
              subtitle: event.siteID.map { store.siteName(id: $0) } ?? JournalBuilder.dayLabel(for: event.occurredAt),
-             icon: FeedEventPresentation.icon(event), asset: event.kind == .workCompleted ? "SettingsEarnings" : nil, style: eventStyle(event),
+             icon: FeedEventPresentation.icon(event), asset: event.kind == .workCompleted ? "SettingsEarnings" : nil, style: event.kind == .workCompleted ? eventStyle(event) : .update,
              primaryTitle: "Details", open: { openFocus(.event(event)) }, primary: { openFocus(.event(event)) })
     }
     private func card(id: String, title: String, subtitle: String, icon: String, asset: String? = nil, usesProfilePhoto: Bool = false, style: FeedCardStyle = .update,
                       primaryTitle: String, primaryIcon: String = "arrow.right", open: @escaping () -> Void,
-                      primary: @escaping () -> Void, dismiss: (() -> Void)? = nil) -> some View {
+                      primary: @escaping () -> Void, dismiss: (() -> Void)? = nil, allowsDismissal: Bool = true) -> some View {
         SwipeFeedCard(id: id, primaryTitle: primaryTitle, primaryIcon: primaryIcon, openCardID: $openCardID,
-                      open: { openCardID = nil; open() }, primary: primary, dismiss: dismiss ?? { archive(id) }) {
+                      open: { openCardID = nil; open() }, primary: primary, dismiss: dismiss ?? { archive(id) }, allowsDismissal: allowsDismissal) {
             FeedVisualCard(style: style, title: title, subtitle: subtitle, icon: icon, asset: asset, usesProfilePhoto: usesProfilePhoto)
         }
         .matchedGeometryEffect(id: id, in: focusAnimation, isSource: focus?.id != id)
         .opacity(focus?.id == id ? 0 : 1)
     }
+    private var arrivalTransition: AnyTransition {
+        reduceMotion ? .opacity : .asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity)
+    }
+    private func openActiveTask(_ task: AgentTask) {
+        if task.needsChatHelp { openChat(task) }
+        else { openFocus(.browser(task)) }
+    }
     private func archive(_ id: String) {
         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { store.setFeedArchived(id, archived: true) }
         showUndo("Moved to Earlier") { store.setFeedArchived(id, archived: false) }
     }
-    private func showUndo(_ message: String, action: @escaping () -> Void) {
-        withAnimation { undo = FeedUndo(message: message, action: action) }
+    private func showUndo(_ message: String, restoring id: String? = nil, action: @escaping () -> Void) {
+        let index = id.flatMap { updateGate.visibleIDs.firstIndex(of: $0) } ?? 0
+        withAnimation {
+            undo = FeedUndo(message: message, action: {
+                action()
+                if let id { updateGate.restore(id, at: index) }
+            })
+        }
     }
     private func openChat(_ task: AgentTask?) {
         if let task { store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id }
@@ -337,8 +432,8 @@ struct HomeFeedView: View {
 }
 
 private struct FeedScrollOffset: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    static var defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) { value = nextValue() ?? value }
 }
 
 private struct FeedUndo { let message: String; let action: () -> Void }
@@ -367,6 +462,37 @@ enum FeedEventPresentation {
         case .filedEmail: return "envelope"
         case .searchedSite: return "magnifyingglass"
         case .learnedAboutSite: return "map"
+        }
+    }
+}
+
+/// Use the scroll view's actual offset on modern iOS. The iOS 17 fallback
+/// observes the content preference inside the lazy container, where it exists.
+private struct FeedScrollTracking: ViewModifier {
+    let onOffset: (CGFloat) -> Void
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top
+            } action: { _, offset in onOffset(offset) }
+        } else { content }
+    }
+}
+
+private enum FeedRow: Identifiable {
+    case active(AgentTask), proposal(ProposedSite), opportunity(Opportunity), decision(AgentTask), event(ActivityEvent)
+    case paused, morePlaces, notifications, journal, earlier
+    var id: String {
+        switch self {
+        case .active(let task), .decision(let task): return FeedFocus.taskKey(task)
+        case .proposal(let value): return "proposal-\(value.id)"
+        case .opportunity(let value): return "opportunity-\(value.id)"
+        case .event(let value): return "event-\(value.id)"
+        case .paused: return "paused"
+        case .morePlaces: return "more-places"
+        case .notifications: return "notifications"
+        case .journal: return "journal-heading"
+        case .earlier: return "earlier"
         }
     }
 }

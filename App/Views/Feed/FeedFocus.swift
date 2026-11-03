@@ -20,7 +20,10 @@ enum FeedFocus: Identifiable {
         case .browser: return 780
         }
     }
-    static func taskKey(_ task: AgentTask) -> String { "task-\(task.id)-\(task.status.rawValue)-\(task.help?.id.uuidString ?? "")" }
+    static func taskKey(_ task: AgentTask) -> String {
+        if task.isActiveInFeed { return "task-live-\(task.id)" }
+        return "task-\(task.id)-\(task.status.rawValue)-\(task.help?.id.uuidString ?? "")"
+    }
 }
 
 /// The selected object becomes a floating card over its own feed context.
