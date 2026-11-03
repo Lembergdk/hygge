@@ -32,14 +32,22 @@ final class FlamePlayTests: XCTestCase {
         XCTAssertEqual(settings.liveliness, 1.35, accuracy: 0.001)
         XCTAssertEqual(settings.reaction(for: .tapHead), .pat)
         XCTAssertEqual(settings.reaction(for: .swipeUp), .bigJump)
-        XCTAssertEqual(settings.reaction(for: .shake), .dizzy)
+        XCTAssertEqual(settings.reaction(for: .shake), .nauseous)
+        XCTAssertNil(settings.placement)
+        XCTAssertEqual(settings.description(for: .tapHead), "")
 
         var custom = settings
         custom.setReaction(.twirl, for: .swipeRight)
+        custom.setDescription("Do a little bow", for: .tapHead)
+        custom.placement = FlamePlacement(x: 0.25, y: 1.7)
         let decoded = try JSONDecoder().decode(
             FlameInteractionSettings.self,
             from: JSONEncoder().encode(custom))
         XCTAssertEqual(decoded.reaction(for: .swipeRight), .twirl)
+        XCTAssertEqual(decoded.description(for: .tapHead), "Do a little bow")
+        XCTAssertEqual(decoded.placement, FlamePlacement(x: 0.25, y: 1))
+        custom.setDescription("   ", for: .tapHead)
+        XCTAssertEqual(custom.description(for: .tapHead), "")
         XCTAssertEqual(try JSONDecoder().decode(
             FlameInteractionSettings.self, from: Data("{}".utf8)),
                        FlameInteractionSettings())

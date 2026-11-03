@@ -43,7 +43,13 @@ final class FlamePlayStore {
             "Gyro lean \(s.gyroEnabled ? "\(Int(s.gyroLeanDegrees))°" : "off") · Idle \(s.idleEnabled ? "every ~\(String(format: "%.1f", s.idleInterval)) s" : "off")",
         ]
         for gesture in FlameGestureKind.allCases {
-            lines.append("\(gesture.label) → \(s.reaction(for: gesture).label)")
+            var line = "\(gesture.label) → \(s.reaction(for: gesture).label)"
+            let words = s.description(for: gesture)
+            if !words.isEmpty { line += " — in my words: “\(words)”" }
+            lines.append(line)
+        }
+        if let p = s.placement {
+            lines.append("Placed at x \(String(format: "%.2f", p.x)), y \(String(format: "%.2f", p.y)) of the feed")
         }
         if let data = try? JSONEncoder.pretty.encode(s),
            let json = String(data: data, encoding: .utf8) {

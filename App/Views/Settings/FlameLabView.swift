@@ -3,12 +3,16 @@ import SwiftUI
 import UIKit
 
 /// Flame Lab: the design-it-yourself surface for the interactive flame.
-/// DEBUG builds only — it never ships in release UI. Play with the stage
-/// flame (tap his head/body/feet, flick, pinch, tilt the phone, shake),
-/// remap any gesture to any reaction, tune the feel with sliders, then
-/// copy your picks and hand them back to be baked in as the defaults.
-/// Every change applies live everywhere via FlamePlayStore and is kept
-/// on this phone until reset.
+/// DEBUG builds only — it never ships in release UI. The stage stays
+/// pinned on top so he is always in view while you work: play with him
+/// (tap zones, flicks, pinch, drag him around, tilt, shake), remap any
+/// gesture, describe in your own words what it *should* do, tune the
+/// feel, then copy your picks back to become the shipped defaults.
+///
+/// Descriptions are saved with the picks today; they will generate
+/// behaviors automatically once the backend description-to-behavior
+/// route lands. Until then the menu choice is what he does — and your
+/// words ride along in "Copy my picks" so they can be hand-built.
 struct FlameLabView: View {
     @Environment(FlamePlayStore.self) private var playStore
     @State private var preview: FlamePreviewRequest?
@@ -16,35 +20,52 @@ struct FlameLabView: View {
     @State private var lastGesture: FlameGestureKind?
     @State private var lastReaction: FlameReactionKind?
     @State private var copied = false
+    @FocusState private var descriptionFocus: FlameGestureKind?
 
     var body: some View {
         @Bindable var play = playStore
-        SettingsPage(title: "Flame Lab") {
+        VStack(spacing: 0) {
             stage(play: play)
-            feelSection(play: play)
-            reactionsSection(play: play)
-            shareSection
+                .padding(.horizontal, 22).padding(.top, 14).padding(.bottom, 10)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    reactionsSection(play: play)
+                    feelSection(play: play)
+                    shareSection
+                }
+                .padding(22).padding(.bottom, 20)
+            }
+            .scrollDismissesKeyboard(.interactively)
         }
+        .background(HyggeTheme.paper)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { descriptionFocus = nil }
+            }
+        }
+        .toolbar(.visible, for: .navigationBar)
+        .navigationTitle("Flame Lab")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(HyggeTheme.paper, for: .navigationBar)
+        .tint(HyggeTheme.sageDeep)
+        .fontDesign(.rounded)
     }
 
     private func stage(play: FlamePlayStore) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             ZStack {
                 RoundedRectangle(cornerRadius: 22)
                     .fill(HyggeTheme.paperDeep)
-                InteractiveFlame(
-                    hitHeight: CGFloat(play.settings.homeFlameSize) * 1.25,
-                    preview: preview,
-                    onGesture: { gesture, reaction in
-                        lastGesture = gesture
-                        lastReaction = reaction
-                    }
-                ) {
-                    AnimatedFlame(animation: .walk, size: CGFloat(play.settings.homeFlameSize))
-                        .shadow(color: .black.opacity(0.18), radius: 10, y: 5)
-                }
+                FlameActor(size: CGFloat(play.settings.homeFlameSize),
+                           preview: preview,
+                           onGesture: { gesture, reaction in
+                               lastGesture = gesture
+                               lastReaction = reaction
+                           })
             }
-            .frame(height: 300)
+            .frame(height: 240)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Flame playground")
             .accessibilityIdentifier("flameLab.stage")
@@ -54,12 +75,55 @@ struct FlameLabView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(HyggeTheme.ink)
             } else {
-                Text("Tap his head, body or feet. Flick him. Pinch. Tilt the phone. Shake it.")
-                    .font(.subheadline)
+                Text("Tap his head, body or feet. Flick him. Pinch. Twirl him till he's sick. Tilt or shake the phone.")
+                    .font(.caption)
                     .foregroundStyle(HyggeTheme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    private func reactionsSection(play: FlamePlayStore) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Who does what")
+            Text("Pick what he does today — and/or describe in your own words what he should do. Descriptions are saved with your picks and will generate the behavior automatically once the backend route lands; until then, include them in Copy my picks and they'll be hand-built from your words.")
+                .font(.caption)
+                .foregroundStyle(HyggeTheme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(FlameGestureKind.allCases) { gesture in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 10) {
+                        Text(gesture.label)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(HyggeTheme.ink)
+                        Spacer()
+                        Button("Try") { tryReaction(play.settings.reaction(for: gesture)) }
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(HyggeTheme.sageDeep)
+                            .frame(minWidth: 48, minHeight: 36)
+                    }
+                    Picker(gesture.label, selection: reactionBinding(play, gesture)) {
+                        ForEach(FlameReactionKind.allCases) { reaction in
+                            Text(reaction.label).tag(reaction)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                    .settingsField()
+                    TextField("Describe your own…",
+                              text: descriptionBinding(play, gesture), axis: .vertical)
+                        .focused($descriptionFocus, equals: gesture)
+                        .lineLimit(1...3)
+                        .font(.subheadline)
+                        .settingsField()
+                        .accessibilityLabel("Your description for \(gesture.label)")
+                }
+                .padding(.vertical, 6)
+                if gesture != FlameGestureKind.allCases.last { Divider() }
+            }
+        }
+        .settingsSurface()
     }
 
     private func feelSection(play: FlamePlayStore) -> some View {
@@ -78,31 +142,11 @@ struct FlameLabView: View {
                    range: 2.5...10, format: { String(format: "%.1f s", $0) })
             Toggle("Idle behavior", isOn: $play.settings.idleEnabled)
             Toggle("Gyro lean", isOn: $play.settings.gyroEnabled)
-        }
-        .settingsSurface()
-    }
-
-    private func reactionsSection(play: FlamePlayStore) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            sectionTitle("Who does what")
-            ForEach(FlameGestureKind.allCases) { gesture in
-                HStack(spacing: 10) {
-                    Text(gesture.label)
-                        .font(.subheadline)
-                        .foregroundStyle(HyggeTheme.ink)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Picker(gesture.label, selection: reactionBinding(play, gesture)) {
-                        ForEach(FlameReactionKind.allCases) { reaction in
-                            Text(reaction.label).tag(reaction)
-                        }
-                    }
-                    .labelsHidden()
-                    Button("Try") { tryReaction(play.settings.reaction(for: gesture)) }
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(HyggeTheme.sageDeep)
-                        .frame(minWidth: 44, minHeight: 36)
-                }
-                if gesture != FlameGestureKind.allCases.last { Divider() }
+            if play.settings.placement != nil {
+                Button("Send him back to his corner") { play.settings.placement = nil }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(HyggeTheme.sageDeep)
+                    .frame(minHeight: 44)
             }
         }
         .settingsSurface()
@@ -163,6 +207,12 @@ struct FlameLabView: View {
                                  _ gesture: FlameGestureKind) -> Binding<FlameReactionKind> {
         Binding(get: { play.settings.reaction(for: gesture) },
                 set: { play.settings.setReaction($0, for: gesture) })
+    }
+
+    private func descriptionBinding(_ play: FlamePlayStore,
+                                    _ gesture: FlameGestureKind) -> Binding<String> {
+        Binding(get: { play.settings.description(for: gesture) },
+                set: { play.settings.setDescription($0, for: gesture) })
     }
 
     private func tryReaction(_ reaction: FlameReactionKind) {

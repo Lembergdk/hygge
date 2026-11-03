@@ -31,6 +31,7 @@ public enum FlameGestureKind: String, CaseIterable, Codable, Equatable, Sendable
 public enum FlameReactionKind: String, CaseIterable, Codable, Equatable, Sendable, Identifiable {
     case none, pat, poke, footTapDance, miniHop, bigJump, duck, sideHop
     case twirl, wiggle, stretch, puffUp, shrinkStartle, dizzy
+    case wave, pointUp, laugh, cry, nauseous, turnAround, walkAbout
 
     public var id: String { rawValue }
 
@@ -41,7 +42,7 @@ public enum FlameReactionKind: String, CaseIterable, Codable, Equatable, Sendabl
         case .poke: return "Poke recoil"
         case .footTapDance: return "Foot-tap dance"
         case .miniHop: return "Mini hop"
-        case .bigJump: return "Big jump"
+        case .bigJump: return "Big jump, arms up"
         case .duck: return "Duck down"
         case .sideHop: return "Side hop"
         case .twirl: return "Twirl"
@@ -50,6 +51,13 @@ public enum FlameReactionKind: String, CaseIterable, Codable, Equatable, Sendabl
         case .puffUp: return "Puff up proud"
         case .shrinkStartle: return "Shrink & startle"
         case .dizzy: return "Dizzy wobble"
+        case .wave: return "Wave hello"
+        case .pointUp: return "Point up excitedly"
+        case .laugh: return "Laugh"
+        case .cry: return "Cry"
+        case .nauseous: return "Feel sick"
+        case .turnAround: return "Turn his back & spin"
+        case .walkAbout: return "Walk on the spot"
         }
     }
 }
@@ -94,6 +102,18 @@ public enum FlameGestureClassifier {
     }
 }
 
+/// Where the user dropped him on the Home feed, as a normalized center
+/// (0...1 in the feed's width/height). `nil` = his home corner.
+public struct FlamePlacement: Codable, Equatable, Sendable {
+    public var x: Double
+    public var y: Double
+
+    public init(x: Double, y: Double) {
+        self.x = x.isFinite ? min(1, max(0, x)) : 1
+        self.y = y.isFinite ? min(1, max(0, y)) : 1
+    }
+}
+
 /// Everything the Flame Lab can tune, persisted as one value. Defaults are
 /// what ships: a 122pt Home flame with springy, varied reactions.
 public struct FlameInteractionSettings: Codable, Equatable, Sendable {
@@ -105,12 +125,19 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
     public var idleEnabled: Bool
     public var gyroEnabled: Bool
     public var reactions: [FlameGestureKind: FlameReactionKind]
+    /// The user's own words for what each gesture should do. Saved with
+    /// the picks today; they become generated behaviors once the backend
+    /// description-to-behavior route lands.
+    public var descriptions: [FlameGestureKind: String]
+    public var placement: FlamePlacement?
 
     public init(homeFlameSize: Double = 122, liveliness: Double = 1.35,
                 gyroLeanDegrees: Double = 9, jumpHeight: Double = 24,
                 idleInterval: Double = 5, idleEnabled: Bool = true,
                 gyroEnabled: Bool = true,
-                reactions: [FlameGestureKind: FlameReactionKind]? = nil) {
+                reactions: [FlameGestureKind: FlameReactionKind]? = nil,
+                descriptions: [FlameGestureKind: String] = [:],
+                placement: FlamePlacement? = nil) {
         self.homeFlameSize = homeFlameSize
         self.liveliness = liveliness
         self.gyroLeanDegrees = gyroLeanDegrees
@@ -119,6 +146,8 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
         self.idleEnabled = idleEnabled
         self.gyroEnabled = gyroEnabled
         self.reactions = reactions ?? Self.defaultReactions
+        self.descriptions = descriptions
+        self.placement = placement
         clamp()
     }
 
@@ -127,7 +156,7 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
         .swipeUp: .bigJump, .swipeDown: .duck,
         .swipeLeft: .sideHop, .swipeRight: .sideHop,
         .pinchIn: .shrinkStartle, .pinchOut: .puffUp,
-        .shake: .dizzy,
+        .shake: .nauseous,
     ]
 
     public func reaction(for gesture: FlameGestureKind) -> FlameReactionKind {
@@ -139,12 +168,23 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
         reactions[gesture] = reaction
     }
 
+    public func description(for gesture: FlameGestureKind) -> String {
+        descriptions[gesture] ?? ""
+    }
+
+    public mutating func setDescription(_ text: String, for gesture: FlameGestureKind) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { descriptions[gesture] = nil }
+        else { descriptions[gesture] = text }
+    }
+
     public mutating func clamp() {
         homeFlameSize = Self.clamp(homeFlameSize, 81, 170, fallback: 122)
         liveliness = Self.clamp(liveliness, 0.4, 2, fallback: 1.35)
         gyroLeanDegrees = Self.clamp(gyroLeanDegrees, 0, 14, fallback: 9)
         jumpHeight = Self.clamp(jumpHeight, 8, 40, fallback: 24)
         idleInterval = Self.clamp(idleInterval, 2.5, 10, fallback: 5)
+        if let p = placement { placement = FlamePlacement(x: p.x, y: p.y) }
     }
 
     private static func clamp(_ v: Double, _ lo: Double, _ hi: Double,
@@ -155,6 +195,7 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case homeFlameSize, liveliness, gyroLeanDegrees, jumpHeight
         case idleInterval, idleEnabled, gyroEnabled, reactions
+        case descriptions, placement
     }
 
     public init(from decoder: Decoder) throws {
@@ -173,6 +214,11 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
             if let gesture = FlameGestureKind(rawValue: key) { merged[gesture] = value }
         }
         reactions = merged
+        let rawDescriptions = try c.decodeIfPresent([String: String].self, forKey: .descriptions) ?? [:]
+        descriptions = Dictionary(uniqueKeysWithValues: rawDescriptions.compactMap { key, value in
+            FlameGestureKind(rawValue: key).map { ($0, value) }
+        })
+        placement = try c.decodeIfPresent(FlamePlacement.self, forKey: .placement)
         clamp()
     }
 
@@ -187,6 +233,9 @@ public struct FlameInteractionSettings: Codable, Equatable, Sendable {
         try c.encode(gyroEnabled, forKey: .gyroEnabled)
         try c.encode(Dictionary(uniqueKeysWithValues: reactions.map { ($0.key.rawValue, $0.value) }),
                      forKey: .reactions)
+        try c.encode(Dictionary(uniqueKeysWithValues: descriptions.map { ($0.key.rawValue, $0.value) }),
+                     forKey: .descriptions)
+        try c.encodeIfPresent(placement, forKey: .placement)
     }
 }
 

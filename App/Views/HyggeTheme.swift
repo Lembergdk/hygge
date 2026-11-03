@@ -122,68 +122,59 @@ enum FlameState { case asleep, working, needsYou(Int), celebrating, thinking }
 struct FloatingFlame: View {
     var state: FlameState
     var dimmed: Bool = false
+    var traveling = false
     var onTap: () -> Void
     var onLongPress: () -> Void
+    var onDragBegan: (() -> Void)? = nil
+    var onDragMove: ((CGSize) -> Void)? = nil
+    var onDragEnded: (() -> Void)? = nil
     @Environment(FlamePlayStore.self) private var playStore
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var isAnimating: Bool {
-        if reduceMotion { return false }
-        switch state { case .needsYou, .thinking, .working: return true; default: return false }
-    }
-
-    private var animation: FlameAnimation {
-        switch state {
-        case .working: return .laptop
-        case .needsYou: return .notify
-        default: return .walk
-        }
-    }
 
     /// Tunable in Flame Lab. Default 122: about half again the 81pt flame
     /// of the first interactive build.
     private var size: CGFloat { CGFloat(playStore.settings.homeFlameSize) }
     private var frameHeight: CGFloat { size * 1.25 + 18 }
-    /// The 360×450 artwork carries ~16–18% transparent canvas under his
-    /// feet, so anchoring to the image edge left him floating ~50pt above
-    /// the bottom. Drop him by that slack (minus a small ground margin)
-    /// so his *feet* are what sit near the feed's bottom edge.
+    /// The artwork carries ~16–18% transparent canvas under his feet, so
+    /// anchoring to the image edge left him floating far above the bottom.
+    /// Drop him by that slack so his *feet* sit near the feed's edge.
     private var feetDrop: CGFloat { size * 1.25 * 0.165 + 6 }
 
+    private var isWorking: Bool { if case .working = state { return true }; return false }
+    private var needsYou: Bool { if case .needsYou = state { return true }; return false }
+
     var body: some View {
-        InteractiveFlame(hitHeight: frameHeight, onTap: onTap, onLongPress: onLongPress) {
-            // Mood motion (needs-you hops, thinking pulse) stays here;
-            // InteractiveFlame layers breath, idle life and reactions on it.
-            // Paused whenever calm: no continuous full-rate rendering.
-            TimelineView(.animation(minimumInterval: 0.05, paused: !isAnimating)) { context in
-                let t = context.date.timeIntervalSinceReferenceDate
-                ZStack(alignment: .topLeading) {
-                    // The flame is a character, not a button in a disc (mocks):
-                    // big, sticker-like, soft shadow only.
-                    AnimatedFlame(animation: animation, size: size)
-                        .shadow(color: Color.black.opacity(0.18), radius: 10, y: 5)
-                    if case .needsYou(let count) = state, count > 0 {
-                        Text("\(count)")
-                            .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(HyggeTheme.emberDeep, in: Capsule())
-                            // The 360×450 animation includes transparent padding.
-                            // Anchor to the character's shoulder, not the image corner.
-                            .offset(x: 18 * size / 108, y: 28 * size / 108)
-                    }
+        // The flame is a character, not a button in a disc (mocks):
+        // big, sticker-like, soft shadow only — now a layered rig with
+        // moving limbs and faces; the laptop clip still covers "working".
+        FlameActor(size: size,
+                   clipOverride: isWorking ? .laptop : nil,
+                   attention: needsYou,
+                   movable: onDragMove != nil,
+                   traveling: traveling,
+                   onTap: onTap,
+                   onLongPress: onLongPress,
+                   onDragBegan: onDragBegan,
+                   onDragMove: onDragMove,
+                   onDragEnded: onDragEnded)
+            .overlay(alignment: .topLeading) {
+                if case .needsYou(let count) = state, count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(HyggeTheme.emberDeep, in: Capsule())
+                        // The artwork includes transparent padding; anchor
+                        // to the character's shoulder, not the image corner.
+                        .offset(x: 18 * size / 108, y: 28 * size / 108)
+                        .allowsHitTesting(false)
                 }
-                .offset(y: bounceOffset(t))
-                .scaleEffect(pulseScale(t))
             }
-        }
-        .frame(width: size + 14, height: frameHeight, alignment: .bottom)
-        .offset(y: feetDrop)
-        .opacity(dimmed ? 0.35 : 1)
-        .animation(.easeInOut(duration: 0.25), value: dimmed)
-        .contentShape(Circle())
-        .accessibilityLabel(accessibilityText)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { onTap() }
+            .frame(width: size + 14, height: frameHeight, alignment: .bottom)
+            .offset(y: feetDrop)
+            .opacity(dimmed ? 0.35 : 1)
+            .animation(.easeInOut(duration: 0.25), value: dimmed)
+            .accessibilityLabel(accessibilityText)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { onTap() }
     }
 
     private var accessibilityText: String {
@@ -196,16 +187,4 @@ struct FloatingFlame: View {
         }
     }
 
-    private func bounceOffset(_ t: TimeInterval) -> CGFloat {
-        guard !reduceMotion, case .needsYou = state else { return 0 }
-        // two small hops, then still for ~30s
-        let cycle = t.truncatingRemainder(dividingBy: 30)
-        guard cycle < 1.2 else { return 0 }
-        return -abs(sin(cycle * .pi * 2)) * 7
-    }
-
-    private func pulseScale(_ t: TimeInterval) -> CGFloat {
-        guard !reduceMotion, case .thinking = state else { return 1 }
-        return 1 + 0.05 * sin(t * 2.4)
-    }
 }

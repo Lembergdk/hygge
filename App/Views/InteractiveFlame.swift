@@ -238,9 +238,9 @@ struct InteractiveFlame<Content: View>: View {
                 await pose(dy: -3, rot: Double(s) * 5, .easeInOut(duration: 0.09), hold: 0.09)
             }
             await hop(height: jump * 0.4)
-        case .miniHop:
+        case .miniHop, .walkAbout:
             await hop(height: jump * 0.45)
-        case .bigJump:
+        case .bigJump, .pointUp:
             await pose(dy: 4, sx: 1.1, sy: 0.86, .easeIn(duration: 0.11), hold: 0.11)
             await pose(dy: -jump, sx: 0.95, sy: 1.06, rot: -4, .easeOut(duration: 0.22), hold: 0.22)
             await pose(dy: 2, sx: 1.1, sy: 0.88, .easeIn(duration: 0.12), hold: 0.12)
@@ -253,11 +253,11 @@ struct InteractiveFlame<Content: View>: View {
             await pose(dx: d * 17 * CGFloat(live), dy: -jump * 0.55, rot: Double(d) * 7,
                        .easeOut(duration: 0.2), hold: 0.2)
             await pose(dx: d * 10, dy: 2, sx: 1.09, sy: 0.89, .easeIn(duration: 0.11), hold: 0.11)
-        case .twirl:
+        case .twirl, .turnAround:
             withAnimation(.easeInOut(duration: 0.55)) { spinDegrees += 360 }
             await pose(dy: -jump * 0.3, .easeOut(duration: 0.27), hold: 0.28)
             await pose(dy: 2, sx: 1.08, sy: 0.9, .easeIn(duration: 0.12), hold: 0.12)
-        case .wiggle:
+        case .wiggle, .wave, .laugh:
             for rot in [-7.0, 7, -5, 5, -2] where !Task.isCancelled {
                 await pose(dy: -2, rot: rot, .easeInOut(duration: 0.07), hold: 0.07)
             }
@@ -268,7 +268,7 @@ struct InteractiveFlame<Content: View>: View {
         case .shrinkStartle:
             await pose(dy: 3, sx: 0.8, sy: 0.8, .easeIn(duration: 0.1), hold: 0.2)
             await pose(sx: 1.04, sy: 1.04, .spring(response: 0.3, dampingFraction: 0.55), hold: 0.3)
-        case .dizzy:
+        case .dizzy, .cry, .nauseous:
             for rot in [-10.0, 10, -8, 8, -4] where !Task.isCancelled {
                 await pose(dx: CGFloat(rot) * 0.4, sy: 0.97, rot: rot,
                            .easeInOut(duration: 0.13), hold: 0.13)
