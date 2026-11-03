@@ -314,6 +314,9 @@ export class UserSandbox extends DurableObject<Env> {
       modelStrong: this.env.HYGGE_LLM_MODEL_STRONG,
       agentName,
       agentId: `hygge-${this.env.HYGGE_ENV}`,
+      sessionId: this.ctx.id.toString(),
+      sessionName: this.userId || undefined,
+      conversationId: agentName === "hygge-onboarding" ? this.ctx.id.toString() : undefined,
       tracePayloads: this.env.HYGGE_TRACE_PAYLOADS === "1",
       gatewayToken: this.env.HYGGE_AIG_TOKEN,
       gatewayCollectPayload: this.env.HYGGE_AIG_COLLECT_PAYLOAD === "1",
@@ -807,6 +810,8 @@ export class UserSandbox extends DurableObject<Env> {
       browser,
       task,
       traceAgentId: `hygge-${this.env.HYGGE_ENV}`,
+      traceSessionId: this.ctx.id.toString(),
+      traceSessionName: this.userId || undefined,
       tracePayloads: this.env.HYGGE_TRACE_PAYLOADS === "1",
       hints,
       decider,
@@ -1419,7 +1424,12 @@ export class UserSandbox extends DurableObject<Env> {
         this.ctx.waitUntil(
           (async () => {
             try {
-              await onboardingMessageStream({ client, ...(body as object) }, emit);
+              await onboardingMessageStream({
+                client,
+                ...(body as object),
+                sessionId: this.ctx.id.toString(),
+                sessionName: this.userId || undefined,
+              }, emit);
             } finally {
               await writer.close().catch(() => {});
             }
@@ -1430,7 +1440,12 @@ export class UserSandbox extends DurableObject<Env> {
         });
       }
       if (request.method === "POST" && parts.join("/") === "onboarding/message") {
-        return json(await onboardingMessage({ client: new LLMClient(this.llmConfig("hygge-onboarding")), ...(body as object) }));
+        return json(await onboardingMessage({
+          client: new LLMClient(this.llmConfig("hygge-onboarding")),
+          ...(body as object),
+          sessionId: this.ctx.id.toString(),
+          sessionName: this.userId || undefined,
+        }));
       }
       if (request.method === "POST" && parts.join("/") === "site-proposals") {
         return json({ proposals: await this.proposeSites(body) });
