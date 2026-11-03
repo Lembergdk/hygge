@@ -26,7 +26,9 @@ struct HomeFeedView: View {
             HyggeTheme.paper.ignoresSafeArea()
             feedScroll
             FloatingFlame(state: flameState, dimmed: flameDimmed) { showConversation = true } onLongPress: { showPauseConfirm = true }
-                .padding(.trailing, 18).padding(.bottom, 14)
+                // Feet sit close to the bottom edge (FloatingFlame already
+                // swallows the artwork's transparent under-foot slack).
+                .padding(.trailing, 16).padding(.bottom, 2)
         }
         .allowsHitTesting(focus == nil)
         .accessibilityHidden(focus != nil)
@@ -96,7 +98,7 @@ struct HomeFeedView: View {
                     Button("Your work") { showYourWork = true }
                         .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
                         .frame(minHeight: 44).padding(.top, 8)
-                    Color.clear.frame(height: 145)
+                    Color.clear.frame(height: 175)
                 }
                 .scrollTargetLayout()
                 .background(GeometryReader { geometry in

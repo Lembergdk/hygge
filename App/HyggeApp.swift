@@ -7,12 +7,14 @@ struct HyggeApp: App {
     // from the Home primer, never from here.
     @UIApplicationDelegateAdaptor(HyggeAppDelegate.self) private var appDelegate
     @State private var store = AppStore()
+    @State private var flamePlay = FlamePlayStore()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(store)
+                .environment(flamePlay)
                 // Brief 01: pull (or migrate once) at launch, and pull
                 // again whenever the app comes back to the front. The
                 // cache renders instantly either way. Push arrivals

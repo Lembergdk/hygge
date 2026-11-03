@@ -46,6 +46,7 @@ struct SettingsPreviewHost: View {
         case "sites": ApprovedSitesView()
         case "email": SettingsEmailView()
         case "permissions": SettingsPermissionsView()
+        case "flamelab": FlameLabView()
         default: ProfileHubView()
         }
     }

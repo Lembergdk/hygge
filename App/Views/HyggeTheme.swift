@@ -124,6 +124,7 @@ struct FloatingFlame: View {
     var dimmed: Bool = false
     var onTap: () -> Void
     var onLongPress: () -> Void
+    @Environment(FlamePlayStore.self) private var playStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isAnimating: Bool {
@@ -139,36 +140,50 @@ struct FloatingFlame: View {
         }
     }
 
+    /// Tunable in Flame Lab. Default 122: about half again the 81pt flame
+    /// of the first interactive build.
+    private var size: CGFloat { CGFloat(playStore.settings.homeFlameSize) }
+    private var frameHeight: CGFloat { size * 1.25 + 18 }
+    /// The 360×450 artwork carries ~16–18% transparent canvas under his
+    /// feet, so anchoring to the image edge left him floating ~50pt above
+    /// the bottom. Drop him by that slack (minus a small ground margin)
+    /// so his *feet* are what sit near the feed's bottom edge.
+    private var feetDrop: CGFloat { size * 1.25 * 0.165 + 6 }
+
     var body: some View {
-        // Paused whenever calm: no continuous full-rate rendering while idle.
-        TimelineView(.animation(minimumInterval: 0.05, paused: !isAnimating)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            ZStack(alignment: .topLeading) {
-                // The flame is a character, not a button in a disc (mocks):
-                // big, sticker-like, soft shadow only.
-                AnimatedFlame(animation: animation, size: 108)
-                    .shadow(color: Color.black.opacity(0.18), radius: 10, y: 5)
-                if case .needsYou(let count) = state, count > 0 {
-                    Text("\(count)")
-                        .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(HyggeTheme.emberDeep, in: Capsule())
-                        // The 360×450 animation includes transparent padding.
-                        // Anchor to the character's shoulder, not the image corner.
-                        .offset(x: 18, y: 28)
+        InteractiveFlame(hitHeight: frameHeight, onTap: onTap, onLongPress: onLongPress) {
+            // Mood motion (needs-you hops, thinking pulse) stays here;
+            // InteractiveFlame layers breath, idle life and reactions on it.
+            // Paused whenever calm: no continuous full-rate rendering.
+            TimelineView(.animation(minimumInterval: 0.05, paused: !isAnimating)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                ZStack(alignment: .topLeading) {
+                    // The flame is a character, not a button in a disc (mocks):
+                    // big, sticker-like, soft shadow only.
+                    AnimatedFlame(animation: animation, size: size)
+                        .shadow(color: Color.black.opacity(0.18), radius: 10, y: 5)
+                    if case .needsYou(let count) = state, count > 0 {
+                        Text("\(count)")
+                            .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(HyggeTheme.emberDeep, in: Capsule())
+                            // The 360×450 animation includes transparent padding.
+                            // Anchor to the character's shoulder, not the image corner.
+                            .offset(x: 18 * size / 108, y: 28 * size / 108)
+                    }
                 }
+                .offset(y: bounceOffset(t))
+                .scaleEffect(pulseScale(t))
             }
-            .offset(y: bounceOffset(t))
-            .scaleEffect(pulseScale(t))
         }
-        .frame(width: 122, height: 150)
+        .frame(width: size + 14, height: frameHeight, alignment: .bottom)
+        .offset(y: feetDrop)
         .opacity(dimmed ? 0.35 : 1)
         .animation(.easeInOut(duration: 0.25), value: dimmed)
         .contentShape(Circle())
-        .onTapGesture(perform: onTap)
-        .onLongPressGesture(minimumDuration: 0.6, perform: onLongPress)
         .accessibilityLabel(accessibilityText)
         .accessibilityAddTraits(.isButton)
+        .accessibilityAction { onTap() }
     }
 
     private var accessibilityText: String {

@@ -29,6 +29,12 @@ struct ProfileHubView: View {
                         NavigationLink { SettingsPermissionsView() } label: {
                             SettingsRow(title: "Permissions", icon: "slider.horizontal.3", subtitle: "Notifications, calendar & location")
                         }
+                        #if DEBUG
+                        Divider()
+                        NavigationLink { FlameLabView() } label: {
+                            SettingsRow(title: "Flame Lab", icon: "flame", subtitle: "Design how he reacts")
+                        }
+                        #endif
                         Divider()
                         Button { confirmSignOut = true } label: {
                             SettingsRow(title: signingOut ? "Signing out…" : "Sign out", icon: "rectangle.portrait.and.arrow.right", destructive: true, chevron: false)
