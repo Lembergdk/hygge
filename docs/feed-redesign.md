@@ -4,6 +4,12 @@ Home tells different stories through different card compositions. Invitations us
 
 Tapping a detail-bearing card moves it into the foreground with matched geometry over a dimmed feed. Its details scroll inside the floating card. Back to feed, tapping the backdrop, dragging down on the top bar, and accessibility escape return to the same feed position. Chat questions open the relevant chat; profile and chat retain their existing sheets.
 
+## Live work and incoming updates
+
+Ongoing work always occupies the first feed section, above invitations, opportunities and reviews. A browser paused for human help is still ongoing; its card takes the person into chat. Active cards cannot be dismissed or archived. Once the task finishes, its existing witnessed activity event appears as a compact Journal row; a stale browser identifier on a completed task never creates a live card. Earnings retain their visual amount card in Journal.
+
+At the top, arrivals animate into place with a short spring and fade (fade only with Reduce Motion). Away from the top, new identities wait outside the rendered feed and the order of admitted cards is retained. A floating “New updates” pill scrolls to the top; reaching the top either by the pill or by scrolling admits the latest data. The pill overlays the viewport rather than pushing its content down. Existing task state continues updating, obsolete cards disappear, and scroll-position tracking anchors the current reading position. Updates also wait while a detail/profile/chat presentation covers the feed. Undo admits only the restored card, leaving unrelated arrivals queued.
+
 - Tap: open details, review, browser or the relevant chat.
 - Short swipe right: expose the named primary action. Tap it to continue.
 - Short swipe left: expose Dismiss.
@@ -22,6 +28,8 @@ Artwork uses bundled Hygge assets and SF Symbols. The production site/listing mo
 Debug only: launch with `--settings-preview --feed-preview`. This seeds the production views with isolated local fixtures and uses the existing preview storage and disabled production networking. It is not present in release routing.
 
 Add `--browser-preview` with the existing loopback browser fixture for a real local live stream. Add `--feed-catalog` to render `Documents/feed-object-overview.png` from production SwiftUI components. The catalog covers 24 states: site suggestion, opportunity, live work, profile/application/message/calendar reviews, question/verification/login/recovery help, public-action chat review, earnings, account/profile completion, application/message/calendar outcomes, search, site learning, filed mail, permission reminder, pause, and caught-up state. Its data is illustrative and never uploaded.
+
+Add `--feed-arrivals-preview` to insert a local opportunity after 30 seconds, then finish the local browser task with a witnessed profile event 15 seconds later. This verifies queued arrivals and the live-to-journal handoff without production traffic.
 
 ## Validation
 

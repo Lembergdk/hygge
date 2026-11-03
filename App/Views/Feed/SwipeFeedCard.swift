@@ -11,6 +11,7 @@ struct SwipeFeedCard<Content: View>: View {
     let open: () -> Void
     let primary: () -> Void
     let dismiss: () -> Void
+    var allowsDismissal = true
     @ViewBuilder var content: Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var offset: CGFloat = 0
@@ -45,8 +46,12 @@ struct SwipeFeedCard<Content: View>: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { open() }
             .accessibilityAction(named: Text(primaryTitle)) { primary() }
-            .accessibilityAction(named: Text("Dismiss")) { dismiss() }
-            .accessibilityHint("Opens details. Swipe right for \(primaryTitle.lowercased()), left to dismiss.")
+            .accessibilityActions {
+                if allowsDismissal { Button("Dismiss", action: dismiss) }
+            }
+            .accessibilityHint(allowsDismissal
+                ? "Opens details. Swipe right for \(primaryTitle.lowercased()), left to dismiss."
+                : "Opens details. Swipe right for \(primaryTitle.lowercased()).")
             .onChange(of: openCardID) { _, value in if value != id { close() } }
     }
     private var rotation: Double {
@@ -60,7 +65,7 @@ struct SwipeFeedCard<Content: View>: View {
     private func beginDrag() { origin = offset; openCardID = id }
     private func drag(_ translation: CGFloat) {
         guard !committing else { return }
-        offset = min(width, max(-width, origin + translation))
+        offset = min(width, max(allowsDismissal ? -width : 0, origin + translation))
         let next = Double(abs(offset)) >= FeedSwipe.threshold(width: Double(width))
         if next != armed {
             armed = next
