@@ -428,7 +428,13 @@ struct FlameActor: View {
                         fire(.doubleTap, direction: direction, intensity: 1.15)
                     } else {
                         lastTapAt = Date()
-                        fire(kind, direction: direction, intensity: intensity)
+                        // A tap that does something (the feed's hop to
+                        // chat) goes straight there: the hop IS the
+                        // reaction. Playing pat/poke first read as him
+                        // waving his arms before jumping.
+                        if onTap == nil {
+                            fire(kind, direction: direction, intensity: intensity)
+                        }
                         scheduleTap()
                     }
                 } else {
@@ -529,7 +535,7 @@ struct FlameActor: View {
         guard let onTap else { return }
         pendingTapTask?.cancel()
         pendingTapTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(280))
+            try? await Task.sleep(for: .milliseconds(160))
             if !Task.isCancelled { onTap() }
         }
     }
@@ -710,10 +716,12 @@ struct FlameActor: View {
         case .pointUp:
             await pose(.easeOut(duration: 0.16), hold: 0.2) { p in
                 p.face = .laugh; p.armSL = 148; p.armSR = -24; p.rot = -3
+                p.faceDX = -size * 0.020; p.faceDY = -size * 0.014
             }
             await hop(height: jump * 0.55, face: .laugh)
             await pose(.easeInOut(duration: 0.18), hold: 0.35) { p in
                 p.face = .happy; p.armSL = 148; p.armSR = -24; p.rot = -3
+                p.faceDX = -size * 0.020; p.faceDY = -size * 0.014
             }
         case .laugh:
             for i in 0..<3 where !Task.isCancelled {
@@ -797,8 +805,23 @@ struct FlameActor: View {
 
     private func runIdleLoop() async {
         try? await Task.sleep(for: .seconds(browsing ? 0.6 : 2.5))
-        var pointNext = false
         while !Task.isCancelled {
+            if attention {
+                // A badge is showing: the only idle move is pointing
+                // and looking up at it (badge sits top-left of him).
+                guard !Task.isCancelled, reactionTask == nil, !isDragging,
+                      Date().timeIntervalSince(lastInteraction) > 1.2 else {
+                    try? await Task.sleep(for: .seconds(0.3))
+                    continue
+                }
+                await run(.pointUp, direction: -1,
+                          jump: CGFloat(settings.jumpHeight), live: 1)
+                if !Task.isCancelled { await rest() }
+                let pause = max(1.4, settings.idleInterval * 0.45
+                                / max(0.5, settings.liveliness))
+                try? await Task.sleep(for: .seconds(pause))
+                continue
+            }
             if browsing {
                 // A live session overrides all idle life: he types.
                 guard !Task.isCancelled, reactionTask == nil, !isDragging,
@@ -816,12 +839,7 @@ struct FlameActor: View {
             try? await Task.sleep(for: .seconds(wait))
             guard !Task.isCancelled, reactionTask == nil, !isDragging,
                   Date().timeIntervalSince(lastInteraction) > 3 else { continue }
-            if attention && pointNext {
-                await run(.pointUp, direction: -1, jump: CGFloat(settings.jumpHeight), live: 1)
-            } else {
-                await runIdle(step.action)
-            }
-            pointNext.toggle()
+            await runIdle(step.action)
             if !Task.isCancelled { await rest() }
         }
     }
