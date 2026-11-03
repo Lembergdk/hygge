@@ -22,8 +22,8 @@ struct BrowserPreviewHost: View {
         store.notificationPrimerVisible = false; store.isPaused = false; store.hasOnboarded = true
         var task = AgentTaskFactory.signupTask(profile: store.profile, site: site)
         task.id = taskID; task.browserSessionID = "preview"; task.backendTaskID = "preview-task"
-        task.status = screen == "chat" ? .needsHuman : .running
-        if screen == "chat" {
+        task.status = (screen == "chat" || screen == "attention") ? .needsHuman : .running
+        if screen == "chat" || screen == "attention" {
             task.help = TaskHelp(kind: .information, message: "Which title feels most like you?", questions: [.init(text: "Professional title", suggestions: ["Brand designer & writer", "Creative freelancer"])])
         }
         store.tasks = [task]

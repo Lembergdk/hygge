@@ -14,6 +14,8 @@ final class LiveBrowserSession {
     var ownsControl = false
     var connected = false
     var ended = false
+    var retryStopped = false
+    var requiresSignIn = false
     var busy = false
     var keyboardVisible = false
     var precisionPointer = false
@@ -28,6 +30,8 @@ final class LiveBrowserSession {
     @ObservationIgnored private var scrollSender: Task<Void, Never>?
     @ObservationIgnored private var viewers = 0
     @ObservationIgnored private var foreground = true
+    @ObservationIgnored private var recovery = BrowserStreamRecovery()
+    @ObservationIgnored private var receivedCurrentFrame = false
     @ObservationIgnored private var lastResponse = Date.distantPast
 
     init(id: String, backend: BackendClient) {
@@ -40,7 +44,14 @@ final class LiveBrowserSession {
         request.timeoutInterval = 20
     }
 
-    var status: String { ended ? "Finished" : connected ? "Live" : image == nil ? "Connecting…" : "Reconnecting…" }
+    var isRecovering: Bool { !connected && !ended && !retryStopped && !requiresSignIn }
+    var canReconnect: Bool { !ended && !requiresSignIn }
+    var status: String {
+        if ended { return "Session ended" }
+        if requiresSignIn { return "Sign in required" }
+        if retryStopped { return "Connection lost" }
+        return connected ? "Live" : image == nil ? "Connecting…" : "Reconnecting…"
+    }
 
     func watch() async {
         viewers += 1
@@ -52,21 +63,26 @@ final class LiveBrowserSession {
         foreground = value
         if value { start() } else { stop() }
     }
-    func reconnect() { ended = false; problem = nil; stop(); start() }
+    func reconnect() { guard canReconnect else { return }; problem = nil; retryStopped = false; recovery = BrowserStreamRecovery(); stop(); start() }
     private func start() {
-        guard runner == nil, viewers > 0, foreground, !ended else { return }
+        guard runner == nil, viewers > 0, foreground, !ended, !retryStopped, !requiresSignIn else { return }
         runner = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, !self.ended else { return }
                 let ws = URLSession.shared.webSocketTask(with: self.request)
+                self.sending?.cancel(); self.sending = nil
+                self.scrollSender?.cancel(); self.scrollSender = nil; self.scrollDelta = .zero
                 self.socket = ws
+                self.receivedCurrentFrame = false
                 self.lastResponse = .now
+                let startedAt = Date.now
                 ws.resume()
                 let heartbeat = Task { [weak self] in
                     while !Task.isCancelled {
                         do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                        guard let self else { return }
-                        if Date.now.timeIntervalSince(self.lastResponse) > 15 {
+                        guard let self, self.socket === ws else { return }
+                        if Date.now.timeIntervalSince(self.lastResponse) > 15 ||
+                            (!self.receivedCurrentFrame && Date.now.timeIntervalSince(startedAt) > 15) {
                             ws.cancel(with: .goingAway, reason: nil); return
                         }
                         self.send(["type": "ping"])
@@ -92,6 +108,22 @@ final class LiveBrowserSession {
                 self.keyboardVisible = false
                 self.failReplies()
                 guard !Task.isCancelled, !self.ended else { return }
+                switch self.recovery.disconnected(httpStatus: (ws.response as? HTTPURLResponse)?.statusCode,
+                    normallyClosed: ws.closeCode == .normalClosure) {
+                case .ended:
+                    self.ended = true
+                    self.problem = "This browser session has ended. Return to chat to continue."
+                    return
+                case .signInRequired:
+                    self.requiresSignIn = true
+                    self.problem = "Sign in to Hygge again to reconnect to your browser."
+                    return
+                case .unavailable:
+                    self.retryStopped = true
+                    self.problem = "The browser isn’t responding. Check your connection, then try again."
+                    return
+                case .retry: break
+                }
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
             }
         }
@@ -114,10 +146,11 @@ final class LiveBrowserSession {
         switch type {
         case "frame":
             if let base64 = value["data"] as? String, let bytes = Data(base64Encoded: base64), let frame = UIImage(data: bytes) {
-                image = frame; connected = true; problem = nil
+                image = frame; receivedCurrentFrame = true; connected = true; problem = nil
+                recovery.receivedResponse(at: .now)
             }
             send(["type": "ack"])
-        case "pong": if image != nil { connected = true }
+        case "pong": if receivedCurrentFrame { connected = true; recovery.receivedResponse(at: .now) }
         case "state":
             pageURL = value["url"] as? String ?? pageURL
             if let w = value["width"] as? Double, let h = value["height"] as? Double { viewport = CGSize(width: w, height: h) }
@@ -131,7 +164,10 @@ final class LiveBrowserSession {
         case "error":
             problem = value["message"] as? String ?? "The browser action couldn’t finish."
             if let id = value["requestID"] as? String { replies.removeValue(forKey: id)?.resume(throwing: URLError(.cannotLoadFromNetwork)) }
-        case "ended": ended = true; connected = false; ownsControl = false; keyboardVisible = false
+        case "ended":
+            ended = true; connected = false; ownsControl = false; keyboardVisible = false
+            problem = "This browser session has ended. Return to chat to continue."
+            socket?.cancel(with: .normalClosure, reason: nil)
         default: break
         }
     }
@@ -140,9 +176,9 @@ final class LiveBrowserSession {
         let previous = sending
         sending = Task { [weak self] in
             await previous?.value
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, let self, self.socket === socket else { return }
             do { try await socket.send(.string(text)) }
-            catch { self?.connected = false; socket.cancel(with: .goingAway, reason: nil) }
+            catch { if self.socket === socket { self.connected = false; socket.cancel(with: .goingAway, reason: nil) } }
         }
     }
     private func transfer(_ type: String) async -> Bool {

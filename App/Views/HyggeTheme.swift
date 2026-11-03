@@ -148,16 +148,18 @@ struct FloatingFlame: View {
                 // big, sticker-like, soft shadow only.
                 AnimatedFlame(animation: animation, size: 108)
                     .shadow(color: Color.black.opacity(0.18), radius: 10, y: 5)
-                    .offset(y: bounceOffset(t))
-                    .scaleEffect(pulseScale(t))
                 if case .needsYou(let count) = state, count > 0 {
                     Text("\(count)")
                         .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(HyggeTheme.emberDeep, in: Capsule())
-                        .offset(x: 0, y: 2)
+                        // The 360×450 animation includes transparent padding.
+                        // Anchor to the character's shoulder, not the image corner.
+                        .offset(x: 18, y: 28)
                 }
             }
+            .offset(y: bounceOffset(t))
+            .scaleEffect(pulseScale(t))
         }
         .frame(width: 122, height: 150)
         .opacity(dimmed ? 0.35 : 1)

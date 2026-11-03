@@ -42,7 +42,7 @@ export class BrowserRunBrowser {
   /// Restore is best-effort: a site that rejects the state simply
   /// shows its login form and the mission re-logs in via the vault.
   async createSession(url: string, restore?: SessionState | null): Promise<Snapshot> {
-    const browser = await launch(this.binding);
+    const browser = await launch(this.binding, { keep_alive: 600_000 });
     const page = await browser.newPage();
     // Experience parity with an end user's browser: no safe-mode
     // restrictions are imposed anywhere (JavaScript and cookies
@@ -88,15 +88,27 @@ export class BrowserRunBrowser {
         .catch(() => {});
     }
     const id = crypto.randomUUID();
-    this.sessions.set(id, { id, browser, page, live: new BrowserLive(page) });
+    const live = new BrowserLive(page);
+    this.sessions.set(id, { id, browser, page, live });
+    browser.once("disconnected", () => {
+      live.finish("This browser session has expired. Return to chat to continue.");
+      this.sessions.delete(id);
+    });
     return this.snapshot(id) as Promise<Snapshot>;
   }
 
   hasSession(id: string): boolean {
-    return this.sessions.has(id);
+    const session = this.sessions.get(id);
+    if (!session) return false;
+    if (!session.browser.connected || session.page.isClosed() || session.live.ended) {
+      session.live.finish("This browser session has ended. Return to chat to continue.");
+      this.sessions.delete(id);
+      return false;
+    }
+    return true;
   }
 
-  controlState(id: string) { return this.sessions.get(id)?.live.control; }
+  controlState(id: string) { return this.hasSession(id) ? this.sessions.get(id)?.live.control : undefined; }
 
   async agentStep<T>(id: string, epoch: number, operation: () => Promise<T>): Promise<T> {
     const s = this.sessions.get(id);
@@ -106,7 +118,7 @@ export class BrowserRunBrowser {
 
   async stream(id: string, onResume: () => Promise<(() => void) | void>): Promise<Response> {
     const s = this.sessions.get(id);
-    if (!s) return new Response("Session ended", { status: 404 });
+    if (!s || !this.hasSession(id)) return new Response("Session ended", { status: 410 });
     const pair = new WebSocketPair();
     pair[1].accept();
     void s.live.connect(pair[1], onResume);
@@ -281,7 +293,8 @@ export class BrowserRunBrowser {
     const s = this.sessions.get(id);
     if (!s) return false;
     s.live.finish("This browser session has finished.");
+    this.sessions.delete(id);
     await s.browser.close().catch(() => {});
-    return this.sessions.delete(id);
+    return true;
   }
 }
