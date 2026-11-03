@@ -149,7 +149,7 @@ flowchart LR
     end
 
     Browser["Cloudflare Browser Run<br/>isolated Chrome per session<br/>(CDP)"]
-    Sites["Any approved website<br/>Rover, Upwork, Reddit,<br/>Facebook Groups, your URL…"]
+    Sites["Any approved website<br/>Rover, Upwork, Reddit,<br/>Facebook Groups, your URL etc."]
 
     Phone <-->|"HTTPS + WebSocket<br/>session token in Keychain"| Worker
     Worker -->|"verified user id"| Sandbox
