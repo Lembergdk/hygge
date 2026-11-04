@@ -13,7 +13,7 @@ try{
  // Only the known fixture ID can be reauthorized; existing rows are never replaced.
  sql(`INSERT OR IGNORE INTO users (id,do_instance,contact_email) VALUES ('${id}','${id}','${email}')`);
  sql(`INSERT INTO auth_sessions (id,user_id,token_hash,created_at,expires_at) SELECT '${session}',id,'${createHash('sha256').update(token).digest('hex')}','${new Date().toISOString()}','${new Date(Date.now()+3600000).toISOString()}' FROM users WHERE id='${id}' AND contact_email='${email}'`);
- let state=await api('/sandbox/image-upgrade',undefined,'GET');
+ let state;for(let attempt=0;attempt<28;attempt++){state=await api('/sandbox/image-upgrade',undefined,'GET');if(Object.hasOwn(state,'fixtureMarker'))break;if(attempt===0)console.log('Waiting for the owner to adopt deployed code (Cloudflare deferred update)');if(attempt===27)throw Error('DEPLOYED_OWNER_CODE_NOT_ACTIVE');await new Promise(resolve=>setTimeout(resolve,15000));}
  const describe=s=>({current:s.current,fixtureMarker:s.fixtureMarker,operations:s.operations.map(o=>({operationId:o.operationId,phase:o.phase,error:o.error,expectedGeneration:o.expectedGeneration,targetImage:o.targetImage,sourceReceiptId:o.sourceReceipt?.receiptId,targetReceiptId:o.targetReceipt?.receiptId}))});
  console.log('PRESERVED FIXTURE '+JSON.stringify(describe(state)));
  const pending=state.operations.find(o=>!['verified','aborted'].includes(o.phase));

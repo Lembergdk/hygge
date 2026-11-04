@@ -17,7 +17,7 @@ const status=o=>api(o,'/sandbox/image-upgrade',undefined,'GET');
 async function change(o,targetImage,label){
  const before=(await status(o)).current;const request={reviewed:true,operationId:randomUUID(),expectedGeneration:before.generation,targetImage};
  // An interrupted response resumes exactly this operation; never creates another replacement.
- let result,error;for(let n=0;n<3;n++){try{result=await api(o,'/sandbox/image-upgrade',request);break;}catch(e){error=e;console.log(`${label} interrupted; retrying same operation`);}}
+ let result,error;for(let n=0;n<3;n++){try{result=await api(o,'/sandbox/image-upgrade',request);break;}catch(e){error=e;console.log(`${label} interrupted; retrying same operation: ${e.message}`);}}
  if(!result)throw error;
  assert.equal(result.operation.phase,'verified');assert.equal(result.current.desiredImageDigest,targetImage);assert.equal(result.current.generation,before.generation+1);
  assert.notEqual(result.current.incarnation,before.incarnation);assert.ok(result.operation.sourceReceipt);assert.ok(result.operation.targetReceipt);
