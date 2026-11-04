@@ -12,6 +12,10 @@ Home owns site suggestions, high-level work decisions, setup progress, and compl
 - **Consequential action:** the exact proposed change is shown in chat. Consent is one-use and bound to task, request, browser session, URL, page labels, and draft. Changed context requires a fresh decision and approval. An LLM-supplied consent flag cannot authorize execution.
 - **Completion:** backend persists account status and a journal milestone. Chat closes the request; Home shows the result.
 
+## Beyond setup
+
+Chat is not only for setup. Work asks in chat start real missions (model-led intent for work asks, with mail resolution), and mail triage lives in chat too (one mail, one event; outcomes routed to proposals or chat questions). The flame badge only promises what chat can actually resolve.
+
 ## Persistence and compatibility
 
 New requests use interaction version 1. Task creation is idempotent on the native task UUID; continuation addresses that original task and a specific help ID. Running state is claimed before awaiting execution. Duplicate/stale replies return conflict instead of starting another run. Exceptions persist recovery; uncertain client responses reconcile the original task before retrying.
