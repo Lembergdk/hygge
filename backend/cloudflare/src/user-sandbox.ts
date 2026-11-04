@@ -5,6 +5,7 @@ import { migrateCredentialSchema } from './schema-migrations.ts';
 import { createWorkspaceExecution, type WorkspaceExecution } from './workspace-execution.ts';
 import type { WorkspaceBrowser } from './workspace-browser.ts';
 import type { WorkspaceMissionHooks } from './workspace-task-runner.ts';
+import { activeTier, d1SubscriptionDb } from "./subscriptions.ts";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { json } from "./env.ts";
@@ -684,7 +685,7 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   /// Owner mail carrying an instruction, already sender-proven.
-  /// Reads and pause/resume run at once; joining a place restores
+  /// Reads and pause/resume run at once; joining a job site restores
   /// its Home-screen suggestion (the app owns the signup itself:
   /// email choice and login asks live there). Returns the journal
   /// sentence, or null when the mail held no instruction.
@@ -734,7 +735,7 @@ export class UserSandbox extends DurableObject<Env> {
       } else {
         const id = crypto.randomUUID();
         store.upsert("proposals", id, {
-          id, siteID: site.siteID, rationale: "You asked me to add this place.",
+          id, siteID: site.siteID, rationale: "You asked me to add this job site.",
           payPattern: "Paid per job, rates vary by listing",
           dataShared: "Your name, photo and profile text",
           verification: "Email confirmation; a bot check may need you",
@@ -807,9 +808,9 @@ export class UserSandbox extends DurableObject<Env> {
     }
   }
 
-  /// A jobs-bearing mail can evidence a place worth watching:
+  /// A jobs-bearing mail can evidence a job site worth watching:
   /// the hosts it links to (or a service sender domain), minus
-  /// generic mailboxes and places already known. Authenticated
+  /// generic mailboxes and job sites already known. Authenticated
   /// senders only — forged mail never earns a feed card.
   private candidateSiteFromMail(
     delivery: InboundEmailDelivery,
@@ -842,7 +843,7 @@ export class UserSandbox extends DurableObject<Env> {
     return null;
   }
 
-  /// Suggest a place the mail evidenced, as an ordinary feed
+  /// Suggest a job site the mail evidenced, as an ordinary feed
   /// proposal carrying its origin (the app can then tie a
   /// dismissal back to this sender). The proposal IS the consent
   /// surface; nothing joins from here.
@@ -898,7 +899,7 @@ export class UserSandbox extends DurableObject<Env> {
       : (delivery.triage?.highlights ?? []).map((h) => h.label);
     // Where does this mail's action live? A site the mail
     // evidences becomes a feed proposal; work-relevant mail with
-    // no place to attach becomes a chat question; the rest keeps
+    // no job site to attach becomes a chat question; the rest keeps
     // the triage decision. The journal only ever records facts.
     const siteCandidate = delivery.kind === "other" && triage.relation === "unknown"
       ? this.candidateSiteFromMail(delivery, triage) : null;
@@ -956,7 +957,7 @@ export class UserSandbox extends DurableObject<Env> {
             const named = readingInstruction.kind === "add"
               ? readingInstruction.domain : "site" in readingInstruction ? readingInstruction.site : null;
             this.appendAgentChat(named
-              ? `You asked by email about ${named}, but I don't have that place yet. Shall I add it and start looking there?`
+              ? `You asked by email about ${named}, but I don't have that job site yet. Shall I add it and start looking there?`
               : `You asked by email to ${readingInstruction.kind}, but I couldn't tell exactly what you meant. Tell me here and I'll do it.`,
             delivery.receivedAt, delivery.contentHash);
             outcome = "chat_asked";
@@ -975,11 +976,11 @@ export class UserSandbox extends DurableObject<Env> {
         this.proposeSiteFromMail(siteCandidate, delivery, summaryId);
         outcome = "proposed_site";
         this.journalEmail(delivery.receivedAt,
-          `Filed mail from ${s.senderDomain || "a new sender"}: ${s.subject || "(no subject)"}. Suggested ${siteCandidate.name} as a new place.`,
+          `Filed mail from ${s.senderDomain || "a new sender"}: ${s.subject || "(no subject)"}. Suggested ${siteCandidate.name} as a new job site.`,
           detail, null, hash);
       } else if (chatAsk && delivery.contentHash) {
         this.appendAgentChat(
-          `Mail from ${s.senderDomain} — “${s.subject || "(no subject)"}”. ${s.summary} It looks work-related, but I couldn't tell which place it belongs to. What would you like me to do with mail like this?`,
+          `Mail from ${s.senderDomain} — “${s.subject || "(no subject)"}”. ${s.summary} It looks work-related, but I couldn't tell which job site it belongs to. What would you like me to do with mail like this?`,
           delivery.receivedAt, delivery.contentHash);
         outcome = "chat_asked";
         this.journalEmail(delivery.receivedAt,
@@ -1820,6 +1821,9 @@ export class UserSandbox extends DurableObject<Env> {
           hasProfile: Boolean(Number(row.has_profile ?? 0)),
         };
       },
+      planTier: () => this.userId
+        ? activeTier(d1SubscriptionDb(this.env.DB), this.userId, new Date())
+        : ("free" as const),
       runDiscoverMission: (input) => this.runScanMission(input, browser),
       siteAccessForDomain: (domain) => this.siteAccessRecord(domain),
       saveSiteAccess: (record) => this.saveSiteAccessRecord(record),

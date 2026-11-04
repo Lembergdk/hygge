@@ -373,11 +373,14 @@ test("unknown-digit and malformed mail drop silently: count only, nothing delive
   const deps = { db, deliver: async () => { delivered += 1; } };
   const unknown = await processInboundEmail({ to: "0000000001@usehygge.cc", raw: VERIFICATION_RAW }, deps);
   assert.equal(unknown.disposition, "dropped_unknown");
-  const malformed = await processInboundEmail({ to: "sam@usehygge.cc", raw: VERIFICATION_RAW }, deps);
+  // A well-shaped but unallocated custom name is unknown too.
+  const unknownAlias = await processInboundEmail({ to: "sam@usehygge.cc", raw: VERIFICATION_RAW }, deps);
+  assert.equal(unknownAlias.disposition, "dropped_unknown");
+  const malformed = await processInboundEmail({ to: "a@usehygge.cc", raw: VERIFICATION_RAW }, deps);
   assert.equal(malformed.disposition, "dropped_malformed");
   assert.equal(delivered, 0);
   // Counts are the only trace — the counter store holds no content.
-  assert.equal(db.count("dropped_unknown"), 1);
+  assert.equal(db.count("dropped_unknown"), 2);
   assert.equal(db.count("dropped_malformed"), 1);
   assert.equal(JSON.stringify([...db.counts.keys()]).includes("731904"), false);
   assert.equal(JSON.stringify([...db.counts.keys()]).includes("rover"), false);
@@ -519,4 +522,24 @@ test("mail identity: re-forwards of the same mail hash identically", async () =>
     "Four new roles near Leeds this week. Details inside.",
   ].join("\r\n") }, { db, deliver: async (_u, d) => { deliveries.push(d); } });
   assert.equal(deliveries[0].contentHash, await mailContentHash(original));
+});
+
+test("custom email names deliver alongside the digits address", async () => {
+  const db = new MemoryEmailAddressDb();
+  await allocateHyggeAddress(db, "owner-1", { nextDigits: () => "4839201847" });
+  assert.equal(await db.setAlias("owner-1", "mikael.l"), true);
+  assert.equal(await db.setAlias("owner-2", "mikael.l"), false); // taken
+  const deliveries: string[] = [];
+  const mail = (to: string) => [
+    "From: Rover <no-reply@rover.com>", `To: ${to}`,
+    "Subject: Weekend sits", "Content-Type: text/plain", "", "Two new sits near you.",
+  ].join("\r\n");
+  const go = (to: string) => processInboundEmail({ to, raw: mail(to) }, {
+    db, deliver: async (userId) => { deliveries.push(userId); },
+  });
+  assert.equal((await go("mikael.l@usehygge.cc")).disposition, "delivered");
+  assert.equal((await go("Mikael.L@usehygge.cc")).disposition, "delivered"); // case-insensitive
+  assert.equal((await go("4839201847@usehygge.cc")).disposition, "delivered"); // digits keep working
+  assert.equal((await go("nobody@usehygge.cc")).disposition, "dropped_unknown");
+  assert.deepEqual(deliveries, ["owner-1", "owner-1", "owner-1"]);
 });

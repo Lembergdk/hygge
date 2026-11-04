@@ -1054,7 +1054,31 @@ export interface ScanDeps {
   runProbeMission?: (input: ProbeMissionInput) => Promise<ProbeOutcome>;
   idFactory?: () => string;
   log?: (message: string) => void;
+  /// Pricing tier for the free-plan rest. Absent = Free (the
+  /// lookup lives D1-side in the owning object).
+  planTier?: () => Promise<"free" | "plus"> | "free" | "plus";
 }
+
+/// Witnessed completions in the UTC calendar month of `now` —
+/// the server's reading of "logged earnings" for the free-plan
+/// rest. (The app displays the device's local month; at a month
+/// boundary the two can differ by hours, never by days.)
+export function monthlyLoggedEarnings(journalRows: Record<string, any>[], now: Date): number {
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
+  let total = 0;
+  for (const row of journalRows) {
+    if (String(row.kind ?? "") !== "workCompleted") continue;
+    const amount = Number(row.grossAmount);
+    if (!Number.isFinite(amount)) continue;
+    const when = new Date(String(row.occurredAt ?? ""));
+    if (Number.isNaN(when.getTime())) continue;
+    if (when.getUTCFullYear() === year && when.getUTCMonth() === month) total += amount;
+  }
+  return total;
+}
+
+export const FREE_MONTHLY_EARNINGS_LIMIT = 100;
 
 export interface ScanSkip {
   siteId: string;
@@ -1070,6 +1094,8 @@ export interface ScanTickSummary {
   slot: number;
   runDate: string;
   paused: boolean;
+  /// Free plan at this month's earnings limit: the tick rested.
+  rested?: boolean;
   scanned: ScanRunRecord[];
   skipped: ScanSkip[];
   surfacedIds: string[];
@@ -1118,6 +1144,19 @@ export async function runScheduledTick(
     summary.paused = true;
     say("scheduled scan skipped: user is paused");
     return summary;
+  }
+
+  // Free plan rest: at this month's $100 of logged earnings, new
+  // searches wait for the 1st (work already under way is not the
+  // tick's business and carries on elsewhere).
+  const tier = deps.planTier ? await deps.planTier() : "free";
+  if (tier === "free") {
+    const journal = deps.state.list("journalEvents").map((row) => asRecord(row.data));
+    if (monthlyLoggedEarnings(journal, opts.now) >= FREE_MONTHLY_EARNINGS_LIMIT) {
+      summary.rested = true;
+      say("scheduled scan skipped: free plan rested at this month's earnings limit");
+      return summary;
+    }
   }
 
   const accountStates = new Map<string, string>();

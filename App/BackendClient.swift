@@ -383,6 +383,55 @@ struct BackendClient {
         return try? await filedEmail()
     }
 
+    // MARK: - Plus subscription + custom email name
+    //
+    // The device is the entitlement's source of truth (StoreKit
+    // verifies locally); these calls keep the server's copy in
+    // step so scheduled work and the custom name agree.
+
+    private struct SubscriptionReportBody: Encodable { var jws: String }
+    private struct SubscriptionAck: Decodable { var tier: String?; var verified: Bool?; var expiresAt: String? }
+    struct SubscriptionStatus: Decodable { var tier: String; var expiresAt: String? }
+
+    @discardableResult
+    func reportSubscription(jws: String) async -> Bool {
+        let ack: SubscriptionAck? = try? await post("subscriptions", body: SubscriptionReportBody(jws: jws))
+        return ack?.verified == true
+    }
+
+    func subscriptionStatus() async -> SubscriptionStatus? {
+        try? await get("subscriptions/status")
+    }
+
+    struct EmailAliasResponse: Decodable { var alias: String?; var customAddress: String?; var error: String? }
+
+    enum EmailAliasOutcome: Equatable {
+        case set(customAddress: String)
+        case taken, invalid, plusRequired, failed
+    }
+
+    /// Status-aware because each failure gets its own sentence.
+    func setEmailAlias(_ alias: String) async -> EmailAliasOutcome {
+        var request = URLRequest(url: baseURL.appendingPathComponent("email/alias"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        request.timeoutInterval = 20
+        request.httpBody = try? JSONEncoder().encode(["alias": alias])
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return .failed }
+        let decoded = try? JSONDecoder().decode(EmailAliasResponse.self, from: data)
+        switch http.statusCode {
+        case 200...299:
+            if let address = decoded?.customAddress { return .set(customAddress: address) }
+            return .failed
+        case 403: return .plusRequired
+        case 409: return .taken
+        case 400: return .invalid
+        default: return .failed
+        }
+    }
+
     // MARK: - Push notifications (Brief 07)
     //
     // The device token is registered for the signed-in user only;
