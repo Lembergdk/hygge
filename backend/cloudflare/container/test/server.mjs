@@ -69,11 +69,13 @@ test('multipart evidence is owner-bound, excluded until committed, and survives 
  assert.deepEqual(await f.call('artifact.list'),[]);
  for(let offset=0;offset<bytes.length;offset+=256*1024)await f.call('artifact.chunk',{uploadId,offset,data:b64(bytes.subarray(offset,offset+256*1024))});
  await f.call('artifact.commit',{...manifest,uploadId});await f.call('artifact.commit',{...manifest,uploadId});
+ const prefix='file_'+'d'.repeat(32)+'_';await f.call('artifact.write',{ref:prefix+'1',data:b64(Buffer.from('old note'))});await f.call('artifact.deleteDocuments',{prefix,throughRevision:1});
  const ready=await f.call('status'),capture=await f.call('capture.begin',{filesystemRevision:ready.nextFilesystemRevision,browserProfileRevision:ready.nextBrowserProfileRevision});
  assert.ok(!capture.tree.files.some(f=>f.path.startsWith('.artifact-transfers')));assert.equal(capture.tree.artifacts['large-evidence'],'artifacts/large-evidence');
  const cold=await setup(t,{...identity,incarnation:'cold',generation:2});await cold.call('restore.begin',{checkpointId:'synthetic',tree:capture.tree});
  for(const file of capture.tree.files)for(let offset=0;offset<file.size;offset+=256*1024){const chunk=await f.call('capture.chunk',{captureId:capture.captureId,path:file.path,offset});await cold.call('restore.chunk',{path:file.path,offset,data:chunk.data});}
  await cold.call('restore.finish',{filesystemRevision:capture.filesystemRevision,browserProfileRevision:capture.browserProfileRevision});
  assert.deepEqual(await fs.readFile(path.join(cold.root,'artifacts','large-evidence')),bytes);assert.deepEqual(await cold.call('artifact.list'),['large-evidence']);
+ await assert.rejects(cold.call('artifact.begin',{ref:prefix+'1',size:bytes.length,sha256}),/REVISION_DELETED/);
  await f.call('capture.release',{captureId:capture.captureId});
 });

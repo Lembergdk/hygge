@@ -27,7 +27,24 @@ export async function artifactStore(root, artifacts, changed, chunkBytes, now=Da
  for(const name of await fs.readdir(temporary)) {
   if(/^[a-f0-9]{64}\.part$/.test(name))await fs.unlink(path.join(temporary,name));
  }
- const uploads=new Map();
+ const uploads=new Map(),tombstones=Object.create(null),tombstoneFile=path.join(root,'.artifact-tombstones.json');
+ try{
+  const info=await fs.lstat(tombstoneFile);if(!info.isFile()||info.isSymbolicLink())throw Error('INVALID_DOCUMENT_TOMBSTONES');
+  const saved=JSON.parse(await fs.readFile(tombstoneFile,'utf8'));
+  for(const [prefix,revision] of Object.entries(saved)){
+   if(!/^file_[a-f0-9]{32}_$/.test(prefix)||!Number.isSafeInteger(revision)||revision<1)throw Error('INVALID_DOCUMENT_TOMBSTONES');
+   tombstones[prefix]=revision;
+  }
+ }catch(e){if(e.code!=='ENOENT')throw e;}
+ function assertNotDeleted(ref){const match=/^(file_[a-f0-9]{32}_)([1-9][0-9]*)$/.exec(ref);if(match&&Number(match[2])<=(tombstones[match[1]]??0))throw Error('DOCUMENT_REVISION_DELETED');}
+ async function saveTombstones(){
+  const temp=path.join(temporary,'tombstones.part');
+  const handle=await fs.open(temp,constants.O_WRONLY|constants.O_CREAT|constants.O_TRUNC|constants.O_NOFOLLOW,0o600);
+  try{await handle.writeFile(JSON.stringify(tombstones));await handle.sync();}finally{await handle.close();}
+  await fs.rename(temp,tombstoneFile);
+  const dir=await fs.open(root,'r');try{await dir.sync();}finally{await dir.close();}
+ }
+
  const target=ref=>{if(!refPattern.test(ref))throw Error('INVALID_ARTIFACT');return path.join(folder,ref);};
  async function existing(ref,size,hash) {
   const file=target(ref);let info;
@@ -44,7 +61,7 @@ export async function artifactStore(root, artifacts, changed, chunkBytes, now=Da
  const api={
   expire,
   async begin({ref,size,sha256}) {
-   await expire();target(ref);
+   await expire();target(ref);assertNotDeleted(ref);
    if(!Number.isSafeInteger(size)||size<0||size>MAX_ARTIFACT_BYTES||!hashPattern.test(sha256))throw Error('INVALID_ARTIFACT_MANIFEST');
    const uploadId=hashBytes(`${ref}\0${size}\0${sha256}`);
    if(await existing(ref,size,sha256))return{uploadId,committed:true,received:size};
@@ -74,6 +91,7 @@ export async function artifactStore(root, artifacts, changed, chunkBytes, now=Da
    }finally{await handle.close();}
   },
   async commit({uploadId,ref,size,sha256}) {
+   assertNotDeleted(ref);
    if(!hashPattern.test(uploadId)||uploadId!==hashBytes(`${ref}\0${size}\0${sha256}`))throw Error('INVALID_ARTIFACT_MANIFEST');
    const upload=uploads.get(uploadId);
    if(!upload){if(await existing(ref,size,sha256))return{committed:true,sha256,size};throw Error('ARTIFACT_TRANSFER_NOT_FOUND');}
@@ -89,6 +107,18 @@ export async function artifactStore(root, artifacts, changed, chunkBytes, now=Da
    return{committed:true,sha256,size};
   },
   async abort({uploadId}) {const u=uploads.get(uploadId);if(u){await fs.unlink(u.file);uploads.delete(uploadId);}return{};},
+  async deleteDocuments({prefix,throughRevision}) {
+   if(!/^file_[a-f0-9]{32}_$/.test(prefix)||!Number.isSafeInteger(throughRevision)||throughRevision<1)throw Error('INVALID_DOCUMENT_ARTIFACT');
+   tombstones[prefix]=Math.max(tombstones[prefix]??0,throughRevision);
+   await saveTombstones();changed();
+   for(const [id,u] of uploads)if(u.ref.startsWith(prefix)&&Number(u.ref.slice(prefix.length))<=tombstones[prefix])await api.abort({uploadId:id});
+   // Directory enumeration also covers a process stop after publication but before index update.
+   for(const ref of await fs.readdir(folder))if(new RegExp('^'+prefix+'[1-9][0-9]*$').test(ref)&&Number(ref.slice(prefix.length))<=tombstones[prefix]){
+    const info=await fs.lstat(target(ref));if(!info.isFile()||info.isSymbolicLink())throw Error('UNSAFE_ARTIFACT');
+    await api.removeDocument({ref,sha256:await fileHash(target(ref))});
+   }
+   return{removedThroughRevision:tombstones[prefix]};
+  },
   async removeDocument({ref,sha256}) {
    // Versioned working documents have a separate deletion API. Evidence can never be erased here.
    if(!/^file_[a-f0-9]{32}_[1-9][0-9]*$/.test(ref)||!hashPattern.test(sha256))throw Error('INVALID_DOCUMENT_ARTIFACT');

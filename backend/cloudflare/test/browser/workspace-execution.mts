@@ -53,6 +53,14 @@ test('integrated mission commits real browser profile/evidence before task succe
  const last=JSON.parse(new TextDecoder().decode(blobs.get(manifests.at(-1)!)!));
  assert.ok(last.files.some((f:any)=>f.path.includes('profile/')));assert.ok(Object.keys(last.artifacts).some(k=>k.endsWith('_completion')));
  assert.equal((await workspace.run(task,mission)).status,'succeeded');assert.equal(missions,1);
+ // Document mirrors use byte bounds, owner admission, immutable revisions, and deletion tombstones.
+ const notePath='synthetic-generation/notes/preferences.md',unicode=new TextEncoder().encode('世'.repeat(100000));
+ const noteReceipt=await workspace.saveDocument(notePath,1,unicode);
+ assert.ok(noteReceipt.coveredArtifactRefs.some(ref=>ref.startsWith('file_')));
+ await workspace.eraseDocument(notePath,1);
+ await assert.rejects(workspace.saveDocument(notePath,1,unicode),/REVISION_DELETED/);
+ const corrected=await workspace.saveDocument(notePath,2,new TextEncoder().encode('Corrected note'));
+ assert.ok(corrected.coveredArtifactRefs.some(ref=>ref.startsWith('file_')&&ref.endsWith('_2')));
  // A new DO composition reattaches to the exact live incarnation; no fresh disk.
  const reconstructed=createWorkspaceExecution({owner:workspace.foundation.persistence.owner,env,storage,container,loadTask,projectTask});
  await reconstructed.ensure();assert.ok(await reconstructed.browser.snapshot(result.session_id));

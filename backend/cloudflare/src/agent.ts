@@ -553,7 +553,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       delete task.authorized_action;
     } catch (e: any) {
       failures += 1;
-      log.push(`No usable browser decision at step ${step}; retrying`);
+      log.push(e?.name==='TimeoutError'?`Browser model request timed out at step ${step}`:`No usable browser decision at step ${step}; retrying`);
       if (failures >= 3) return { failure: failureFeedback("model_unavailable"), status: "failed", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, ...routing() };
       continue;
     }

@@ -182,3 +182,14 @@ test('decision IDs cannot authorize a different proposal or conflict with an exi
  await assert.rejects(s.agent.decide({generation,proposalId:b.id,decision:'approve',id}),/MESSAGE_ID_CONFLICT/);
  assert.equal(s.executed.length,1);assert.equal(s.store.proposal(b.id)?.status,'pending');
 });
+
+test('queued native result stays singular while canonical task outcomes reach later reasoning exactly once',async()=>{
+ const {recordWorkspaceTaskOutcome}=await import('../src/chat-task-outcomes.ts');
+ const s=setup((_args,n)=>n===1?calls('scan',[{name:'scan_site',args:{siteId:'synthetic'}}]):answer(`reply-${n}`));
+ await turn(s,'Read the jobs');const original=s.store.events().filter(e=>e.kind==='result');assert.equal(original.length,1);assert.equal(original[0].value.result.status,'queued');
+ const task={id:'task',workspace_run_id:'run',workspace_sequence:3,status:'needsHuman',workspace_pending_effect_id:'unknown-effect',help:{id:'help',kind:'recovery'}};
+ const event=recordWorkspaceTaskOutcome(s.store,task);assert.equal(recordWorkspaceTaskOutcome(s.store,task)?.id,event?.id);
+ assert.equal(s.store.events().filter(e=>e.kind==='system'&&e.value.kind==='task_outcome').length,1);
+ await turn(s,'What happened?');const latest=s.requests.at(-1);assert.ok(JSON.stringify(latest.input).includes('unknown-effect'));
+ assert.equal(s.store.events().filter(e=>e.kind==='result').length,1);assert.deepEqual(s.store.events().find(e=>e.kind==='result'),original[0]);
+});

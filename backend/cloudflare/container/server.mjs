@@ -55,6 +55,7 @@ export async function createWorkspaceServer({identity,secret,root,executablePath
   if(op==='artifact.chunk')return artifactTransfers.chunk(a,unb64(a.data));
   if(op==='artifact.commit')return artifactTransfers.commit(a);
   if(op==='artifact.abort')return artifactTransfers.abort(a);
+  if(op==='artifact.deleteDocuments')return artifactTransfers.deleteDocuments(a);
   if(op==='artifact.deleteDocument')return artifactTransfers.removeDocument(a);
   if(op==='artifact.write'){
    const bytes=unb64(a.data),manifest={ref:a.ref,size:bytes.length,sha256:hash(bytes)};

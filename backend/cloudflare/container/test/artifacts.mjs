@@ -47,3 +47,23 @@ test('artifact publication refuses links and traversal',async t=>{
  const f=await fixture(t),bytes=Buffer.from('x');await fs.symlink('../.owner.json',path.join(f.root,'artifacts','linked'));
  await assert.rejects(put(f.store,'linked',bytes),/UNSAFE/);await assert.rejects(put(f.store,'../escape',bytes),/INVALID_ARTIFACT/);
 });
+test('document tombstones reject delayed old mirrors across restart and allow newer revisions',async t=>{
+ const f=await fixture(t),prefix='file_'+'b'.repeat(32)+'_',old=Buffer.from('obsolete');
+ await put(f.store,prefix+'1',old);
+ const partial=await f.store.begin({ref:prefix+'2',size:old.length,sha256:hash(old)});
+ await f.store.chunk({uploadId:partial.uploadId,offset:0},old);
+ await f.store.deleteDocuments({prefix,throughRevision:2});
+ assert.equal(f.store.active,0);assert.equal(f.index[prefix+'1'],undefined);
+ await assert.rejects(put(f.store,prefix+'1',old),/REVISION_DELETED/);
+ await assert.rejects(f.store.commit({uploadId:partial.uploadId,ref:prefix+'2',size:old.length,sha256:hash(old)}),/REVISION_DELETED/);
+ await put(f.store,prefix+'3',Buffer.from('newer'));
+ const restarted=await artifactStore(f.root,f.index,()=>{},CHUNK);
+ await assert.rejects(put(restarted,prefix+'2',old),/REVISION_DELETED/);
+ await restarted.deleteDocuments({prefix,throughRevision:1});assert.ok(f.index[prefix+'3']);
+});
+test('abandoned transfers expire without removing committed files',async t=>{
+ const f=await fixture(t);let now=0;const store=await artifactStore(f.root,f.index,()=>{},CHUNK,()=>now);
+ await put(store,'committed',Buffer.from('saved'));
+ await store.begin({ref:'abandoned',size:9,sha256:hash('123456789')});now=300001;await store.expire();
+ assert.equal(store.active,0);assert.ok(f.index.committed);assert.deepEqual(await fs.readdir(path.join(f.root,'.artifact-transfers')),[]);
+});

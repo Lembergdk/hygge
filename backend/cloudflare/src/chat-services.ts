@@ -25,7 +25,7 @@ function safe(value:any):any {
   if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([k])=>!/password|secret|token|code|credential/i.test(k)).map(([k,v])=>[k,safe(v)]));
   return value;
 }
-function target(task:any){return safe({id:task.id,title:task.title,kind:task.kind,status:task.status,siteId:task.mobile_task?.siteID,targetURL:task.target_url,draft:task.drafted_payload,help:task.help});}
+function target(task:any){return safe({id:task.id,title:task.title,kind:task.kind,status:task.status,siteId:task.mobile_task?.siteID,targetURL:task.target_url,draft:task.drafted_payload,help:task.help,execution:task.execution??null});}
 function profileRow(host:ChatServiceHost){return host.get('profile','profile')?.data??{profile:{},isPaused:false};}
 function site(host:ChatServiceHost,id:string){const row=host.get('sites',id);if(!row)throw new Error('SITE_NOT_FOUND');return {id,...row.data};}
 function siteDomain(s:any){try{return new URL(s.startURLString).hostname.replace(/^www\./,'');}catch{return '';}}

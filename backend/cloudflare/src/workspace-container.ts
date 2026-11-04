@@ -29,7 +29,22 @@ export function createContainerWorkspace(options:ContainerWorkspaceOptions){
  const prefix=`hygge-workspaces/v1/${ownerKey(owner)}`;
  function assertActive(expected:ContainerIdentity){assertOwner(owner,expected);if(!active||active.incarnation!==expected.incarnation||active.generation!==expected.generation)throw Error('STALE_GENERATION');}
  async function current(){const lease=await options.getLease();assertOwner(owner,lease);if(!active||lease.incarnation!==active.incarnation||lease.generation!==active.generation||Date.parse(lease.expiresAt)<=now())throw Error('STALE_GENERATION');return lease;}
- async function raw(op:string,args:Record<string,unknown>={},leaseExpiresAt?:number,expected?:ContainerIdentity,timeoutMs=120_000){if(!active)throw Error('RUNTIME_NOT_STARTED');const identity=Object.freeze(structuredClone(expected??active));assertActive(identity);const body=JSON.stringify({op,args,...(leaseExpiresAt?{leaseExpiresAt}:{})});if(new TextEncoder().encode(body).length>RPC_MAX_BYTES)throw Error('RPC_BODY_LIMIT');const token=await signRpc(secret,identity,'/rpc',body,now());assertActive(identity);const response=await options.container.getTcpPort(8080).fetch(new Request('http://container/rpc',{method:'POST',headers:{'content-type':'application/json','x-hygge-rpc':token},body,signal:AbortSignal.timeout(timeoutMs)}));const text=await boundedResponse(response);const result=JSON.parse(text);if(!response.ok||result.error)throw Error(result.error??'CONTAINER_RPC_FAILED');return result.result;}
+ async function raw(op:string,args:Record<string,unknown>={},leaseExpiresAt?:number,expected?:ContainerIdentity,timeoutMs=120_000){
+  if(!active)throw Error('RUNTIME_NOT_STARTED');
+  const identity=Object.freeze(structuredClone(expected??active));assertActive(identity);
+  const body=JSON.stringify({op,args,...(leaseExpiresAt?{leaseExpiresAt}:{})});
+  if(new TextEncoder().encode(body).length>RPC_MAX_BYTES)throw Error('RPC_BODY_LIMIT');
+  const token=await signRpc(secret,identity,'/rpc',body,now());assertActive(identity);
+  try{
+   const response=await options.container.getTcpPort(8080).fetch(new Request('http://container/rpc',{
+    method:'POST',headers:{'content-type':'application/json','x-hygge-rpc':token},body,signal:AbortSignal.timeout(timeoutMs),
+   }));
+   const text=await boundedResponse(response);assertActive(identity);
+   const result=JSON.parse(text);
+   if(!response.ok||result.error)throw Error(result.error??'CONTAINER_RPC_FAILED');
+   return result.result;
+  }catch(error){if(error instanceof Error&&error.name==='TimeoutError')throw Error('CONTAINER_RPC_TIMEOUT');throw error;}
+ }
  async function call<T>(op:string,args:Record<string,unknown>={}):Promise<T>{const lease=await current();const expected=Object.freeze({...owner,incarnation:lease.incarnation,generation:lease.generation});return raw(op,args,Date.parse(lease.expiresAt),expected);}
  async function recovery(point:RecoveryPoint):Promise<{manifest:Manifest;bytes:Map<string,Uint8Array>}>{assertOwner(owner,point);if(point.storage!=='r2'||point.checkpointId!==point.manifestHash||!/[a-f0-9]{64}/.test(point.manifestHash))throw Error('INVALID_RECOVERY_POINT');const data=await options.objects.get(`${prefix}/manifests/${point.manifestHash}`);if(!data||await digest(data)!==point.manifestHash)throw Error('MANIFEST_VERIFICATION_FAILED');const m=JSON.parse(new TextDecoder().decode(data))as Manifest;assertOwner(owner,m);validateTree(m);if(m.schemaVersion!==1||m.incarnation!==point.sourceIncarnation||m.generation!==point.sourceGeneration||m.sequence!==point.sequence||m.imageDigest!==options.image)throw Error('RECOVERY_IMAGE_OR_LINEAGE_MISMATCH');const bytes=new Map<string,Uint8Array>();for(const f of m.files){const b=await options.objects.get(`${prefix}/blobs/${f.hash}`);if(!b||b.length!==f.size||await digest(b)!==f.hash)throw Error('RESTORE_INTEGRITY');bytes.set(f.path,b);}return{manifest:m,bytes};}
  async function attach(binding:WorkspaceBinding){
@@ -80,6 +95,6 @@ export function createContainerWorkspace(options:ContainerWorkspaceOptions){
   }catch(error){await transfer('artifact.abort',{uploadId:upload.uploadId}).catch(()=>{});throw error;}
  }
  return{provider,captureDriver,browser,attach,listArtifacts:()=>call<string[]>('artifact.list'),status:()=>call<Status>('status'),writeArtifact,
-  async deleteDocumentArtifact(ref:string,sha256:string){return call('artifact.deleteDocument',{ref,sha256});},
+  async deleteDocumentArtifacts(prefix:string,throughRevision:number){return call('artifact.deleteDocuments',{prefix,throughRevision});},
  };
 }

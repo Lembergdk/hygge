@@ -47,8 +47,8 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
   if(!sameOwner(owner,db.owner))fail('OWNER_MISMATCH');
   const now=config.now??(()=>new Date().toISOString());
   const project=config.projectTask??createWorkspaceTaskProjection(config.storage,db,now);
-  const instanceId=crypto.randomUUID();let tail:Promise<unknown>=Promise.resolve();
-  function serialized<T>(operation:()=>Promise<T>):Promise<T>{const next=tail.then(operation);tail=next.catch(()=>{});return next;}
+  const instanceId=crypto.randomUUID();let tail:Promise<unknown>=Promise.resolve(),pendingOperations=0;
+  function serialized<T>(operation:()=>Promise<T>):Promise<T>{pendingOperations++;const next=tail.then(operation).finally(()=>{pendingOperations--;});tail=next.catch(()=>{});return next;}
   type Phase='waiting_for_workspace'|'browser_starting'|'running'|'recovery'|'finished';
   function progress(taskId:string,phase:Phase){
     const old=db.get('runner_progress',taskId);
@@ -59,14 +59,14 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
     const old=record(task.id)?.value;
     const notice=db.get<{taskId:string;runId:string|null;applied:boolean}>('runner_delivery',jobId)!;
     if(notice.value.applied)return copy(old?.task??task);
-    if(old&&old.runId!==notice.value.runId||['succeeded','failed','rejected'].includes(old?.status??task.status)){
+    if((old&&old.runId!==notice.value.runId)||['succeeded','failed','rejected'].includes(old?.status??task.status)){
       db.put('runner_delivery',jobId,notice.revision,{...notice.value,applied:true});return copy(old?.task??task);
     }
     const admission=db.get<{instanceId:string;taskId:string}>('runner_owner','active')?.value;
     if(admission?.taskId===task.id&&admission.instanceId===instanceId)return copy(old?.task??task);
     const next:RunnerRecord=old??{taskId:task.id,runId:crypto.randomUUID(),sequence:0,pendingEffectId:null,status:'created',task:copy(task)};
     const effects=db.list<import('./workspace-contract.ts').EffectRecord>('effect').filter(e=>e.value.runId===next.runId);
-    const needsReview=!!admission&&admission.taskId===task.id||!!next.pendingEffectId||effects.length>0;
+    const needsReview=(!!admission&&admission.taskId===task.id)||!!next.pendingEffectId||effects.length>0;
     const status=needsReview?'needsHuman' as const:'failed' as const;
     const updated={...next.task,status,authorized_action:null,failure:{code:'job_delivery_exhausted'},
       help:recoveryHelp(needsReview?'Delivery stopped. I need to verify the earlier browser session before continuing.':'This work could not start after several tries. Please try again when the connection is available.'),
@@ -94,7 +94,7 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
   }
   function record(taskId:string){return db.get<RunnerRecord>('runner_task',taskId);}
   function saveRecord(value:RunnerRecord,requestId:string,completionReceiptId?:string){
-    value.task={...value.task,updated_at:now(),updatedAt:now(),workspace_pending_effect_id:value.pendingEffectId,workspace_sequence:value.sequence};
+    value.task={...value.task,updated_at:now(),updatedAt:now(),workspace_run_id:value.runId,workspace_pending_effect_id:value.pendingEffectId,workspace_sequence:value.sequence};
     const previous=record(value.taskId);db.put('runner_task',value.taskId,previous?.revision??0,copy(value));
     project(value.task,{runId:value.runId,requestId,...(completionReceiptId?{completionReceiptId}:{})});
   }
@@ -228,7 +228,7 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
             await f.effects.resolve(await executionContext(current.taskId,`${ticket.effectId}:resolve`,effect.revision,'action.resolve'),ticket.effectId,verified.status,ref);
             const old=checkpoint(current.runId);
             await f.checkpoints.commit(await executionContext(current.taskId,`${ticket.effectId}:checkpoint`,old?.revision??0,'checkpoint.commit'),checkpointInput(current.task,current.runId,receipt,'running',null));
-            atomicExecution(()=>{current=state(input.task.id);saveRecord({...current,sequence:ticket.sequence+1,pendingEffectId:null},`${ticket.effectId}:observed`);});
+            atomicExecution(()=>{current=state(input.task.id);saveRecord({...current,sequence:ticket.sequence+1,pendingEffectId:null},`${ticket.effectId}:observed`);progress(current.taskId,'running');});
           }catch(error){
             const uncertainRef=ref+'_uncertain';
             atomicExecution(()=>evidence(uncertainRef,{effectId:ticket.effectId,status:'uncertain',reason:'lost_or_unverified_response'}));
@@ -295,9 +295,24 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
   }
   return {
     deliveryFailed,
+    /** Background document work shares admission and fails fast while missions/review own the workspace. */
+    withWorkspaceMutation<T>(taskId:string,work:(lease:RuntimeLease)=>Promise<T>):Promise<T>{
+      if(pendingOperations||db.get('runner_owner','active'))return Promise.reject(Error('WORKSPACE_ADMISSION_BUSY'));
+      return serialized(async()=>{
+        const lease=await f.registry.readLease(owner,owner),executionId=crypto.randomUUID();
+        db.storage.transactionSync(()=>{
+          f.checkpoints.authority.assertCurrent(lease);if(db.get('runner_owner','active'))fail('WORKSPACE_ADMISSION_BUSY');
+          db.put('runner_owner','active',0,{instanceId,taskId,executionId,runtimeId:lease.runtimeId,incarnation:lease.incarnation,generation:lease.generation,leaseId:lease.leaseId});
+        });
+        try{return await work(lease);}finally{db.storage.transactionSync(()=>{
+          const old=db.get<{instanceId:string;executionId:string}>('runner_owner','active');
+          if(old?.value.instanceId===instanceId&&old.value.executionId===executionId)config.storage.sql.exec('DELETE FROM hygge_workspace_records WHERE scope=? AND kind=? AND id=?',db.scope,'runner_owner','active');
+        });}
+      });
+    },
     progress:(taskId:string)=>db.get('runner_progress',taskId)?.value??null,
-    waiting:(taskId:string)=>db.storage.transactionSync(()=>{if(db.get<{taskId:string}>('runner_owner','active')?.value.taskId!==taskId)progress(taskId,'waiting_for_workspace');}),
-    unavailable:(taskId:string)=>db.storage.transactionSync(()=>{if(!db.get('runner_owner','active'))progress(taskId,'recovery');}),
+    waiting:(taskId:string)=>db.storage.transactionSync(()=>{if(!['succeeded','failed','rejected'].includes(record(taskId)?.value.status??'')&&db.get<{taskId:string}>('runner_owner','active')?.value.taskId!==taskId)progress(taskId,'waiting_for_workspace');}),
+    unavailable:(taskId:string)=>db.storage.transactionSync(()=>{if(!['succeeded','failed','rejected'].includes(record(taskId)?.value.status??'')&&!db.get('runner_owner','active'))progress(taskId,'recovery');}),
     run:(input:WorkspaceRunContext)=>serialized(()=>execute(input)),
     /** Root-only authenticated human/current-browser reconciliation. This never dispatches or resumes a mission. */
     reconcile:(input:{taskId:string;effectId:string;status:'confirmed'|'not_applied';evidenceRef:string})=>serialized(async()=>{

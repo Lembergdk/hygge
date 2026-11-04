@@ -229,3 +229,25 @@ test('dead-letter interleaving never changes a live run and cannot overwrite its
  release();assert.equal((await running).status,'succeeded');assert.equal(f.runner.deliveryFailed(f.task('live'),'job-live').status,'succeeded');
  assert.equal(f.foundation.persistence.list('completion').length,1);assert.equal(f.foundation.persistence.get('runner_owner','active'),null);f.sqlite.close();
 });
+test('background documents share admission, fail fast while busy, and serialize before browser missions',async()=>{
+ const f=await fixture();let entered!:()=>void,release!:()=>void;const inside=new Promise<void>(r=>entered=r),hold=new Promise<void>(r=>release=r);let ran=false;
+ const file=f.runner.withWorkspaceMutation('document-save',async()=>{entered();await hold;return 'saved';});await inside;
+ await assert.rejects(f.runner.withWorkspaceMutation('document-delete',async()=>{}),/ADMISSION_BUSY/);
+ const mission=f.runner.run({task:f.task('after-file'),mission:async()=>{ran=true;return{status:'succeeded',extractedItems:['verified']};}});
+ await Promise.resolve();assert.equal(ran,false);assert.equal(f.foundation.persistence.get<any>('runner_owner','active')!.value.taskId,'document-save');
+ release();assert.equal(await file,'saved');assert.equal((await mission).status,'succeeded');assert.equal(ran,true);
+ f.foundation.persistence.put('runner_owner','active',0,{instanceId:'old-file-writer',taskId:'document-save',executionId:'old'});
+ await assert.rejects(f.runner.withWorkspaceMutation('document-save',async()=>{}),/ADMISSION_BUSY/);assert.ok(f.foundation.persistence.get('runner_owner','active'));f.sqlite.close();
+});
+test('invalid action shape is diagnosed before effect admission without logging rejected content',async()=>{
+ const f=await fixture();let dispatched=false;
+ const result=await f.runner.run({task:f.task('invalid'),mission:async hooks=>{
+  await hooks.onActionBefore({decision:{action:'scroll',targetLabel:undefined},snapshot:null,sessionID:null});dispatched=true;return{status:'succeeded'};
+ }});
+ assert.equal(result.status,'needsHuman');assert.equal(dispatched,false);assert.equal(f.foundation.persistence.list('effect').length,0);
+ assert.ok(result.log.some((line:string)=>line.includes('path=$.decision.targetLabel type=undefined')));f.sqlite.close();
+});
+test('replayed terminal tasks keep their final progress phase when startup is retried',async()=>{
+ const f=await fixture();await f.runner.run({task:f.task('finished'),mission:async()=>({status:'succeeded',extractedItems:['verified']})});
+ const progress=f.runner.progress('finished');f.runner.waiting('finished');f.runner.unavailable('finished');assert.deepEqual(f.runner.progress('finished'),progress);f.sqlite.close();
+});
