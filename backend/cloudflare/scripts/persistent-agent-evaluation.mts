@@ -17,6 +17,14 @@ const config=(key:string)=>{const value=source.match(new RegExp(`"${key}"\\s*:\\
 const baseUrl=config('HYGGE_LLM_BASE_URL');assert.match(baseUrl,/^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/hygge-staging\//);
 const gatewayToken=process.env.CLOUDFLARE_API_TOKEN;if(!gatewayToken)throw Error('Missing existing gateway credential');
 const model=new LLMClient({baseUrl,gatewayToken,gatewayCollectPayload:false,modelFast:config('HYGGE_LLM_MODEL_FAST'),modelStrong:config('HYGGE_LLM_MODEL_STRONG')});
+const originalFetch=globalThis.fetch;
+globalThis.fetch=async(...args:Parameters<typeof fetch>)=>{
+ const response=await originalFetch(...args);
+ if(!response.ok){const body:any=await response.clone().json().catch(()=>({}));const e=body.error??{};
+  console.error('AGENT HTTP metadata '+JSON.stringify({status:response.status,code:e.code,type:e.type,param:e.param,message:String(e.message??'').slice(0,300)}).replaceAll(gatewayToken,'[redacted]'));
+ }
+ return response;
+};
 const stores:ChatStore[]=[];let failures=0;
 function fixture(){
  const store=new ChatStore(new Memory());stores.push(store);const effects:any[]=[],prepared:any[]=[];
@@ -58,7 +66,8 @@ try {
  });
  await check('expired-chain-recovery',async()=>{
   const f=fixture();await send(f,'Remember for this conversation: the synthetic reference word is Juniper.');
-  f.store.save({...f.store.meta(),responseId:'resp_synthetic_missing_hygge'});
+  // Expire a real, valid response ID instead of sending an invalid fabricated identifier.
+  await model.deleteAgentResponse(f.store.meta().responseId!);
   const result=await send(f,'What is the reference word I gave you?');assert.match(result.reply??'',/Juniper/i);
  });
 }finally{

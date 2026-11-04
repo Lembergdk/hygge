@@ -1356,8 +1356,11 @@ final class AppStore {
 
     /// Fence full-cache imports until the agent's canonical mutations have been pulled.
     func beginConversationRequest() async {
+        let pendingPush = pushTask
         pushTask?.cancel()
+        await pendingPush?.value
         if !conversationNeedsReconciliation { await pushStateNow() }
+        pushTask?.cancel()
         conversationNeedsReconciliation = true
         writeCache()
     }

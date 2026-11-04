@@ -325,7 +325,9 @@ struct ConversationView: View {
                let message = store.chatTranscript.first(where: { $0.id == id }) {
                 if let old = store.pendingConversationGeneration, old != state.generation {
                     input = message.text; retryMessage = nil
+                    store.chatTranscript.removeAll { $0.id == message.id }
                     store.saveConversationOutbox(messageID: nil)
+                    _ = await store.pullFromServer(reconcilingConversation: true)
                     agentError = "The conversation was cleared on another device. Your unsent message is in the composer."
                 } else { retryMessage = message }
             }
@@ -349,6 +351,10 @@ struct ConversationView: View {
         do {
             if agentState == nil { agentState = try await store.backend.conversationState() }
             guard let generation = agentState?.generation else { return }
+            if let saved = store.pendingConversationGeneration, saved != generation {
+                agentError = "The conversation was cleared. Refresh it to recover your unsent message."
+                return
+            }
             if let id = UUID(uuidString: id), retryMessage != nil { store.saveConversationOutbox(messageID: id, generation: generation) }
             await store.beginConversationRequest()
             let result = try await store.backend.conversationTurn(id: id, generation: generation, text: text,
