@@ -321,6 +321,7 @@ struct ConversationView: View {
         do {
             let state = try await store.backend.conversationState()
             agentState = state; agentError = nil
+            _ = await store.pullFromServer(reconcilingConversation: state.activeTurn == nil && store.pendingConversationMessageID == nil)
             if let id = store.pendingConversationMessageID,
                let message = store.chatTranscript.first(where: { $0.id == id }) {
                 if let old = store.pendingConversationGeneration, old != state.generation {
@@ -395,12 +396,6 @@ struct ConversationView: View {
         catch { agentError = "I couldn't report the calendar result. Retrying this saved action will check for an existing event first." }
     }
 
-    private func prepareReply(to taskID: UUID) {
-        guard let task = store.tasks.first(where: { $0.id == taskID }), task.needsChatHelp,
-              let help = task.help, help.kind == .information, let question = help.questions.first else { return }
-        replyTarget = TaskReplyTarget(taskID: taskID, helpID: help.id, question: question.text)
-    }
-
     @ViewBuilder
     private func taskHelpCard(_ task: AgentTask, help: TaskHelp) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -459,66 +454,6 @@ struct ConversationView: View {
         }
         .foregroundStyle(HyggeTheme.ink)
         .padding(16).hyggeCard(radius: 20).padding(.leading, 33)
-    }
-
-    private func proposeBeliefs(from patch: EarningsProfilePatch) {
-        func normalized(_ value: String) -> String {
-            value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        }
-        func existingItems(withPrefix prefix: String) -> Set<String> {
-            Set((store.beliefs.beliefs + store.beliefs.pending)
-                .filter { $0.sentence.hasPrefix(prefix) }
-                .flatMap { $0.sentence.dropFirst(prefix.count).split(separator: ",").map { normalized(String($0)) } })
-        }
-
-        // Proposals are reviewed in Profile, never announced in chat.
-        if let skills = patch.skills {
-            let knownSkills = Set(store.profile.skills.map(normalized))
-                .union(existingItems(withPrefix: "Also good at:"))
-            var seenSkills = Set<String>()
-            let newSkills = skills.compactMap { skill -> String? in
-                let trimmed = skill.trimmingCharacters(in: .whitespacesAndNewlines)
-                let key = normalized(trimmed)
-                guard !trimmed.isEmpty, !knownSkills.contains(key),
-                      seenSkills.insert(key).inserted else { return nil }
-                return trimmed
-            }
-            if !newSkills.isEmpty {
-                store.proposeBelief(sentence: "Also good at: \(newSkills.joined(separator: ", "))",
-                                    source: .guessedFromChat, confidence: 0.7)
-            }
-        }
-        if let availability = patch.availabilityNotes {
-            let trimmedAvailability = availability.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedAvailability.isEmpty,
-               normalized(trimmedAvailability) != normalized(store.profile.availabilityNotes) {
-                store.proposeBelief(sentence: "Usually free: \(trimmedAvailability)",
-                                    source: .youSaidIt, confidence: 0.85)
-            }
-        }
-        if let location = patch.locationLabel {
-            let trimmedLocation = location.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedLocation.isEmpty,
-               normalized(trimmedLocation) != normalized(store.profile.locationLabel) {
-                store.proposeBelief(sentence: "Now based in \(trimmedLocation)",
-                                    source: .youSaidIt, confidence: 0.85)
-            }
-        }
-        if let interests = patch.interests {
-            let knownLabels = existingItems(withPrefix: "Also enjoys:")
-            var seenInterests: [OpportunityCategory] = []
-            let newInterests = interests.filter { interest in
-                guard !store.profile.interests.contains(interest),
-                      !knownLabels.contains(normalized(interest.activityLabel)),
-                      !seenInterests.contains(interest) else { return false }
-                seenInterests.append(interest)
-                return true
-            }
-            if !newInterests.isEmpty {
-                store.proposeBelief(sentence: "Also enjoys: \(newInterests.map(\.activityLabel).joined(separator: ", ").lowercased())",
-                                    source: .guessedFromChat, confidence: 0.65)
-            }
-        }
     }
 
     private func agentConfirmationCard(_ proposal: PersistentChatProposal) -> some View {
