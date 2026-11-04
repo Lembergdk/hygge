@@ -62,6 +62,48 @@ export interface Env {
   HYGGE_APNS_ENVIRONMENT?: string;
 }
 
+/// Every authenticated per-user path prefix the router admits.
+/// A handler behind a prefix missing here is unreachable (404),
+/// however correct the handler is — subscriptions shipped that
+/// way once. Lives beside Env so tests can hold it to the
+/// D1-side endpoints without importing the worker entry.
+export const USER_ROUTES = [
+  "/credentials",
+  "/session-profiles",
+  "/memory",
+  "/sessions",
+  "/tasks",
+  "/skills",
+  "/site-proposals",
+  "/onboarding",
+  "/sandbox",
+  // Brief 01 per-user state (see state.ts / user-sandbox.ts).
+  "/state",
+  "/feed-items",
+  "/messages",
+  "/profile",
+  "/sites",
+  "/opportunities",
+  "/applications",
+  "/proposals",
+  "/account-states",
+  "/journal-events",
+  "/beliefs",
+  "/search-evidence",
+  // Brief 06 per-user learning state.
+  "/feedback-events",
+  "/learning-profiles",
+  // Brief 05 scheduled scanning (manual tick + status; the cron
+  // sweeper calls the same per-user tick).
+  "/scheduled-scan",
+  // Brief 04 receive-only email: own address + filed mail + codes meta.
+  "/email",
+  // Brief 07 push: own device-token registration (D1, see push.ts).
+  "/device-tokens",
+  // Pricing: Plus subscription record + status (D1, subscriptions.ts).
+  "/subscriptions",
+];
+
 export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
