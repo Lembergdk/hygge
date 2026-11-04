@@ -11,6 +11,21 @@ import {
 } from "../src/subscriptions.ts";
 import { validateEmailAlias } from "../src/email.ts";
 import { monthlyLoggedEarnings } from "../src/scan.ts";
+import { USER_ROUTES } from "../src/env.ts";
+
+test("router admits the D1-side endpoint prefixes (regression: subscriptions shipped unreachable)", () => {
+  // A handler behind a missing prefix 404s however correct it is.
+  // /subscriptions and /subscriptions/status did exactly that in
+  // production until this fix.
+  for (const prefix of ["/subscriptions", "/email", "/device-tokens"]) {
+    assert.ok(USER_ROUTES.includes(prefix), `${prefix} must be in USER_ROUTES`);
+  }
+  const admitted = (path: string) =>
+    USER_ROUTES.some((r) => path === r || path.startsWith(r + "/"));
+  assert.equal(admitted("/subscriptions"), true);
+  assert.equal(admitted("/subscriptions/status"), true);
+  assert.equal(admitted("/email/alias"), true);
+});
 
 function fakeJws(payload: Record<string, unknown>): string {
   const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");

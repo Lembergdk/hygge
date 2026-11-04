@@ -1,6 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env.ts";
-import { json, sandboxFor } from "./env.ts";
+import { json, sandboxFor, USER_ROUTES } from "./env.ts";
 import { appleAppSiteAssociation, handleAuthRequest, resolveRequestUserId } from "./auth.ts";
 import { LLMClient } from "./llm.ts";
 import { onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
@@ -21,40 +21,6 @@ export class OutboundDeny extends WorkerEntrypoint {
   }
 }
 
-const USER_ROUTES = [
-  "/credentials",
-  "/session-profiles",
-  "/memory",
-  "/sessions",
-  "/tasks",
-  "/skills",
-  "/site-proposals",
-  "/onboarding",
-  "/sandbox",
-  // Brief 01 per-user state (see state.ts / user-sandbox.ts).
-  "/state",
-  "/feed-items",
-  "/messages",
-  "/profile",
-  "/sites",
-  "/opportunities",
-  "/applications",
-  "/proposals",
-  "/account-states",
-  "/journal-events",
-  "/beliefs",
-  "/search-evidence",
-  // Brief 06 per-user learning state.
-  "/feedback-events",
-  "/learning-profiles",
-  // Brief 05 scheduled scanning (manual tick + status; the cron
-  // sweeper below calls the same per-user tick).
-  "/scheduled-scan",
-  // Brief 04 receive-only email: own address + filed mail + codes meta.
-  "/email",
-  // Brief 07 push: own device-token registration (D1, see push.ts).
-  "/device-tokens",
-];
 
 /// Fleet sweeper (Brief 05): one cron tick fans out to every user's
 /// sandbox, which decides for itself — server-side pause flag,
