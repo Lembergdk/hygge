@@ -110,9 +110,15 @@ export function selectTier(cfg: LLMConfig, ctx: TierContext) {
   return pick("spark", ctx.skillCoverage === "active" ? "active shared skill loaded" : "routine browsing decision");
 }
 
+/// Usage block, both shapes: chat completions (prompt/completion)
+/// and the Responses API (input/output). The client moved to the
+/// Responses API; the chat-completions fields stay so older gateway
+/// payloads and tests keep parsing.
 interface ChatUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
   total_tokens?: number;
   prompt_tokens_details?: { cached_tokens?: number };
   input_token_details?: { cached_tokens?: number };
@@ -133,17 +139,48 @@ export function genAiTextMessage(role: string, text: string, finishReason?: stri
 export function traceUsageAttributes(usage: ChatUsage | undefined) {
   const attrs: Record<string, number> = {};
   if (!usage) return attrs;
-  if (typeof usage.prompt_tokens === "number") attrs["gen_ai.usage.input_tokens"] = usage.prompt_tokens;
-  if (typeof usage.completion_tokens === "number") attrs["gen_ai.usage.output_tokens"] = usage.completion_tokens;
+  const input = usage.prompt_tokens ?? usage.input_tokens;
+  const output = usage.completion_tokens ?? usage.output_tokens;
+  if (typeof input === "number") attrs["gen_ai.usage.input_tokens"] = input;
+  if (typeof output === "number") attrs["gen_ai.usage.output_tokens"] = output;
   const cached = usage.prompt_tokens_details?.cached_tokens ?? usage.input_token_details?.cached_tokens;
   if (typeof cached === "number") attrs["gen_ai.usage.cache_read.input_tokens"] = cached;
   const reasoning = usage.completion_tokens_details?.reasoning_tokens ?? usage.output_token_details?.reasoning_tokens;
   if (typeof reasoning === "number") attrs["gen_ai.usage.reasoning.output_tokens"] = reasoning;
   const total = typeof usage.total_tokens === "number"
     ? usage.total_tokens
-    : (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+    : (input ?? 0) + (output ?? 0);
   if (total > 0) attrs["cloudflare.agents.usage.total_tokens"] = total;
   return attrs;
+}
+
+/// Preserve HTTP status without logging a provider error body.
+function llmHttpError(model: string, status: number): Error & { status: number } {
+  const err = new Error(`LLM ${model} returned ${status}`) as Error & { status: number };
+  err.status = status;
+  return err;
+}
+
+function assertCompletedResponse(data: { status?: string }): void {
+  if (data.status !== "completed") throw new Error(`LLM response did not complete (${data.status ?? "missing status"})`);
+}
+
+/// Text of a Responses API response: the message items' output_text
+/// parts, in order. Reasoning and other items carry no user-visible
+/// text and are skipped. A top-level `output_text` aggregate is the
+/// fallback for providers that supply one.
+export function extractResponsesText(data: any): string {
+  const parts: string[] = [];
+  if (Array.isArray(data?.output)) {
+    for (const item of data.output) {
+      if (item?.type !== "message") continue;
+      for (const part of (item?.content ?? [])) {
+        if (part?.type === "output_text" && typeof part?.text === "string") parts.push(part.text);
+      }
+    }
+  }
+  if (parts.length) return parts.join("");
+  return typeof data?.output_text === "string" ? data.output_text : "";
 }
 
 export class LLMClient {
@@ -206,7 +243,12 @@ export class LLMClient {
     if (logId) span.setAttribute("cloudflare.ai_gateway.log.id", logId.slice(0, 256));
   }
 
-  async complete({ model, system, user, conversationId, imageDataURL }: { model: string; system: string; user: string; conversationId?: string; imageDataURL?: string }): Promise<string> {
+  /// Stateless Responses call. The caller supplies the current snapshot or
+  /// canonical app transcript, including actual action outcomes. No provider
+  /// conversation state is retained by this transport migration.
+  async complete({ model, system, user, conversationId, imageDataURL }: {
+    model: string; system: string; user: string; conversationId?: string; imageDataURL?: string;
+  }): Promise<string> {
     return withSpan(`chat ${model}`, this.chatAttrs(model, conversationId), async (span) => {
       this.payloadAttrs(span, system, user);
       if (imageDataURL && (!/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(imageDataURL) || imageDataURL.length > 5_400_000)) throw new Error("Invalid or oversized model image");
@@ -214,56 +256,64 @@ export class LLMClient {
       // Images never enter application traces or gateway body logs.
       if (imageDataURL) headers["cf-aig-collect-log-payload"] = "false";
       span.setAttribute("hygge.vision.attached", Boolean(imageDataURL));
-      const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      const url = `${this.cfg.baseUrl.replace(/\/$/, "")}/responses`;
+      const res = await fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify({
           model,
-          messages: [
-            { role: "system", content: system },
-            { role: "user", content: imageDataURL ? [{ type: "text", text: user }, { type: "image_url", image_url: { url: imageDataURL } }] : user },
-          ],
+          instructions: system,
+          input: imageDataURL
+            ? [{ role: "user", content: [{ type: "input_text", text: user }, { type: "input_image", image_url: imageDataURL }] }]
+            : user,
+          store: false,
         }),
       });
-      if (!res.ok) throw new Error(`LLM ${model} returned ${res.status}`);
+      if (!res.ok) throw llmHttpError(model, res.status);
       this.gatewayLogAttr(span, res);
       const data = (await res.json()) as {
         id?: string;
         model?: string;
-        choices?: { finish_reason?: string | null; message?: { content?: string } }[];
+        status?: string;
+        output?: unknown;
+        output_text?: unknown;
         usage?: ChatUsage;
       };
       this.usageAttrs(span, data.usage);
       this.responseAttrs(span, {
         id: data.id,
         model: data.model,
-        finishReason: data.choices?.[0]?.finish_reason,
+        finishReason: data.status ?? null,
       }, model);
-      const text = data.choices?.[0]?.message?.content ?? "";
-      this.payloadAttrs(span, system, user, text, data.choices?.[0]?.finish_reason);
+      assertCompletedResponse(data);
+      const text = extractResponsesText(data);
+      this.payloadAttrs(span, system, user, text, data.status ?? null);
       return text;
     });
   }
 
+  /// Stream only completed Responses. HTTP 200 is not sufficient: a
+  /// failed/incomplete terminal event or an interrupted stream is a failure.
   async completeStream(
     { model, system, user, conversationId }: { model: string; system: string; user: string; conversationId?: string },
     onDelta: (delta: string) => void,
   ): Promise<string> {
     return withSpan(`chat ${model}`, this.chatAttrs(model, conversationId), async (span) => {
     this.payloadAttrs(span, system, user);
-    const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    const headers = llmRequestHeaders(this.cfg, model);
+    const url = `${this.cfg.baseUrl.replace(/\/$/, "")}/responses`;
+    const res = await fetch(url, {
       method: "POST",
-      headers: llmRequestHeaders(this.cfg, model),
+      headers,
       body: JSON.stringify({
         model,
+        instructions: system,
+        input: user,
         stream: true,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
+        store: false,
       }),
     });
-    if (!res.ok) throw new Error(`LLM ${model} returned ${res.status}`);
+    if (!res.ok) throw llmHttpError(model, res.status);
     if (!res.body) throw new Error("LLM stream had no body");
     this.gatewayLogAttr(span, res);
     const reader = res.body.getReader();
@@ -273,37 +323,46 @@ export class LLMClient {
     let responseId: string | undefined;
     let responseModel: string | undefined;
     let finishReason: string | null | undefined;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === "[DONE]") continue;
-        try {
-          const chunk = JSON.parse(data) as {
-            id?: string;
-            model?: string;
-            choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
-            usage?: ChatUsage;
-          };
-          responseId ??= chunk.id;
-          responseModel ??= chunk.model;
-          finishReason ??= chunk.choices?.[0]?.finish_reason ?? undefined;
-          this.usageAttrs(span, chunk.usage);
-          const delta = chunk.choices?.[0]?.delta?.content ?? "";
-          if (delta) {
-            full += delta;
-            onDelta(delta);
-          }
-        } catch {
-          /* partial/keepalive lines are ignored */
-        }
+    let completed = false;
+    const processLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) return;
+      const data = trimmed.slice(5).trim();
+      if (data === "[DONE]" || !data) return;
+      let event: any;
+      try { event = JSON.parse(data); } catch { throw new Error("Invalid LLM stream event"); }
+      if (event?.type === "response.output_text.delta" && typeof event.delta === "string") {
+        full += event.delta;
+        if (event.delta) onDelta(event.delta);
+      } else if (event?.type === "response.created" && event.response?.id) {
+        responseId ??= event.response.id;
+      } else if (event?.type === "response.completed" && event.response) {
+        assertCompletedResponse(event.response);
+        completed = true;
+        responseId = event.response.id ?? responseId;
+        responseModel = event.response.model;
+        finishReason = event.response.status;
+        this.usageAttrs(span, event.response.usage);
+      } else if (["error", "response.failed", "response.incomplete", "response.cancelled"].includes(event?.type)) {
+        // Provider details may contain request data; keep errors metadata-only.
+        throw new Error(`LLM stream did not complete (${event.type})`);
       }
+    };
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) processLine(line);
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) processLine(buffer);
+      if (!completed) throw new Error("LLM stream ended before completion");
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
     }
     this.responseAttrs(span, { id: responseId, model: responseModel, finishReason }, model);
     this.payloadAttrs(span, system, user, full, finishReason);
