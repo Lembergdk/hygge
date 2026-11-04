@@ -60,6 +60,11 @@ jobs:
         run: npx wrangler deploy --dry-run -c wrangler.staging.jsonc --outdir /tmp/hygge-browser-test-bundle
       - name: Install retained-container test dependencies
         run: npm --prefix container ci --ignore-scripts
+      - name: Build deployable workspace image and verify isolated full-profile restore
+        timeout-minutes: 10
+        run: |
+          docker build --platform linux/amd64 -f container/Dockerfile -t hygge-workspace:ci .
+          docker run --rm --network none --entrypoint node hygge-workspace:ci --experimental-strip-types --input-type=module - < container/scripts/image-smoke.mjs
       - name: Retained-container artifact and RPC tests
         timeout-minutes: 10
         run: npm --prefix container test
