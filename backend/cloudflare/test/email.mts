@@ -18,6 +18,8 @@ import {
   senderEmailOf,
   generateSitePassword,
   handleEmailAddressRequest,
+  mailContentHash,
+  normalizeMailForHash,
   isSafeVerificationLink,
   isStrongSitePassword,
   parseMimeMessage,
@@ -483,4 +485,38 @@ test("triage: owner commands parse strictly, forwarded mail never does", () => {
   assert.equal(parseOwnerEmailCommand({ subject: "", text: "don't scan Rover" }, sites), null);
   assert.equal(parseOwnerEmailCommand({ subject: "", text: "Thanks, great week so far!" }, sites), null);
   assert.equal(parseOwnerEmailCommand({ subject: "Fwd: scan Rover", text: "Scan Rover for new jobs" }, sites), null);
+});
+
+// ---- one mail, one event: content identity --------------------------------
+
+test("mail identity: re-forwards of the same mail hash identically", async () => {
+  const original = parseMimeMessage([
+    "From: Sam <sam@gmail.com>", "To: 4839201847@usehygge.cc",
+    "Subject: New maintenance jobs at ApartmentIQ", "Content-Type: text/plain", "",
+    "Four new roles near Leeds this week. Details inside.",
+  ].join("\r\n"));
+  const forwardedAgain = parseMimeMessage([
+    "From: Sam <sam@gmail.com>", "To: 4839201847@usehygge.cc",
+    "Subject: Fwd:  New maintenance jobs at ApartmentIQ", "Content-Type: text/plain", "",
+    "Four new   roles near Leeds this week.   Details inside.",
+  ].join("\r\n"));
+  const different = parseMimeMessage([
+    "From: Sam <sam@gmail.com>", "To: 4839201847@usehygge.cc",
+    "Subject: New maintenance jobs at ApartmentIQ", "Content-Type: text/plain", "",
+    "Five new roles near York instead.",
+  ].join("\r\n"));
+  assert.equal(normalizeMailForHash(original), normalizeMailForHash(forwardedAgain));
+  assert.equal(await mailContentHash(original), await mailContentHash(forwardedAgain));
+  assert.notEqual(await mailContentHash(original), await mailContentHash(different));
+
+  // The pipeline stamps the hash on the delivery for the object to dedupe on.
+  const db = new MemoryEmailAddressDb();
+  await allocateHyggeAddress(db, "owner-1", { nextDigits: () => "4839201847" });
+  const deliveries: InboundEmailDelivery[] = [];
+  await processInboundEmail({ to: "4839201847@usehygge.cc", raw: [
+    "From: Sam <sam@gmail.com>", "To: 4839201847@usehygge.cc",
+    "Subject: New maintenance jobs at ApartmentIQ", "Content-Type: text/plain", "",
+    "Four new roles near Leeds this week. Details inside.",
+  ].join("\r\n") }, { db, deliver: async (_u, d) => { deliveries.push(d); } });
+  assert.equal(deliveries[0].contentHash, await mailContentHash(original));
 });

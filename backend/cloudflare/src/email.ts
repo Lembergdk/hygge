@@ -34,7 +34,7 @@ export type RoutingCountKind =
   | "received" | "dropped_unknown" | "dropped_malformed"
   | "verification" | "security_code" | "other"
   | "link_follow_ok" | "link_follow_failed" | "delivery_failed"
-  | "owner_instruction";
+  | "owner_instruction" | "reasoned" | "duplicate" | "proposed_site" | "chat_asked";
 
 // ---- address format ----------------------------------------------------
 
@@ -674,6 +674,29 @@ export async function reasonAboutEmail(args: {
   }
 }
 
+// ---- mail identity: one mail, one event -----------------------------------
+//
+// A re-forward of the same mail mints a new Message-ID, so
+// identity is content: sender domain + subject (Fwd:/Re: chains
+// stripped) + opening body, whitespace-normalized, hashed. The
+// owning object dedupes on it — one summary, one journal entry,
+// one round of actions however many times a mail is delivered.
+
+export function normalizeMailForHash(parsed: ParsedEmail): string {
+  const subject = String(parsed.subject ?? "")
+    .replace(/^(\s*(fwd|fw|re)\s*:\s*)+/i, "")
+    .replace(/\s+/g, " ").trim().toLowerCase();
+  const body = String(parsed.text ?? "").slice(0, 1000)
+    .replace(/\s+/g, " ").trim().toLowerCase();
+  return `${senderDomainOf(parsed.from)}|${subject}|${body}`;
+}
+
+export async function mailContentHash(parsed: ParsedEmail): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256", new TextEncoder().encode(normalizeMailForHash(parsed)));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 // ---- summaries (never carry codes or token links) ------------------------
 
 export interface EmailSummary {
@@ -739,6 +762,9 @@ export interface VerificationLinkOutcome {
 export interface InboundEmailDelivery {
   kind: EmailKind;
   receivedAt: string;
+  /// Content identity (mailContentHash) — the owning object files
+  /// each distinct mail exactly once, however often it arrives.
+  contentHash?: string;
   summary: EmailSummary;
   code: string | null;
   verification: VerificationLinkOutcome | null;
@@ -769,7 +795,7 @@ export interface InboundResult {
 export interface InboundDeps {
   db: EmailAddressDb;
   domain?: string;
-  deliver: (userId: string, delivery: InboundEmailDelivery) => Promise<void>;
+  deliver: (userId: string, delivery: InboundEmailDelivery) => Promise<any>;
   followLink?: (url: string) => Promise<{ ok: boolean; status: number | null }>;
   now?: () => Date;
   /// The account owner's verified email addresses. Without this,
@@ -853,6 +879,7 @@ export async function processInboundEmail(
   const reading = kind === "other" && deps.reasonClient
     ? await reasonAboutEmail({ client: deps.reasonClient, parsed, ownerVerified })
     : null;
+  if (reading) await count("reasoned");
   const summary = summarizeEmail(parsed, kind, code);
   if (reading) {
     summary.extractiveSummary = summary.summary;
@@ -861,6 +888,7 @@ export async function processInboundEmail(
   const delivery: InboundEmailDelivery = {
     kind,
     receivedAt: now.toISOString(),
+    contentHash: await mailContentHash(parsed),
     summary,
     code,
     verification,
@@ -874,7 +902,13 @@ export async function processInboundEmail(
   };
   await count(kind);
   try {
-    await deps.deliver(owner.userId, delivery);
+    const receipt = await deps.deliver(owner.userId, delivery);
+    // The owning object reports what the mail became; count it so
+    // routing behavior is diagnosable without content logs.
+    const outcome = String(receipt?.outcome ?? "");
+    if (outcome === "duplicate" || outcome === "proposed_site" || outcome === "chat_asked") {
+      await count(outcome);
+    }
   } catch {
     await count("delivery_failed");
     return { disposition: "delivery_failed", kind, verification };
@@ -1045,6 +1079,7 @@ export async function handleEmailMessage(message: ForwardableEmailLike, env: Env
           body: JSON.stringify(delivery),
         }));
         if (!res.ok) throw new Error(`inbound delivery failed: ${res.status}`);
+        return res.json().catch(() => null);
       },
     },
   );

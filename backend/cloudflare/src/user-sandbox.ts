@@ -197,6 +197,7 @@ export class UserSandbox extends DurableObject<Env> {
       ["decision", "TEXT NOT NULL DEFAULT 'none'"],
       ["highlights", "TEXT NOT NULL DEFAULT '[]'"],
       ["site_id", "TEXT"],
+      ["content_hash", "TEXT"],
     ] as const) {
       if (!summaryColumns.has(name)) ctx.storage.sql.exec(`ALTER TABLE email_summaries ADD COLUMN ${name} ${def}`);
     }
@@ -623,8 +624,17 @@ export class UserSandbox extends DurableObject<Env> {
     return { relation, decision, site, sites, accountStates };
   }
 
-  private journalEmail(receivedAt: string, sentence: string, detail: string, siteID: string | null) {
-    const journalId = crypto.randomUUID();
+  /// One mail, one journal entry: the id derives from the mail's
+  /// content identity, so even a raced re-delivery upserts the
+  /// same entry instead of writing a second one.
+  private static uuidFromSeed(seed: string): string {
+    const hex = seed.replace(/[^a-f0-9]/gi, "").padEnd(32, "0").slice(0, 32);
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+  }
+
+  private journalEmail(receivedAt: string, sentence: string, detail: string, siteID: string | null,
+                       contentHash?: string) {
+    const journalId = contentHash ? UserSandbox.uuidFromSeed(contentHash) : crypto.randomUUID();
     this.stateStore().upsert("journalEvents", journalId, {
       id: journalId,
       occurredAt: receivedAt,
@@ -634,6 +644,15 @@ export class UserSandbox extends DurableObject<Env> {
       siteID, applicationID: null, grossAmount: null,
       currencyCode: "USD", listingsChecked: 0,
     }, receivedAt);
+  }
+
+  /// A question from Hygge in the lifelong thread, for mail whose
+  /// next step is genuinely the user's call and fits no feed card.
+  private appendAgentChat(text: string, atIso: string, seed: string) {
+    const id = UserSandbox.uuidFromSeed(`${seed}chat`);
+    const store = this.stateStore();
+    if (store.get("messages", id)) return;
+    store.upsert("messages", id, { id, fromAgent: true, text, createdAt: atIso }, atIso);
   }
 
   /// An email-triggered look for work runs the same guarded tick as
@@ -738,7 +757,7 @@ export class UserSandbox extends DurableObject<Env> {
           this.journalEmail(receivedAt, scanned.includes(site.siteID) || scanned.includes(site.id)
             ? `You asked by email, so I checked ${site.name} for new work.`
             : `You asked by email to check ${site.name}; it had already been checked in this slot.`,
-          detail, site.siteID);
+          detail, site.siteID, delivery.contentHash);
         });
         return "queued"; // journal written when the look actually happens
       }
@@ -776,10 +795,87 @@ export class UserSandbox extends DurableObject<Env> {
     }
   }
 
+  /// A jobs-bearing mail can evidence a place worth watching:
+  /// the hosts it links to (or a service sender domain), minus
+  /// generic mailboxes and places already known. Authenticated
+  /// senders only — forged mail never earns a feed card.
+  private candidateSiteFromMail(
+    delivery: InboundEmailDelivery,
+    triage: ReturnType<UserSandbox["triageEmail"]>,
+  ): { domain: string; name: string } | null {
+    if (delivery.triage?.senderAuthenticated !== true) return null;
+    const mentionsWork = (delivery.triage?.reading?.mentions ?? []).some((m) => m.kind === "job_alert")
+      || (delivery.triage?.highlights ?? []).some((h) => h.kind === "job_alert");
+    if (!mentionsWork) return null;
+    const genericMailboxes = new Set([
+      "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
+      "yahoo.com", "yahoo.co.uk", "icloud.com", "me.com", "proton.me", "protonmail.com", "aol.com",
+    ]);
+    const hosts = [
+      ...delivery.summary.actionableItems
+        .filter((item) => item.startsWith("Link to "))
+        .map((item) => item.slice("Link to ".length).trim().toLowerCase().replace(/^www\./, "")),
+      delivery.summary.senderDomain.toLowerCase(),
+    ];
+    for (const domain of hosts) {
+      if (!domain || genericMailboxes.has(domain)) continue;
+      const known = triage.sites.some((site) => {
+        const siteDomain = domainOfUrl(site.startURLString);
+        return domain === siteDomain || domain.endsWith(`.${siteDomain}`) || siteDomain.endsWith(`.${domain}`);
+      });
+      if (known) continue;
+      const label = domain.split(".")[0] || domain;
+      return { domain, name: label.charAt(0).toUpperCase() + label.slice(1) };
+    }
+    return null;
+  }
+
+  /// Suggest a place the mail evidenced, as an ordinary feed
+  /// proposal carrying its origin (the app can then tie a
+  /// dismissal back to this sender). The proposal IS the consent
+  /// surface; nothing joins from here.
+  private proposeSiteFromMail(
+    candidate: { domain: string; name: string },
+    delivery: InboundEmailDelivery,
+    summaryId: string,
+  ) {
+    const store = this.stateStore();
+    const profileRow = store.get("profile", PROFILE_ROW_ID);
+    const interests = (((profileRow?.data as any)?.profile?.interests ?? []) as unknown[]).map(String);
+    store.upsert("sites", candidate.domain, {
+      id: candidate.domain, name: candidate.name,
+      startURLString: `https://${candidate.domain}`,
+      category: interests[0] ?? "localGig",
+      goalTemplate: "Find current opportunities on this site that match my earnings profile and extract their title, pay, location and link.",
+    });
+    const id = crypto.randomUUID();
+    store.upsert("proposals", id, {
+      id, siteID: candidate.domain,
+      rationale: `Mail from ${delivery.summary.senderDomain} mentioned work there.`,
+      payPattern: "Paid per job, rates vary by listing",
+      dataShared: "Your name, photo and profile text",
+      verification: "Email confirmation; a bot check may need you",
+      status: "proposed",
+      sourceMailDomain: delivery.summary.senderDomain.toLowerCase(),
+      sourceMailId: summaryId,
+    });
+    store.upsert("accountStates", candidate.domain, { siteID: candidate.domain, state: "proposed" });
+  }
+
   private async handleEmailInbound(delivery: InboundEmailDelivery) {
     this.pruneExpiredEmailCodes();
-    const summaryId = crypto.randomUUID();
     const s = delivery.summary;
+    // One mail, one event: a re-forward (or any re-delivery) of
+    // content already filed changes nothing — no second summary,
+    // journal entry, proposal, or push.
+    if (delivery.kind === "other" && delivery.contentHash) {
+      const existing = [...this.ctx.storage.sql.exec(
+        "SELECT id FROM email_summaries WHERE content_hash = ? LIMIT 1", delivery.contentHash)] as Row[];
+      if (existing.length) return { filed: true, kind: delivery.kind, outcome: "duplicate" };
+    }
+    const summaryId = delivery.contentHash
+      ? UserSandbox.uuidFromSeed(`${delivery.contentHash}summary`)
+      : crypto.randomUUID();
     const triage = this.triageEmail(delivery);
     // The model's concrete mentions read better than fixed
     // keyword labels ("4 maintenance jobs near Leeds"); keyword
@@ -788,13 +884,25 @@ export class UserSandbox extends DurableObject<Env> {
     const highlightLabels = readingMentions.length
       ? readingMentions.map((m) => m.detail)
       : (delivery.triage?.highlights ?? []).map((h) => h.label);
+    // Where does this mail's action live? A site the mail
+    // evidences becomes a feed proposal; work-relevant mail with
+    // no place to attach becomes a chat question; the rest keeps
+    // the triage decision. The journal only ever records facts.
+    const siteCandidate = delivery.kind === "other" && triage.relation === "unknown"
+      ? this.candidateSiteFromMail(delivery, triage) : null;
+    const mentionsWorkOrMessage = readingMentions.some((m) => m.kind === "job_alert" || m.kind === "client_message");
+    const chatAsk = !siteCandidate && triage.relation === "unknown" && delivery.kind === "other"
+      && triage.decision === "pending" && mentionsWorkOrMessage
+      && delivery.triage?.senderAuthenticated === true;
+    const finalDecision = siteCandidate ? "proposed" : chatAsk ? "chat" : triage.decision;
     this.ctx.storage.sql.exec(
-      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, content_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       summaryId, s.sender, s.senderDomain, s.subject, s.date, s.kind,
       s.summary, JSON.stringify(s.actionableItems), JSON.stringify(s.attachments),
-      triage.relation, triage.decision, JSON.stringify(highlightLabels),
+      triage.relation, finalDecision, JSON.stringify(highlightLabels),
       triage.relation === "site" ? (triage.site?.siteID ?? null) : null,
+      delivery.contentHash ?? null,
     );
     if (delivery.code) {
       const blob = await vault.seal(await this.dek(), delivery.code, this.emailCodeAAD(s.senderDomain));
@@ -817,39 +925,58 @@ export class UserSandbox extends DurableObject<Env> {
         this.ctx.waitUntil(this.runInteractiveTask(task, this.browser()));
       }
     }
-    // Other mail is journaled summary-level only — no body, no
-    // code, no link — and acted on by relation:
-    // - a watched place mentioning something relevant starts a
-    //   guarded look for work;
-    // - the owner's own mail is read for one plain instruction;
-    // - an unknown sender waits for the user's call (decision
-    //   "pending" drives the Home-screen card), unless a remembered
-    //   choice already answered it. "ignore" files silently.
+    // Other mail earns exactly ONE journal entry: a witnessed,
+    // past-tense fact (what arrived, what it said, what Hygge
+    // did) — never an ask. Anything needing the user lives where
+    // it can be acted on: a feed card (proposal, sender decision)
+    // or a chat question. "ignore" files silently, as chosen.
+    let outcome: string | undefined;
     if (delivery.kind === "other" && triage.decision !== "ignore") {
       const detail = [...highlightLabels, s.summary].filter(Boolean).join(" ");
+      const hash = delivery.contentHash;
       if (triage.relation === "owner") {
         const sentence = this.runOwnerEmailCommand(delivery, triage);
         if (sentence && sentence !== "queued") {
-          this.journalEmail(delivery.receivedAt, sentence, detail, null);
+          this.journalEmail(delivery.receivedAt, sentence, detail, null, hash);
         } else if (!sentence) {
+          const readingInstruction = delivery.triage?.reading?.instruction;
+          if (readingInstruction && delivery.contentHash) {
+            const named = readingInstruction.kind === "add"
+              ? readingInstruction.domain : "site" in readingInstruction ? readingInstruction.site : null;
+            this.appendAgentChat(named
+              ? `You asked by email about ${named}, but I don't have that place yet. Shall I add it and start looking there?`
+              : `You asked by email to ${readingInstruction.kind}, but I couldn't tell exactly what you meant. Tell me here and I'll do it.`,
+            delivery.receivedAt, delivery.contentHash);
+            outcome = "chat_asked";
+          }
           this.journalEmail(delivery.receivedAt,
-            `Filed mail from your address: ${s.subject || "(no subject)"}`, detail, null);
+            `Filed mail from your address: ${s.subject || "(no subject)"}`, detail, null, hash);
         }
       } else if (triage.relation === "site" && triage.site) {
         this.journalEmail(delivery.receivedAt,
           `Filed mail from ${triage.site.name}: ${s.subject || "(no subject)"}`,
-          detail, triage.site.siteID);
+          detail, triage.site.siteID, hash);
         if (triage.decision === "work" && highlightLabels.length > 0) {
           this.scheduleEmailScanTick();
         }
-      } else if (triage.decision === "pending") {
+      } else if (siteCandidate) {
+        this.proposeSiteFromMail(siteCandidate, delivery, summaryId);
+        outcome = "proposed_site";
         this.journalEmail(delivery.receivedAt,
-          `Mail from ${s.senderDomain || "a new sender"} is waiting for your call: ${s.subject || "(no subject)"}`,
-          detail, null);
+          `Filed mail from ${s.senderDomain || "a new sender"}: ${s.subject || "(no subject)"}. Suggested ${siteCandidate.name} as a new place.`,
+          detail, null, hash);
+      } else if (chatAsk && delivery.contentHash) {
+        this.appendAgentChat(
+          `Mail from ${s.senderDomain} — “${s.subject || "(no subject)"}”. ${s.summary} It looks work-related, but I couldn't tell which place it belongs to. What would you like me to do with mail like this?`,
+          delivery.receivedAt, delivery.contentHash);
+        outcome = "chat_asked";
+        this.journalEmail(delivery.receivedAt,
+          `Filed mail from ${s.senderDomain || "a new sender"}: ${s.subject || "(no subject)"}. Asked you in chat what to do with mail like this.`,
+          detail, null, hash);
       } else {
         this.journalEmail(delivery.receivedAt,
           `Filed mail from ${s.senderDomain || "a site"}: ${s.subject || "(no subject)"}`,
-          detail, null);
+          detail, null, hash);
       }
       // A client message may be waiting: the one mail event worth
       // a push. Authenticated tracked (or work-ruled) senders only,
@@ -870,7 +997,7 @@ export class UserSandbox extends DurableObject<Env> {
         }
       }
     }
-    return { filed: true, kind: delivery.kind, relation: triage.relation, decision: triage.decision };
+    return { filed: true, kind: delivery.kind, relation: triage.relation, decision: finalDecision, outcome };
   }
 
   private recordOutcome(domain: string, kind: string, trace: any[], extractedItems: string[], success: boolean) {
