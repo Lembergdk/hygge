@@ -190,8 +190,11 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       const binding=await foundation.registry.read(owner,owner),receipt=record.sourceReceipt!;
       if(binding.generation!==record.source.generation||binding.incarnation!==record.source.incarnation||binding.desiredImageDigest!==record.source.desiredImageDigest||binding.recoveryPoint?.checkpointId!==receipt.recoveryPoint.checkpointId)throw Error('UPGRADE_SOURCE_CHANGED');
       if(binding.lifecycleState==='ready'){
-        await migrationBridge.attach(binding);const status=await migrationBridge.status();
-        if(status.frozen||status.humanControlled||status.filesystemRevision!==receipt.filesystemRevision||status.browserProfileRevision!==receipt.browserProfileRevision)throw Error('UPGRADE_SOURCE_CHANGED');
+        await migrationBridge.attach(binding);const lease=await foundation.registry.readLease(owner,owner);
+        if(Date.parse(lease.expiresAt)<=Date.now())await foundation.registry.reattachVerified(owner,owner,binding.revision,b=>migrationBridge.attach(b));
+        const status=await migrationBridge.status();
+        // A committed, independently verified final capture may still hold its native freeze after a lost release request.
+        if(status.humanControlled||status.filesystemRevision!==receipt.filesystemRevision||status.browserProfileRevision!==receipt.browserProfileRevision)throw Error('UPGRADE_SOURCE_CHANGED');
       }
       return foundation.registry.fence(owner,owner,record.source.generation,`${record.operationId}_fence`);
     },

@@ -18,12 +18,13 @@ async function fixture(t:any){
  const {storage}=sqliteWorkspace();for(const q of ['CREATE TABLE tasks(id TEXT PRIMARY KEY,task TEXT NOT NULL)','CREATE TABLE session_profiles(domain TEXT PRIMARY KEY,has_profile INTEGER)','CREATE TABLE credentials(id TEXT PRIMARY KEY,username TEXT)','CREATE TABLE profile(id TEXT PRIMARY KEY,payload TEXT)'])storage.sql.exec(q);
  storage.sql.exec("INSERT INTO tasks VALUES ('paused',?)",JSON.stringify({id:'paused',status:'needsHuman',help:{kind:'information'},drafted_payload:{private:'keep'},log:['paused']}));
  storage.sql.exec("INSERT INTO profile VALUES ('profile',?)",JSON.stringify({profile:{displayName:'Synthetic owner',hourlyRateFloor:25}}));
- let node:any=null,starting:Promise<any>|null=null,running=false,labels:any=null,image='';let starts=0,destroys=0,failDestroy=false,failRestore=false,objectFailure=false;
+ let node:any=null,starting:Promise<any>|null=null,running=false,labels:any=null,image='';let starts=0,destroys=0,failDestroy=false,failRestore=false,failRelease=false,objectFailure=false;
  const container:any={get running(){return running;},inspect:async()=>running?{image,labels}:null,
   start(o:any){starts++;image=o.image;labels=o.labels;running=true;const dir=path.join(root,o.labels.incarnation);starting=createWorkspaceServer({identity:JSON.parse(o.env.HYGGE_IDENTITY),secret:Uint8Array.from(Buffer.from(o.env.HYGGE_RPC_SECRET,'base64')),root:dir,executablePath:process.env.HYGGE_TEST_CHROME??'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',allowLoopback:true,launchArgs:['--no-sandbox','--ignore-certificate-errors']}).then(async app=>{node=app;await app.listen();return app;});},
   async destroy(){if(starting)await starting;if(node)await node.close();node=null;running=false;destroys++;if(failDestroy){failDestroy=false;throw Error('SYNTHETIC_FENCE_ACK_LOST');}},
   monitor:async()=>{},setInactivityTimeout:async()=>{},interceptOutboundHttp:async()=>{},
   getTcpPort(){return {fetch:async(req:Request)=>{await starting;const body=req.body?await req.text():undefined;
+   if(failRelease&&body&&JSON.parse(body).op==='capture.release'){failRelease=false;throw Error('SYNTHETIC_CAPTURE_RELEASE_LOST');}
    if(failRestore&&body&&JSON.parse(body).op==='restore.chunk'){failRestore=false;throw Error('SYNTHETIC_RESTORE_INTERRUPTED');}
    return fetch(`http://127.0.0.1:${node.server.address().port}${new URL(req.url).pathname}`,{method:req.method,headers:req.headers,body,signal:req.signal});}};},
  };
@@ -31,7 +32,7 @@ async function fixture(t:any){
  const env:any={HYGGE_ENV:'staging',HYGGE_WORKSPACE_IMAGE:oldImage,HYGGE_WORKSPACE_NAMESPACE:'test',HYGGE_WORKSPACE_IMAGE_TRANSITIONS:JSON.stringify([{from:oldImage,to:newImage,policy:'workspace-filesystem-v1'},{from:newImage,to:oldImage,policy:'workspace-filesystem-v1'}]),WORKSPACE_CHECKPOINTS:bucket,SELF:{fetch:async()=>new Response('deny',{status:403})},DB:{prepare(){return {bind(){return {first:async()=>({contact_email:'workspace-upgrade-synthetic@example.invalid'})};}};}}};
  const make=()=>createWorkspaceExecution({owner,storage,env,container,loadTask:()=>null,projectTask:()=>{throw Error('Migration must not rewrite a task');}});
  t.after(async()=>{if(starting)await starting;if(node)await node.close();site.closeAllConnections();await new Promise<void>(r=>site.close(()=>r()));await fs.rm(root,{recursive:true,force:true});});
- return {root,url,storage,env,blobs,make,stats:()=>({starts,destroys}),loseFenceAck(){failDestroy=true;},interruptRestore(){failRestore=true;},objectFailure(value:boolean){objectFailure=value;}};
+ return {root,url,storage,env,blobs,make,stats:()=>({starts,destroys}),loseCaptureRelease(){failRelease=true;},loseFenceAck(){failDestroy=true;},interruptRestore(){failRestore=true;},objectFailure(value:boolean){objectFailure=value;}};
 }
 
 test('populated compatible upgrade and latest-state rollback preserve real profile, files, paused SQL and revoke old leases',{timeout:450000},async t=>{
@@ -90,4 +91,11 @@ for(const status of ['prepared','dispatching','uncertain'])test(`unresolved ${st
  const before=w.foundation.persistence.get('effect','preserved');
  await assert.rejects(w.imageUpgrade.run({operationId:'blocked_effect',expectedGeneration:current.generation,targetImage:newImage}),/UNRESOLVED_ACTION/);
  assert.deepEqual(w.foundation.persistence.get('effect','preserved'),before);assert.equal(w.imageUpgrade.locked(),false);assert.equal(f.stats().destroys,0);
+});
+
+test('committed final capture with a lost release request resumes without losing its frozen source',async t=>{
+ const f=await fixture(t);let w=f.make();await w.ensure();await w.saveDocument('notes/sentinel',1,new TextEncoder().encode('keep'));
+ const source=await w.foundation.registry.read(owner,owner),input={operationId:'release_loss',expectedGeneration:source.generation,targetImage:newImage};f.loseCaptureRelease();
+ await assert.rejects(w.imageUpgrade.run(input),/CAPTURE_RELEASE_LOST/);assert.equal(f.stats().destroys,0);await assert.rejects(w.ensure(),/UPGRADE_PENDING/);
+ w=f.make();const result=await w.imageUpgrade.run(input);assert.equal(result.operation.phase,'verified');assert.equal(f.stats().destroys,1);await w.foundation.verifyDurability(result.operation.sourceReceipt!.receiptId);
 });
