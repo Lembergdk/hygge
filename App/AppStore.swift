@@ -888,7 +888,7 @@ final class AppStore {
     }
 
     /// The secret is sent once to the server vault; only the reference is kept.
-    /// Returns false (with nothing stored anywhere) if saving failed.
+    /// Returns false when the save could not be confirmed.
     @discardableResult
     func addCredential(domain: String, username: String, secret: String) async -> Bool {
         let cleanDomain = domain.replacingOccurrences(of: "www.", with: "")
@@ -906,7 +906,7 @@ final class AppStore {
             save()
             return true
         } catch {
-            lastMessage = "That login could not be saved just now. Nothing was stored — please try again in a moment."
+            lastMessage = "We couldn’t confirm that your login was saved. Enter your password again to retry."
             save()
             return false
         }
@@ -914,12 +914,19 @@ final class AppStore {
 
     /// Deletes one saved login. The site's trusted sign-in is separate
     /// and stays (forget it on its own if you want both gone).
-    func deleteCredential(id: UUID) async {
-        guard let ref = credentialRefs.first(where: { $0.id == id }) else { return }
-        await backend.deleteCredential(id: ref.id)
+    @discardableResult
+    func deleteCredential(id: UUID) async -> Bool {
+        guard let ref = credentialRefs.first(where: { $0.id == id }) else { return true }
+        guard await backend.deleteCredential(id: ref.id) else {
+            lastMessage = "We couldn’t confirm removal of your saved login. Please try again."
+            return false
+        }
         credentialRefs.removeAll { $0.id == ref.id }
-        lastMessage = "Saved login for \(ref.domain) deleted. Hygge can no longer sign in there for you."
+        lastMessage = sessionProfile(forDomain: ref.domain)?.hasProfile == true
+            ? "Saved login removed. The remembered sign-in for \(ref.domain) remains."
+            : "Saved login for \(ref.domain) removed."
         save()
+        return true
     }
 
     func sessionProfile(forDomain domain: String) -> SessionProfileRef? {
@@ -988,11 +995,18 @@ final class AppStore {
 
     /// Forgets one trusted sign-in. The saved login is kept, so the
     /// next visit simply signs in with it again.
-    func deleteSessionProfile(domain: String) async {
-        await backend.deleteSessionProfile(domain: domain)
+    @discardableResult
+    func deleteSessionProfile(domain: String) async -> Bool {
+        guard await backend.deleteSessionProfile(domain: domain) else {
+            lastMessage = "We couldn’t confirm removal of the remembered sign-in. Please try again."
+            return false
+        }
         sessionProfileRefs.removeAll { $0.domain == domain }
-        lastMessage = "Trusted sign-in for \(domain) forgotten. Your saved login is still kept safely."
+        lastMessage = credential(forDomain: domain) != nil
+            ? "Remembered sign-in for \(domain) forgotten. Your saved login remains."
+            : "Remembered sign-in for \(domain) forgotten."
         save()
+        return true
     }
 
     // MARK: - Opportunities & applications
@@ -1784,16 +1798,18 @@ final class AppStore {
 
     /// Full reconciliation: credential, proposals, site memory, pending
     /// drafts, and future suggestions all end with the disconnect.
-    func disconnect(siteID: String) async {
-        guard let site = site(id: siteID) else { return }
+    @discardableResult
+    func disconnect(siteID: String) async -> Bool {
+        guard let site = site(id: siteID) else { return false }
         if let credential = credential(forDomain: site.domain) {
-            await backend.deleteCredential(id: credential.id)
-            credentialRefs.removeAll { $0.id == credential.id }
+            guard await deleteCredential(id: credential.id) else { return false }
         }
-        // Disconnect ends everything for the site, trusted sign-in too
-        // (the separate per-item controls remain for partial removal).
-        await backend.deleteSessionProfile(domain: site.domain)
-        sessionProfileRefs.removeAll { $0.domain == site.domain }
+        // Keep confirmed partial cleanup, but do not claim disconnection
+        // until the remembered sign-in has also been removed.
+        guard await deleteSessionProfile(domain: site.domain) else {
+            lastMessage = "We couldn’t finish disconnecting \(site.name). Some saved access may already be removed. Please try again."
+            return false
+        }
         proposals.removeAll { $0.siteID == siteID }
         siteMemory.memories.removeAll { $0.domain == site.domain }
         for index in tasks.indices where tasks[index].siteID == siteID
@@ -1803,6 +1819,7 @@ final class AppStore {
         accountStates[siteID] = .disconnected
         lastMessage = "Disconnected \(site.name). Saved login deleted, drafts cleared, and I won't suggest it again."
         save()
+        return true
     }
 
     /// Plain-language context the conversation model may use (never secrets).
