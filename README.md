@@ -194,7 +194,7 @@ The app streams the same Chrome page the agent is using. An authenticated WebSoc
 
 After a mission, its trajectory is distilled into per-domain **site-memory hints** with success/failure counts. Future missions receive hints as context they may use or ignore when the page disagrees. A brand-new site always starts from the goal alone.
 
-On top of that sits a per-user **learning model**: every accept, decline (with reason), dismissal and outcome is recorded as a structured feedback event and folded into category/skill affinities and rate/distance sensitivities. One ranker (`rankItem` in [learning.ts](backend/cloudflare/src/learning.ts)) filters and scores both scanned listings and site proposals — below-threshold finds never surface. The ranker's threshold is live server-side today; ranked *ordering* in the feed is wired but not yet user-visible, and the docs say so. See [docs/profile-learning.md](docs/profile-learning.md).
+On top of that sits a per-user **learning model**: every accept, decline (with reason), dismissal and outcome is recorded as a structured feedback event and folded into category/skill affinities and rate/distance sensitivities. One ranker (`rankItem` in [learning.ts](backend/cloudflare/src/learning.ts)) filters and scores both scanned listings and site proposals — below-threshold finds never surface. The ranker's threshold is live server-side, and its ordering is user-visible: every surfaced listing and site proposal carries its `rankScore` into the app, and the Home feed orders both by that score through the one consumer ordering (`FeedRankOrdering` in HyggeCore) — unscored items last, ties stable, and the item a push tap landed on first. See [docs/profile-learning.md](docs/profile-learning.md).
 
 A second, stricter generation of shared “skills” (typed, reviewed, evidence-gated site know-how that can be promoted across users without carrying personal data) exists as a tested foundation. It is **dormant**: gated behind `HYGGE_WORKSPACE_MODE=retained-v2`, with no production activation. See [backend/cloudflare/docs/workspace-skills.md](backend/cloudflare/docs/workspace-skills.md).
 
@@ -245,7 +245,7 @@ LLM traffic runs through Cloudflare AI Gateway with a custom Meta provider: the 
 | Scheduled scanning (3×/day) | **Built and configured** (cron triggers committed in both wrangler configs; the sweeper runs the same mission path as manual discovery). Per-user ticks are testable without a deployed clock. |
 | `@usehygge.cc` receive-only email | **Pipeline built; DNS live** (MX records resolve to Cloudflare Email Routing). First live delivery checks are documented in [docs/email-usehygge-cc.md](docs/email-usehygge-cc.md). |
 | Push notifications | **Pipeline built.** Sends only when an APNs key is configured; otherwise each event is logged as an `unconfigured` no-op, never a fake success. |
-| Profile learning / ranking | **Threshold live server-side;** ranked feed ordering is wired but not yet user-visible. |
+| Profile learning / ranking | **Live.** Threshold filters server-side; the Home feed orders listings and site proposals by the server `rankScore` they carry. |
 | Retained-workspace V2 + shared skills V2 | **Dormant foundation.** Tested code, no production activation (`HYGGE_WORKSPACE_MODE` stays unset). |
 | Fresh-install sample content | **Labelled demo data** (`isDemo`), local only, never uploaded, hidden as soon as real work arrives. |
 
@@ -412,7 +412,6 @@ iOS build settings that matter: `HYGGE_REQUIRE_CLOUD` (`NO` in Debug, `YES` in R
 ## Known limits
 
 - **Site reliability varies.** Some sites prohibit automated access in their terms and actively detect bots, so expect per-site reliability to differ. Use Hygge only on sites and accounts where you are allowed to do so, and respect each site's terms.
-- **Ranked ordering isn't visible yet.** The learning ranker filters what surfaces (threshold), but the feed does not yet order by score. The ready-made ordering ships with the feed consumer work.
 - **Scan sweep is sequential.** One cron invocation walks users one at a time (rotating the start for fairness). Sharding or per-user alarms is the documented follow-up if the fleet grows. Scan times are fixed UTC slots for now.
 - **Long missions are request-driven.** There is no durable background job queue guaranteeing execution across process termination; recovery and checkpoints are built around that reality.
 - **Local Chrome ≠ Browser Run acceptance.** Browser tests verify the CDP protocol locally; deployed-session behavior is validated on staging. Live third-party sign-in flows still need device acceptance per site.

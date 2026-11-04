@@ -25,15 +25,18 @@ recommendation wording), and its `survey` remains the journal's
 negative-space report for on-device discovery. App-side learning
 types mirror the server model in `Sources/HyggeCore/Learning.swift`.
 
-Honest limit, today: the ranker's **threshold** is fully live
-server-side (below-threshold finds never surface), and every
-surfaced payload carries its `rankScore`. The **ordering** is not
-yet user-visible — the app feed has no ranked opportunity-list
-consumer, and server state lists order by `updated_at`, so feed
-order does not currently follow `rankScore`.
-`MatchEngine.inServerRankOrder` is the ready-made ordering for the
-feed work that wires that consumer; until then, do not claim feed
-order is ranked.
+The **ordering** is user-visible. Every surfaced listing and every
+backend site proposal carries its `rankScore` into app state
+(proposals stamp it in `proposeSites`, as scans stamp it in
+`opportunityPayload`), and the Home feed orders both through the
+one consumer ordering, `FeedRankOrdering` in HyggeCore: score
+descending, unscored items last (live-discovered listings,
+blocked-look items, on-device suggestions), ties stable, and the
+item a push tap landed on first. `MatchEngine.inServerRankOrder`
+pairs that same order with display evidence. Server state lists
+still order by `updated_at`; that no longer decides feed order,
+because the consumer re-sorts by the carried score on every
+refresh.
 
 ### Formula (final values)
 

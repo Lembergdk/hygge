@@ -1766,8 +1766,12 @@ export class UserSandbox extends DurableObject<Env> {
       candidates.map((c) => ({ ...c, category: String(category) })),
       profile, learning, eligibility, domainOfUrl, now,
     );
+    // The score rides along (as scan payloads stamp rankScore) so
+    // the app's feed order survives state sync, whose lists order
+    // by updated_at — response order alone would be lost.
     return ranked.map((r) => ({
       name: r.candidate.name, url: r.candidate.url, rationale: r.candidate.rationale,
+      rankScore: r.rank.score,
     }));
   }
 

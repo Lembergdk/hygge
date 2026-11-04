@@ -704,8 +704,13 @@ final class AppStore {
                 guard let site = TargetSite.userAdded(name: dto.name, urlOrDomain: dto.url, category: category) else { continue }
                 if accountStates[site.id]?.blocksSuggestions == true { continue }
                 if !sites.contains(where: { $0.id == site.id }) { sites.append(site) }
-                if !proposals.contains(where: { $0.siteID == site.id }) {
-                    proposals.append(ProposedSite(siteID: site.id, rationale: dto.rationale))
+                if let existing = proposals.firstIndex(where: { $0.siteID == site.id }) {
+                    // A fresh server rank replaces the stored one:
+                    // the server ranker is the one ordering truth.
+                    if let rankScore = dto.rankScore { proposals[existing].rankScore = rankScore }
+                } else {
+                    proposals.append(ProposedSite(siteID: site.id, rationale: dto.rationale,
+                                                   rankScore: dto.rankScore))
                 }
             }
         }

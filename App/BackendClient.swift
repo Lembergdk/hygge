@@ -444,7 +444,7 @@ struct BackendClient {
         throw URLError(.cannotParseResponse)
     }
 
-    struct SiteProposalDTO: Decodable { var name: String; var url: String; var rationale: String }
+    struct SiteProposalDTO: Decodable { var name: String; var url: String; var rationale: String; var rankScore: Double? }
     private struct SiteProposalsResponse: Decodable { var proposals: [SiteProposalDTO] }
     private struct SiteProposalsBody: Encodable {
         var category: String

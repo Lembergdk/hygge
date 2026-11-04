@@ -501,16 +501,17 @@ struct HomeFeedView: View {
         if store.chatBadgeCount > 0 { return .needsYou(store.chatBadgeCount) }
         return store.isAgentWorking ? .working : .asleep
     }
-    private var proposedSites: [ProposedSite] { store.proposals.filter { $0.status == .proposed } }
+    private var proposedSites: [ProposedSite] {
+        FeedRankOrdering.sorted(store.proposals.filter { $0.status == .proposed }, rankScore: \.rankScore)
+    }
     private var pendingProposals: [ProposedSite] { admitted(proposedSites) { "proposal-\($0.id)" } }
     private var availableListings: [Opportunity] {
-        store.opportunities.filter { !$0.isDemo && ($0.status == .new || $0.status == .saved) }
-            .filter { opportunity in !store.applications.contains { $0.opportunityID == opportunity.id } }
-            .sorted { lhs, rhs in
-                if lhs.id == store.highlightedOpportunityID { return true }
-                if rhs.id == store.highlightedOpportunityID { return false }
-                return (lhs.rankScore ?? 0) > (rhs.rankScore ?? 0)
-            }
+        // Feed order is the server ranker's (Brief 06), through the
+        // one consumer ordering — never a view-local comparator.
+        FeedRankOrdering.sorted(
+            store.opportunities.filter { !$0.isDemo && ($0.status == .new || $0.status == .saved) }
+                .filter { opportunity in !store.applications.contains { $0.opportunityID == opportunity.id } },
+            rankScore: \.rankScore) { $0.id == store.highlightedOpportunityID }
     }
     private var listings: [Opportunity] { admitted(availableListings) { "opportunity-\($0.id)" } }
     private var availableDecisions: [AgentTask] {
