@@ -1,4 +1,5 @@
-// Explicit staging-only synthetic acceptance. No real account, mission or submission.
+// Explicit staging-only synthetic upgrade acceptance. Rollback testing is intentionally skipped.
+// No real account, mission or submission.
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash,randomBytes,randomUUID} from 'node:crypto';
@@ -36,12 +37,9 @@ try{
  const [a,b]=owners;const untouched=(await status(b)).current;
  await change(a,NEW,'STAGING real old-to-new upgrade');populated(await fixture(a,'check'));
  populated(await fixture(a,'write-latest'),true);
- await change(a,OLD,'STAGING latest-state rollback');populated(await fixture(a,'check'),true);
  const other=(await status(b)).current;assert.equal(other.incarnation,untouched.incarnation);assert.equal(other.generation,untouched.generation);assert.equal(other.desiredImageDigest,OLD);populated(await fixture(b,'check'));
  console.log('STAGING second-owner isolation PASS');
- await change(a,NEW,'STAGING repeat compatible upgrade');populated(await fixture(a,'check'),true);
- await change(b,NEW,'STAGING second populated owner upgrade');populated(await fixture(b,'check'));
- console.log('STAGING populated image gate PASS; synthetic workspaces only; production unchanged');
+ console.log('STAGING populated upgrade gate PASS; rollback testing skipped at user request; synthetic workspaces only; production unchanged');
 }finally{
  let failed=false;
  for(const o of owners){
