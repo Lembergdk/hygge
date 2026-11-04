@@ -53,7 +53,9 @@
     // key is a secret (HYGGE_APNS_KEY_P8) and the key/team ids are
     // set per environment once the key exists — see
     // docs/push-notifications.md.
-    "HYGGE_APNS_ENVIRONMENT": "production"
+    "HYGGE_APNS_ENVIRONMENT": "production",
+    "HYGGE_APNS_KEY_ID": "P7AKJ8SZL4",
+    "HYGGE_APNS_TEAM_ID": "3KA38L8A4F"
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "hygge-production", "database_id": "d36ecef4-1b4c-4679-bc52-158b6f552775" }

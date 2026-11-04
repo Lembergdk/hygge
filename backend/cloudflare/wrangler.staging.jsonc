@@ -50,9 +50,10 @@
     "HYGGE_EMAIL_DOMAIN": "usehygge.cc",
     // Brief 07: Debug builds hold development APNs tokens, so the
     // staging sender talks to Apple's sandbox host. The .p8 key is
-    // a secret (HYGGE_APNS_KEY_P8) and the key/team ids are set per
-    // environment once the key exists — see docs/push-notifications.md.
-    "HYGGE_APNS_ENVIRONMENT": "sandbox"
+    // a secret (HYGGE_APNS_KEY_P8) and the key/team ids live below — see docs/push-notifications.md.
+    "HYGGE_APNS_ENVIRONMENT": "sandbox",
+    "HYGGE_APNS_KEY_ID": "P7AKJ8SZL4",
+    "HYGGE_APNS_TEAM_ID": "3KA38L8A4F"
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "hygge-staging", "database_id": "927c5fb0-c7ee-4430-a7b4-04eb06656777" }
