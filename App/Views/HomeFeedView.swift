@@ -740,13 +740,14 @@ struct HomeFeedView: View {
              primary: { openFocus(.emailDecision(mail)) },
              dismiss: {}, allowsDismissal: false)
     }
-    /// One call per new sender, remembered: read it for anything
-    /// relevant, just file it, or ignore the sender quietly.
+    /// One call per new sender, remembered: treat it as work
+    /// mail, ignore the sender quietly, or just close the card —
+    /// filing is the default.
     private func emailDecisionDetail(_ mail: FiledEmailSummary) -> some View {
         FeedDetailContent {
             Text("Mail from \(mail.senderDomain)").font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("This sender is new to me, so I filed it and waited for your call. Whatever you pick, I'll remember it for this sender.")
+            Text("I filed this for now, and I'll keep filing this sender's mail. If it's work mail, tell me — I'll remember.")
                 .foregroundStyle(HyggeTheme.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 8) {
@@ -762,12 +763,11 @@ struct HomeFeedView: View {
                 }
             }
         } footer: {
-            // The three-way call is the surface's only job: pinned so
-            // a long summary can never push a choice off the card.
+            // Two explicit calls; closing the card is the third —
+            // filing is the default, so it needs no button (see
+            // closeFocus). Pinned so a long summary can never push
+            // a choice off the card.
             FeedPrimaryButton(title: "Treat as work mail") { decideEmail(mail, choice: "work") }
-            Button("Just file it") { decideEmail(mail, choice: "file") }
-                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
-                .frame(maxWidth: .infinity, minHeight: 44)
             Button("Ignore this sender") { decideEmail(mail, choice: "ignore") }
                 .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -830,6 +830,17 @@ struct HomeFeedView: View {
         withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.42, dampingFraction: 0.86)) { focus = value }
     }
     private func closeFocus(openChat: Bool = false) {
+        // Leaving a new-sender card without choosing IS the
+        // choice: filing is the default, remembered so the same
+        // sender isn't asked about twice. A button tap already
+        // recorded its choice optimistically, so "still pending"
+        // is exactly the no-button case.
+        if case .emailDecision(let mail) = focus,
+           store.filedEmailSummaries.contains(where: {
+               $0.senderDomain == mail.senderDomain && $0.decision == "pending"
+           }) {
+            Task { await store.decideEmailSender(domain: mail.senderDomain, choice: "file") }
+        }
         withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.42, dampingFraction: 0.86)) { focus = nil }
         if openChat || store.conversationTaskID != nil { showConversation = true }
     }
