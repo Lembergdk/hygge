@@ -174,3 +174,11 @@ test('calendar approval is claimed by one device and requires its authenticated 
  assert.equal(projections,1);assert.equal(s.store.proposal(proposal.id)?.result.status,'succeeded');
  assert.deepEqual(await s.agent.deviceResult({generation,proposalId:proposal.id,id,success:true,deviceID}),result);assert.equal(projections,1);
 });
+
+test('decision IDs cannot authorize a different proposal or conflict with an existing message',async()=>{
+ const s=setup((_a,n)=>n===1?calls('r1',[{name:'propose_action',args:{operation:'change_floor',amount:30}},{name:'propose_action',args:{operation:'change_floor',amount:40}}]):answer(`r${n}`));
+ await turn(s);const [a,b]=s.store.proposals(),generation=s.store.meta().generation,id=crypto.randomUUID();
+ await s.agent.decide({generation,proposalId:a.id,decision:'approve',id});
+ await assert.rejects(s.agent.decide({generation,proposalId:b.id,decision:'approve',id}),/MESSAGE_ID_CONFLICT/);
+ assert.equal(s.executed.length,1);assert.equal(s.store.proposal(b.id)?.status,'pending');
+});

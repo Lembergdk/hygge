@@ -240,6 +240,11 @@ export class ChatAgent {
     const meta=this.store.meta();if(input.generation!==meta.generation)throw new Error('CONVERSATION_CHANGED');
     if(meta.activeTurn)throw new Error('TURN_PENDING');
     const p=this.store.proposal(input.proposalId);if(!p||p.generation!==meta.generation)throw new Error('PROPOSAL_NOT_FOUND');
+    const receipt=this.store.db.get<{proposalId:string;decision:string}>(`decision:${input.id}`);
+    if(receipt&&(receipt.proposalId!==p.id||receipt.decision!==input.decision))throw new Error('MESSAGE_ID_CONFLICT');
+    if(!receipt&&this.store.db.get(`turn:${input.id}`))throw new Error('MESSAGE_ID_CONFLICT');
+    this.store.db.put(`decision:${input.id}`,{proposalId:p.id,decision:input.decision});
+    if(p.status==='executing'){p.status='uncertain';p.result={status:'uncertain',message:'An earlier approval was interrupted. Check the task outcome before any new attempt.'};this.store.db.put(`proposal:${p.id}`,p);}
     if(p.status!=='pending')return {...this.store.state(),result:p.result??{status:p.status}};
     if(input.decision==='reject'){p.status='rejected';p.result={status:'rejected'};}
     else {
