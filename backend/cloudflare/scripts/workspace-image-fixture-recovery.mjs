@@ -17,13 +17,11 @@ try{
  const describe=s=>({current:s.current,fixtureMarker:s.fixtureMarker,operations:s.operations.map(o=>({operationId:o.operationId,phase:o.phase,error:o.error,expectedGeneration:o.expectedGeneration,targetImage:o.targetImage,sourceReceiptId:o.sourceReceipt?.receiptId,targetReceiptId:o.targetReceipt?.receiptId}))});
  console.log('PRESERVED FIXTURE '+JSON.stringify(describe(state)));
  const pending=state.operations.find(o=>!['verified','aborted'].includes(o.phase));
- if(pending){
-  try{await api('/sandbox/image-upgrade',{reviewed:true,operationId:pending.operationId,expectedGeneration:pending.expectedGeneration,targetImage:pending.targetImage});}
-  catch(e){console.error('RESUME BLOCKED '+e.message);state=await api('/sandbox/image-upgrade',undefined,'GET');console.log('PRESERVED FIXTURE '+JSON.stringify(describe(state)));throw e;}
- }
+ if(pending){console.log('PRESERVED FIXTURE left intact; rollback skipped at user request');}else{
  state=await api('/sandbox/image-upgrade',undefined,'GET');assert.ok(state.fixtureMarker);
  const retired=await api('/sandbox/image-upgrade/fixture',{reviewed:true,action:'retire',marker:state.fixtureMarker});assert.equal(retired.retired,true);
- console.log('PRESERVED FIXTURE verified and retired '+JSON.stringify(describe(state)));
+ console.log('PRESERVED FIXTURE retired '+JSON.stringify(describe(state)));
+ }
 }finally{
- sql(`DELETE FROM auth_sessions WHERE id='${session}' AND user_id='${id}'; DELETE FROM users WHERE id='${id}' AND contact_email='${email}' AND NOT EXISTS (SELECT 1 FROM auth_sessions WHERE user_id='${id}')`);
+ sql(`DELETE FROM auth_sessions WHERE user_id='${id}'; DELETE FROM users WHERE id='${id}' AND contact_email='${email}' AND NOT EXISTS (SELECT 1 FROM auth_sessions WHERE user_id='${id}')`);
 }
