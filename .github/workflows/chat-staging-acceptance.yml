@@ -7,6 +7,10 @@ on:
         description: "Check the persistent chat protocol instead of legacy intent"
         type: boolean
         default: false
+      recover_image_fixture:
+        description: "Diagnose/resume only the preserved failed image-test fixture"
+        type: boolean
+        default: false
       workspace_image_upgrade:
         description: "Verify populated old/new image upgrade and latest-state rollback (synthetic accounts only)"
         type: boolean
@@ -49,11 +53,14 @@ jobs:
         if: inputs.deploy_staging
         run: npx wrangler deploy -c wrangler.staging.jsonc
       - name: Verify persistent chat with a synthetic staging account
-        if: ${{ inputs.persistent_agent && !inputs.workspace_image_upgrade }}
+        if: ${{ inputs.persistent_agent && !inputs.workspace_image_upgrade && !inputs.recover_image_fixture }}
         run: node scripts/persistent-chat-staging-acceptance.mjs
       - name: Verify model intent using a synthetic staging account
-        if: ${{ !inputs.persistent_agent && !inputs.workspace_image_upgrade }}
+        if: ${{ !inputs.persistent_agent && !inputs.workspace_image_upgrade && !inputs.recover_image_fixture }}
         run: node scripts/chat-staging-acceptance.mjs
       - name: Verify populated workspace image upgrade and rollback
-        if: inputs.workspace_image_upgrade
+        if: ${{ inputs.workspace_image_upgrade && !inputs.recover_image_fixture }}
         run: node scripts/workspace-image-staging-acceptance.mjs
+      - name: Resume preserved synthetic migration fixture
+        if: inputs.recover_image_fixture
+        run: node scripts/workspace-image-fixture-recovery.mjs

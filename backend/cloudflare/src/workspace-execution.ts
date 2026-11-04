@@ -229,7 +229,7 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     imageUpgrade:{run:async(input:{operationId:string;expectedGeneration:number;targetImage:string})=>{if(env.HYGGE_ENV!=='staging'||!transitions.length)throw Error('IMAGE_UPGRADE_DISABLED');if(!transitions.some(p=>p.to===input.targetImage))throw Error('UNREVIEWED_IMAGE_TRANSITION');const account=await env.DB.prepare('SELECT contact_email FROM users WHERE id=?').bind(owner.userId).first<{contact_email:string}>();if(!/^workspace-upgrade-[a-z0-9-]+@example\.invalid$/.test(account?.contact_email??''))throw Error('SYNTHETIC_UPGRADE_ACCOUNT_REQUIRED');return images.run(input);},
       locked:()=>!!foundation.persistence.get('image_upgrade_lock','active'),
       abort:(id:string)=>{if(env.HYGGE_ENV!=='staging')throw Error('IMAGE_UPGRADE_DISABLED');return images.abort(id);},
-      async status(){let current=null;try{current=await foundation.registry.read(owner,owner);}catch(error){if(!(error instanceof Error)||error.message!=='WORKSPACE_NOT_INITIALIZED')throw error;}return {current,operations:images.status()};}},
+      async status(){let current=null;try{current=await foundation.registry.read(owner,owner);}catch(error){if(!(error instanceof Error)||error.message!=='WORKSPACE_NOT_INITIALIZED')throw error;}return {current,operations:images.status(),fixtureMarker:foundation.persistence.get<{marker:string}>('image_fixture','active')?.value.marker??null};}},
     /** Synthetic-account route only; no arbitrary URL, script, file or owner input. */
     async imageUpgradeFixture(action:string,marker:string){
       if(env.HYGGE_ENV!=='staging'||!transitions.length||!/^[a-f0-9-]{36}$/.test(marker))throw Error('INVALID_UPGRADE_FIXTURE');
