@@ -6,6 +6,10 @@ struct FeedSummary: View {
     var icon = "sparkles"
     var asset: String? = nil
     var usesProfilePhoto = false
+    /// When set (and no photo/asset claims the tile), the tile is
+    /// the site's own mark — sender/site recognition at a glance.
+    var siteDomain: String? = nil
+    var siteName: String? = nil
     @Environment(AppStore.self) private var store
     @Environment(\.dynamicTypeSize) private var typeSize
     @ScaledMetric(relativeTo: .headline) private var tileSize: CGFloat = 48
@@ -39,6 +43,8 @@ struct FeedSummary: View {
         Group {
             if usesProfilePhoto, store.profilePhotoData != nil {
                 ProfileAvatar(size: 48)
+            } else if let siteDomain, asset == nil {
+                SiteLogoTile(domain: siteDomain, name: siteName ?? title, size: 48)
             } else if let asset {
                 Image(asset).resizable().scaledToFit().scaleEffect(1.7)
             } else if icon == "checkmark.circle.fill" {
@@ -123,7 +129,7 @@ struct FeedPrimaryButton: View {
                 // above that it scales with them as usual.
                 .dynamicTypeSize(.large...)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity).frame(minHeight: 44).padding(.vertical, 13)
+                .frame(maxWidth: .infinity).frame(minHeight: 44).padding(.vertical, 8)
                 .foregroundStyle(HyggeTheme.onSage).background(HyggeTheme.sageDeep, in: Capsule())
         }.buttonStyle(.plain)
     }

@@ -14,6 +14,10 @@ struct FeedVisualCard: View {
     let icon: String
     var asset: String?
     var usesProfilePhoto = false
+    /// The job site this card is about, when it is about one:
+    /// its real mark replaces generic glyphs (see SiteLogoTile).
+    var siteDomain: String?
+    var siteName: String?
     var body: some View {
         Group {
             switch style {
@@ -32,50 +36,65 @@ struct FeedVisualCard: View {
         .overlay(RoundedRectangle(cornerRadius: 24).stroke(HyggeTheme.hairline, lineWidth: 1))
         .accessibilityElement(children: .combine)
     }
+    /// A proposed new job site. The card's whole job is to make
+    /// one thing obvious: Hygge is asking to start scanning this
+    /// site for work. Site mark, the words JOB SITE, and three
+    /// plain steps — no globe, no unlabeled glyph strip.
     private var invitation: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 7) {
-                    eyebrow("A NEW PLACE")
-                    Text(title).font(.system(.title2, design: .rounded, weight: .bold))
-                        .fixedSize(horizontal: false, vertical: true)
-                    // The rationale is the reason to tap: wrap it fully.
-                    Text(subtitle).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                // Decorative art yields first as type grows.
+        let name = siteName ?? title
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 14) {
                 if !typeSize.isAccessibilitySize {
-                    Image(systemName: "globe.europe.africa.fill")
-                        .font(.system(size: 48, weight: .light)).foregroundStyle(HyggeTheme.sageDeep)
-                        .rotationEffect(.degrees(-12)).frame(width: 64, height: 64)
-                        .background(HyggeTheme.sageTint, in: RoundedRectangle(cornerRadius: 20))
-                        .accessibilityHidden(true)
+                    SiteLogoTile(domain: siteDomain ?? "", name: name, size: 56)
                 }
-            }
-            HStack(spacing: 9) {
-                Image(systemName: "person.crop.circle.badge.plus")
-                Image(systemName: "arrow.right").font(.caption2)
-                Image(systemName: "person.text.rectangle")
-                Image(systemName: "arrow.right").font(.caption2)
-                Image(systemName: "briefcase")
-                Spacer()
+                VStack(alignment: .leading, spacing: 3) {
+                    eyebrow("NEW JOB SITE")
+                    Text(name).font(.system(.title2, design: .rounded, weight: .bold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let siteDomain, !siteDomain.isEmpty {
+                        Text(siteDomain).font(.caption).foregroundStyle(HyggeTheme.secondary)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
                 arrow
-            }.foregroundStyle(HyggeTheme.sageDeep).accessibilityHidden(true)
+            }
+            // The rationale is the reason to tap: wrap it fully.
+            Text(subtitle).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 9) {
+                invitationStep("person.crop.circle.badge.plus", "I set up your account")
+                invitationStep("magnifyingglass", "Then I scan \(name) for work that fits you")
+                invitationStep("tray", "Matches appear here for your OK")
+            }
+            Text("Say yes and I'll start. Tap to see what's shared.")
+                .font(.subheadline).foregroundStyle(HyggeTheme.ink)
+                .fixedSize(horizontal: false, vertical: true)
         }.foregroundStyle(HyggeTheme.ink).padding(20)
+    }
+    private func invitationStep(_ icon: String, _ text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).font(.subheadline.weight(.medium))
+                .foregroundStyle(HyggeTheme.sageDeep).frame(width: 22)
+                .accessibilityHidden(true)
+            Text(text).font(.subheadline).foregroundStyle(HyggeTheme.ink)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
     private var opportunity: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                if let siteDomain, !typeSize.isAccessibilitySize {
+                    SiteLogoTile(domain: siteDomain, name: siteName ?? title, size: 44)
+                }
+                VStack(alignment: .leading, spacing: 3) {
                     eyebrow("FOUND FOR YOU")
-                    Image(systemName: "sparkle").font(.title2).foregroundStyle(HyggeTheme.butterText)
+                    if let siteName {
+                        Text("on \(siteName)").font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
+                    }
                 }
                 Spacer()
-                if !typeSize.isAccessibilitySize {
-                    Image(systemName: icon).font(.system(size: 68, weight: .light))
-                        .foregroundStyle(HyggeTheme.butterText).rotationEffect(.degrees(-12)).accessibilityHidden(true)
-                }
-            }.padding(.horizontal, 22).padding(.vertical, 18)
+                Image(systemName: icon).font(.title3).foregroundStyle(HyggeTheme.butterText)
+                    .accessibilityHidden(true)
+            }.padding(.horizontal, 20).padding(.vertical, 14)
                 .background(HyggeTheme.butterTint)
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top, spacing: 10) {
@@ -95,6 +114,9 @@ struct FeedVisualCard: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .top) {
                 if usesProfilePhoto { ProfileAvatar(size: 60).accessibilityHidden(true) }
+                else if let siteDomain {
+                    SiteLogoTile(domain: siteDomain, name: siteName ?? title, size: 60)
+                }
                 else {
                     Image(systemName: icon).font(.system(size: 38, weight: .light)).foregroundStyle(HyggeTheme.butterText)
                         .frame(width: 60, height: 60).background(HyggeTheme.butterTint, in: RoundedRectangle(cornerRadius: 18)).accessibilityHidden(true)
@@ -161,7 +183,8 @@ struct FeedVisualCard: View {
         }.padding(20).background(HyggeTheme.sageTint.opacity(0.35))
     }
     private var update: some View {
-        FeedSummary(title: title, subtitle: subtitle, icon: icon, asset: asset, usesProfilePhoto: usesProfilePhoto)
+        FeedSummary(title: title, subtitle: subtitle, icon: icon, asset: asset, usesProfilePhoto: usesProfilePhoto,
+                    siteDomain: siteDomain, siteName: siteName)
     }
     private var arrow: some View {
         Image(systemName: "arrow.up.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(HyggeTheme.secondary).accessibilityHidden(true)
