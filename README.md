@@ -63,8 +63,10 @@ Hygge does not stop at finding a listing. With your approval it can draft applic
 ### Stay in control
 
 - **One home screen, one decision at a time.** Things that need you are pinned at the top. Everything else becomes a calm journal of what happened, in plain sentences.
+- **Ask in chat, get real work.** The conversation isn't just onboarding — ask for work and Hygge starts real missions, including triaging mail you forwarded. Tapped choices appear as your own messages.
 - **Watch Hygge work — and take over.** When Hygge is browsing for you, you can watch the real web page live inside the app, and take the controls yourself at any moment — then hand them back when you're ready.
-- **A Hygge email address of your own.** Hygge has its own `@usehygge.cc` address to use when signing up for work sites, so verification emails, site notifications and job alerts land where Hygge can help with them. You can also forward any email from your own inbox to Hygge, and ask it to handle it.
+- **A Hygge email address of your own.** Hygge has its own `@usehygge.cc` address to use when signing up for work sites, so verification emails, site notifications and job alerts land where Hygge can help with them. You can also forward any email from your own inbox to Hygge, and ask it to handle it. Mail cards act by default: swipe right on a card to chat about it, and closing a card files it. One mail is one event.
+- **A flame you can play with.** Drag him anywhere, tap his head, body or feet, flick, pinch or shake the phone — he reacts, idles, and fights to stay upright. His behavior is tuned in a Debug-only Flame Lab; the shipped defaults were baked from it.
 - **Quiet by design.** Hygge only notifies you when something genuinely needs you, or when new matching work has been found. No digests, no nagging, no marketing.
 
 ## A day with Hygge
@@ -87,11 +89,11 @@ Design direction (product visuals):
 
 ## How it works, step by step
 
-1. **Tell Hygge what you're good at.** Onboarding is a short conversation — what work you enjoy, your lowest rate, roughly where and when. Everything else is learned gradually, so the more you use it, the better it gets at finding work you love.
+1. **Tell Hygge what you're good at.** Onboarding is a short conversation — what work you enjoy, your lowest rate, roughly where and when. It also asks for notification and calendar permission in context. Everything else is learned gradually, so the more you use it, the better it gets at finding work you love.
 2. **Approve where Hygge may look.** Hygge proposes job- and gig-sites that fit your interests, each with a short reason. For every suggestion, you can either tell Hygge to *create an account*, *Use an existing login*, or *dismiss it*. Hygge only browses sites you confirm.
-4. **Hygge browses like a person.** Your Hygge has its own private computer with internet, and interacts with websites the same way humans do. It doesn't depend on integrations, APIs or MCP servers. And you don't need to mess with connections or complex setup.
-5. **Hygge drafts, you approve.** Anything that would change something outside the Hygge app — joining a site, publishing a profile, applying, messaging, booking — is drafted first and shown to you with the exact wording. Nothing goes out in your name without your approval.
-6. **Hygge remembers how sites work.** After a successful visit, Hygge writes down what worked (“listings are readable from the landing page”, “this button is labelled Join now”) as hints for next time. Hints make repeat visits faster, and improves Hygge's ability to find work you love.
+3. **Hygge browses like a person.** Your Hygge has its own private computer with internet, and interacts with websites the same way humans do. It doesn't depend on integrations, APIs or MCP servers. And you don't need to mess with connections or complex setup. Before it asks you for anything, it first attempts the site's own checks itself.
+4. **Hygge drafts, you approve.** Anything that would change something outside the Hygge app — joining a site, publishing a profile, applying, messaging, booking — is drafted first and shown to you with the exact wording. Nothing goes out in your name without your approval.
+5. **Hygge remembers how sites work.** After a successful visit, Hygge writes down what worked (“listings are readable from the landing page”, “this button is labelled Join now”) as hints for next time. Hints make repeat visits faster, and improves Hygge's ability to find work you love.
 
 ## Rules Hygge never breaks
 
@@ -105,16 +107,16 @@ These are enforced in code, not just promised in prompts:
 
 ## Pricing
 
-The beta is free, and Hygge takes no cut of what you earn.
+The beta is free to try, and Hygge takes no cut of what you earn.
 
-Planned pricing once the beta ends: free until Hygge helps you earn $100 in a month, then **Plus at $9.99/month or $99/year** for unlimited earnings. The long-term goal is never a slice of every paycheck. It is becoming a trusted ally in your personal finances, where partnerships, services, member perks and sponsored opportunities offer future revenue streams for us.
+**Free** covers earnings up to $100 in a month across up to 10 job sites. **Plus at $9.99/month or $99/year** (in-app purchase) lifts both caps — unlimited earnings and sites — and adds a custom name for your `@usehygge.cc` email address. The long-term goal is never a slice of every paycheck. It is becoming a trusted ally in your personal finances, where partnerships, services, member perks and sponsored opportunities offer future revenue streams for us.
 
 ---
 
 ## For Meta AI Hackathon judges
 
 - **Theme fit — *Build for Your World*.** Hygge is built for a specific, everyday world: people who could earn more from skills they already have, but lose hours to scattered gig sites and admin. It gives them leverage over their own income without taking decisions away from them.
-- **Built during the event.** This repository was created on **Oct 30, 2026**. At the time of writing it holds 140+ commits, all dated inside the Oct 26 – Nov 4 event window. The git history is the receipt.
+- **Built during the event.** This repository was created on **Oct 30, 2026**. At the time of writing it holds 210+ commits, all dated inside the Oct 26 – Nov 4 event window. The git history is the receipt.
 - **Meta models do the real work.** Every browsing decision, onboarding reply, site suggestion and drafted message comes from Meta's Muse models, routed by phase: **Muse Spark 1.3** (`muse-spark-1.3`) for routine per-step decisions and extraction, escalating to **Muse Wonder 1.0** (`muse-wonder-1.0`) after failures or loops, for high-stakes submits, and for composing user-facing text. Both run in production today — check `curl https://api.usehygge.app/health`, which reports `llm: "live"` and the exact model IDs.
 - **It is live, not a demo harness.** Staging (`api-staging.usehygge.app`) and production (`api.usehygge.app`) are both deployed on Cloudflare Workers. The iOS beta is on [TestFlight](https://testflight.apple.com/join/VQwBCNSP). CI runs the Swift and backend test suites on every push and pull request, deploys staging from `main` only after tests pass, and health-checks the result. Production deploys are manual and health-checked the same way.
 - **Verified live, not claimed.** On a cold visit to Remote OK, the agent chose its own actions step by step (Spark 1.3, escalating to Wonder 1.0 after a failed click), extracted real job listings, decided it was done, and only then distilled site-memory hints. The observe → decide → act loop is covered by automated tests on both the Swift and TypeScript stacks, including a page-variant test that no canned navigation script could pass. A staging end-to-end script ([e2e-staging.mjs](backend/cloudflare/e2e-staging.mjs)) checks health, auth, two-user isolation, a vault canary that must never leak, the approval gate, live onboarding over SSE, site proposals and a real Browser Run discovery mission.
@@ -202,8 +204,8 @@ A second, stricter generation of shared “skills” (typed, reviewed, evidence-
 
 - **Sign-in** supports Sign in with Apple, email magic links (direct Universal Links into the app, with a hardened browser fallback), and optional email passwords confirmed by a separate emailed link. Sessions are server-issued; the user ID always comes from the verified credential, never from request data. See [docs/magic-link-handoff.md](docs/magic-link-handoff.md) and [docs/password-confirmation-flow.md](docs/password-confirmation-flow.md). Onboarding deliberately runs *before* sign-up through two stateless, rate-limited preview routes — sign-in is the last onboarding step.
 - **Your Hygge email address** (`@usehygge.cc`, receive-only) is delivered by Cloudflare Email Routing into the owning user's sandbox. Mail is classified as verification / security code / other; codes are sealed and only ever shown as “a code arrived”, never in push payloads or logs. Sender-attributed actions require aligned DKIM/SPF/DMARC. A backend test asserts that no mail-send path exists at all. See [docs/email-usehygge-cc.md](docs/email-usehygge-cc.md).
-- **Scheduled scanning** runs the same discovery missions unattended: approved sites with a saved login are checked up to three times a day (07:00 / 13:00 / 19:00 UTC), public-only sites once a day. A strict surfacing gate (category, skills, place, rate floor, dedupe) decides what reaches the feed, quiet categories rest for a month, and a scan can never send, book or apply for anything. See [docs/scheduled-scanning.md](docs/scheduled-scanning.md).
-- **Push is transactional only**: a task needs you, or a scan found new work. At most one push per scan tick, a bare title with no body (so nothing sensitive *can* ride along), and every attempt logged without tokens or payload contents. See [docs/push-notifications.md](docs/push-notifications.md).
+- **Scheduled scanning** runs the same discovery missions unattended: approved sites with a saved login are checked up to three times a day (07:00 / 13:00 / 19:00 UTC), public-only sites once a day. A strict surfacing gate (category, skills, place, rate floor, dedupe) decides what reaches the feed, quiet categories rest for a month, and a scan can never send, book or apply for anything. Free accounts stop scanning once the monthly limit is reached. See [docs/scheduled-scanning.md](docs/scheduled-scanning.md).
+- **Push is transactional only**: a task needs you, a scan found new work, or a tracked-site mail mentions a client message (at most once per sender per day). Notifications are descriptive — a message push wears the sender's name with the real message as body, a feed push names the listing — and every tap opens the exact element it names (task chat, listing, filed mail) after a fresh pull. Sensitive values like codes still never ride along, and every attempt is logged without tokens or payload contents. See [docs/push-notifications.md](docs/push-notifications.md).
 - **Profile photos** are stored privately per account (re-encoded, metadata-stripped, size-capped). The agent only ever learns `hasProfilePhoto`; the actual file is attached inside the worker, only for approved signup/profile tasks on the approved HTTPS host. See [docs/profile-photos.md](docs/profile-photos.md).
 
 ### Multi-tenancy and privacy invariants
@@ -228,7 +230,7 @@ LLM traffic runs through Cloudflare AI Gateway with a custom Meta provider: the 
 | Shared core logic | Swift package [`HyggeCore`](Sources/HyggeCore/) — models, onboarding script, matching display logic, backend contracts. Unit-tested without a simulator. |
 | Backend | TypeScript on Cloudflare Workers, in [backend/cloudflare/](backend/cloudflare/). One worker per environment. |
 | Per-user state | `UserSandbox` Durable Object (SQLite storage) per verified user: tasks, approvals, feed, profile, vault, site memory, learning model. |
-| Control plane | D1 (users, sessions, device tokens, email addresses, shared-skill tables). Migrations `0001`–`0008` in [backend/cloudflare/migrations/](backend/cloudflare/migrations/). |
+| Control plane | D1 (users, sessions, device tokens, email addresses, shared-skill tables). Migrations `0001`–`0009` in [backend/cloudflare/migrations/](backend/cloudflare/migrations/). |
 | Browser | Cloudflare Browser Run (isolated Chrome per session) driven over CDP via `@cloudflare/puppeteer`, plus R2 for browser-profile storage. A deterministic simulated decider runs the same loop with no API key, and `/health` says so (`llm: "simulated"`). |
 | Models | Meta `muse-spark-1.3` + `muse-wonder-1.0`, via Cloudflare AI Gateway (custom provider, BYOK) or directly against `https://api.meta.ai/v1`. |
 | Email in | Cloudflare Email Routing (catch-all) into the worker. Email out: magic-link mail only, from one pinned sender. |
@@ -240,7 +242,8 @@ LLM traffic runs through Cloudflare AI Gateway with a custom Meta provider: the 
 | Area | Status |
 | --- | --- |
 | iOS beta (TestFlight), staging + production APIs | **Live.** `/health` reports the live models on both. |
-| Conversational onboarding, site proposals, approvals, missions, vault, site memory, live browser + takeover, calendar booking after approval | **Live** in the current build. |
+| Conversational onboarding, site proposals, approvals, missions, vault, site memory, live browser + takeover, calendar booking after approval, chat-led missions, mail triage, focus-card feed | **Live** in the current build. |
+| Interactive flame (drag, tap zones, flicks, pinch, shake, idle life) | **Live** in the current build. Flame Lab tuning surface is Debug-only. |
 | Sign in with Apple, magic links, optional passwords | **Live.** Universal Links verified against origin and Apple CDN records. |
 | Scheduled scanning (3×/day) | **Built and configured** (cron triggers committed in both wrangler configs; the sweeper runs the same mission path as manual discovery). Per-user ticks are testable without a deployed clock. |
 | `@usehygge.cc` receive-only email | **Pipeline built; DNS live** (MX records resolve to Cloudflare Email Routing). First live delivery checks are documented in [docs/email-usehygge-cc.md](docs/email-usehygge-cc.md). |
@@ -288,7 +291,7 @@ You need Node 22 (as in CI) and, for the local dev server, Docker running (the p
 ```bash
 cd backend/cloudflare
 npm ci
-npm test                          # unit/integration suite (40 test files, 365 tests)
+npm test                          # unit/integration suite (44 test files, 395 tests)
 ./node_modules/.bin/tsc --noEmit  # type-check
 npm run dev                       # wrangler dev with the staging config
 ```
@@ -388,12 +391,12 @@ iOS build settings that matter: `HYGGE_REQUIRE_CLOUD` (`NO` in Debug, `YES` in R
 
 | Path | What's there |
 | --- | --- |
-| [App/](App/) | iOS app: SwiftUI views (feed, conversation, approvals, live browser, settings), services (backend client, calendar, permissions, push), flame assets. |
+| [App/](App/) | iOS app: SwiftUI views (feed, conversation, approvals, live browser, settings), services (backend client, calendar, permissions, push), flame assets and the interactive flame (Flame Lab tuning is Debug-only). |
 | [Sources/HyggeCore/](Sources/HyggeCore/) | Platform-independent core: models, onboarding script, agent-task contracts, matching display logic, push routing, seed sites. |
-| [Tests/HyggeCoreTests/](Tests/HyggeCoreTests/) | Core unit tests (91 test cases across 9 files). |
+| [Tests/HyggeCoreTests/](Tests/HyggeCoreTests/) | Core unit tests (131 test cases across 16 files). |
 | [backend/cloudflare/](backend/cloudflare/) | The backend: Worker + `UserSandbox`, agent loop, auth, vault, email, scanning, learning, push, tracing. Start at [backend/cloudflare/README.md](backend/cloudflare/README.md). |
 | [backend/cloudflare/src/](backend/cloudflare/src/) | Backend source. `index.ts` routes, `user-sandbox.ts` is the per-user system of record, `agent.ts` + `llm.ts` + `browser*.ts` run missions. |
-| [backend/cloudflare/migrations/](backend/cloudflare/migrations/) | D1 migrations `0001`–`0008` (init, auth, skills, email, web access, magic links, password confirmations, shared skills V2). |
+| [backend/cloudflare/migrations/](backend/cloudflare/migrations/) | D1 migrations `0001`–`0009` (init, auth, skills, email, web access, magic links, password confirmations, shared skills V2, subscriptions + email aliases). |
 | [backend/cloudflare/test/](backend/cloudflare/test/) | Backend tests, including real-SQLite migration tests and isolated-Chrome browser tests. |
 | [backend/cloudflare/container/](backend/cloudflare/container/) | Retained-container image for workspace V2. Deploy only a deliberate immutable digest; see [docs/workspace-v2-activation.md](docs/workspace-v2-activation.md). |
 | [docs/](docs/) | Architecture and feature docs: [ARCHITECTURE.md](docs/ARCHITECTURE.md), [live-browser.md](docs/live-browser.md), [scheduled-scanning.md](docs/scheduled-scanning.md), [profile-learning.md](docs/profile-learning.md), [push-notifications.md](docs/push-notifications.md), [email-usehygge-cc.md](docs/email-usehygge-cc.md), [chat-first-setup.md](docs/chat-first-setup.md), [browser-capabilities.md](docs/browser-capabilities.md), and more. |
@@ -415,7 +418,6 @@ iOS build settings that matter: `HYGGE_REQUIRE_CLOUD` (`NO` in Debug, `YES` in R
 - **Scan sweep is sequential.** One cron invocation walks users one at a time (rotating the start for fairness). Sharding or per-user alarms is the documented follow-up if the fleet grows. Scan times are fixed UTC slots for now.
 - **Mission execution is queued, not step-sliced.** Approved work runs from a durable job queue (see [docs/durable-jobs.md](docs/durable-jobs.md)): a mission still executes as one delivery inside the owner's object, so a process termination mid-mission is retried and resumes from the task's checkpoints rather than continuing mid-action. One-shot approvals are never replayed after an uncertain outcome.
 - **Local Chrome ≠ Browser Run acceptance.** Browser tests verify the CDP protocol locally; deployed-session behavior is validated on staging. Live third-party sign-in flows still need device acceptance per site.
-- **Architecture doc lag.** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the model correctly but still shows the retired local Node service in its diagram. This README reflects the current Cloudflare-only backend; the doc update is tracked with the code.
 
 ## Contributing
 
