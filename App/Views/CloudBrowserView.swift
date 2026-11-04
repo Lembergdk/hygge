@@ -5,6 +5,12 @@ struct BrowserLiveViewport: View {
     var session: LiveBrowserSession
     var interactive = false
     var showsRecoveryActions = false
+    /// The run is holding for the person: the overlay says so —
+    /// a dropped stream while they take their time is a wait,
+    /// not a loss. Defaults to the session's own flag for hosts
+    /// that already synced it (CloudBrowserView below).
+    var waitingForUser: Bool?
+    private var waiting: Bool { waitingForUser ?? session.waitingForUser }
     var revealControls: (() -> Void)?
     var body: some View {
         ZStack {
@@ -20,12 +26,20 @@ struct BrowserLiveViewport: View {
             }
             if !session.connected {
                 VStack(spacing: 12) {
-                    if session.isRecovering { ProgressView().tint(HyggeTheme.sageDeep) }
-                    Text(session.status).font(.subheadline.weight(.medium))
+                    if session.isRecovering && !waiting { ProgressView().tint(HyggeTheme.sageDeep) }
+                    Text(waiting ? "Waiting for you" : session.status).font(.subheadline.weight(.medium))
                     if session.ended { Text("This session is no longer available.").font(.caption) }
                     else if session.requiresSignIn { Text("Sign in to Hygge again.").font(.caption) }
                     else if session.retryStopped {
-                        if showsRecoveryActions {
+                        if waiting {
+                            // The stream dropped while the run holds
+                            // for the person: say so, and let them
+                            // in — reconnecting can wait until they act.
+                            Text(interactive ? "Take your time — the session is holding." : "Tap to open.").font(.caption)
+                            if showsRecoveryActions {
+                                Button("Reconnect") { session.reconnect() }.font(.subheadline.weight(.semibold))
+                            }
+                        } else if showsRecoveryActions {
                             Button("Reconnect") { session.reconnect() }.font(.subheadline.weight(.semibold))
                         } else { Text(interactive ? "Try reconnecting below." : "Tap to reconnect.").font(.caption) }
                     }
@@ -43,17 +57,23 @@ struct BrowserLiveAttachment: View {
     @Environment(AppStore.self) private var store
     let task: AgentTask
     var open: () -> Void
+    /// The run is holding for the person, not working: label the
+    /// wait honestly instead of reporting the stream state.
+    private func waitingForUser(_ task: AgentTask, _ session: LiveBrowserSession) -> Bool {
+        task.status == .needsHuman || task.needsChatHelp || session.humanControlled
+    }
     var body: some View {
         if let id = task.browserSessionID {
             let session = store.browserSession(id)
+            let waiting = waitingForUser(task, session)
             Button(action: open) {
                 VStack(spacing: 0) {
-                    BrowserLiveViewport(session: session)
+                    BrowserLiveViewport(session: session, waitingForUser: waiting)
                         .aspectRatio(1.6, contentMode: .fit)
                         .allowsHitTesting(false)
                     HStack(spacing: 6) {
                         Circle().fill(session.connected ? HyggeTheme.sageDeep : HyggeTheme.secondary).frame(width: 7, height: 7)
-                        Text("\(store.siteName(id: task.siteID)) · \(session.status)").font(.caption)
+                        Text("\(store.siteName(id: task.siteID)) · \(waiting ? "Waiting for you" : session.status)").font(.caption)
                         Spacer()
                         Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption)
                     }.foregroundStyle(HyggeTheme.ink).padding(12)
@@ -78,12 +98,14 @@ struct CloudBrowserView: View {
     private var sessionID: String? { if let task { return task.browserSessionID }; return existingSessionID }
     private var title: String { task.map { store.siteName(id: $0.siteID) } ?? URL(string: urlString)?.host ?? "Browser" }
     private func statusText(_ session: LiveBrowserSession) -> String {
+        // A hold for the person outranks a dead stream: "waiting",
+        // never "unavailable", while the session is being kept.
         session.ended ? "Browser session ended"
             : session.requiresSignIn ? "Sign in to continue"
-            : session.retryStopped ? "Browser unavailable"
             : session.ownsControl ? "You’re in control"
             : session.humanControlled ? "Waiting for you"
-            : task?.needsChatHelp == true ? "Hygge needs you" : "Hygge is working"
+            : task?.needsChatHelp == true ? "Hygge needs you"
+            : session.retryStopped ? "Browser unavailable" : "Hygge is working"
     }
 
     var body: some View {
@@ -91,6 +113,9 @@ struct CloudBrowserView: View {
             HyggeTheme.paper.ignoresSafeArea()
             if let id = sessionID {
                 let session = store.browserSession(id)
+                // Keep the session's own flag in step with the run:
+                // a hold for the person beats a dead stream.
+                let hold = task?.status == .needsHuman || task?.needsChatHelp == true || session.humanControlled
                 VStack(spacing: 12) {
                     // One merged bar replaces the old site row + status
                     // row (+ host caption): the site is named once, the
@@ -145,7 +170,11 @@ struct CloudBrowserView: View {
                     }
                     if !session.keyboardVisible && (session.connected || session.isRecovering) { controls(session) }
                 }.padding(.horizontal, 18).padding(.top, 10).padding(.bottom, 12)
-                    .task(id: session.connected) {
+                    .task(id: "\(session.connected)-\(hold)") {
+                        // A hold for the person outlives a dead
+                        // stream: keep the label honest while the
+                        // session is being kept server-side.
+                        if session.waitingForUser != hold { session.waitingForUser = hold }
                         if session.connected && takeControlOnOpen && !autoControlAttempted {
                             autoControlAttempted = true
                             _ = await session.takeControl()
