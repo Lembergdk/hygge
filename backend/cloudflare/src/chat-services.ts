@@ -59,6 +59,7 @@ export function chatServices(host:ChatServiceHost):ChatServices {
       if(name==='read_profile')return {profile:safe(profileRow(host)),beliefs:host.rows('beliefs').map(r=>safe(r.data)),learning:host.rows('learningProfiles').map(r=>safe(r.data))};
       if(name==='list_sites')return {sites:host.rows('sites').map(r=>safe({id:r.id,...r.data,state:host.get('accountStates',r.id)?.data?.state??'unknown'})),proposals:host.rows('proposals').map(r=>safe(r.data))};
       if(name==='list_tasks')return {tasks:host.tasks().map(target)};
+      if(name==='read_search_evidence')return {evidence:host.rows('searchEvidence').map(r=>safe(r.data))};
       if(name==='read_inbox')return {messages:host.inbox().filter(m=>m.kind==='other').map(safe)};
       if(name==='read_site_memory')return {hints:host.hints(args.domain).map(safe)};
       if(name==='read_activity'){const rows=host.rows('journalEvents').map(r=>safe(r.data)).sort((a,b)=>String(b.occurredAt).localeCompare(String(a.occurredAt)));const offset=Number(args.offset??0),limit=Number(args.limit??20);return {items:rows.slice(offset,offset+limit),total:rows.length,nextOffset:offset+limit<rows.length?offset+limit:null};}

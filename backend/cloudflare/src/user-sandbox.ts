@@ -1953,7 +1953,7 @@ export class UserSandbox extends DurableObject<Env> {
     const store=this.chatStore(), state=this.stateStore();
     const services=chatServices({
       rows:entity=>state.list(entity), get:(entity,id)=>state.get(entity,id),
-      put:(entity,id,data)=>{state.upsert(entity,id,data);},remove:(entity,id)=>{state.remove(entity,id);},
+      put:(entity,id,data)=>{const before=entity==='profile'||entity==='sites'?this.reopenSnapshot(state):null;state.upsert(entity,id,data);if(before)this.applyCategoryReopen(before,state);},remove:(entity,id)=>{state.remove(entity,id);},
       tasks:()=>[...this.ctx.storage.sql.exec('SELECT task FROM tasks ORDER BY created_at')].map(r=>JSON.parse(String(r.task))),
       saveTask:task=>this.saveTask(task),enqueue:task=>this.enqueueOrRunMission(task),
       hints:domain=>[...this.ctx.storage.sql.exec('SELECT kind,hints,success_count,failure_count FROM memories WHERE domain=?',domain)].map(r=>({...r,hints:JSON.parse(String(r.hints))})),

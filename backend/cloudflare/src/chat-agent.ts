@@ -40,6 +40,7 @@ export const CHAT_AGENT_TOOLS = [
   definition('list_tasks','Read current tasks and exact draft IDs before proposing approval.'),
   definition('read_inbox','Read filed email summaries. No secrets or codes.'),
   definition('read_activity','Read recorded activity and outcomes.',{offset:num,limit:{type:'integer',minimum:1,maximum:50}},[]),
+  definition('read_search_evidence','Read evidence collected by previous work searches.'),
   definition('read_site_memory','Read advisory site hints and learning.',{domain:str}),
   definition('search_history','Search all retained conversation events, including old decisions.',{query:str,offset:num},['query']),
   definition('read_history','Read history ranges or the full text of one event in chunks.',{after:num,limit:{type:'integer',minimum:1,maximum:50},eventId:str,offset:num,charLimit:{type:'integer',minimum:1,maximum:16000}},[]),
@@ -160,7 +161,7 @@ export class ChatAgent {
       const p:ChatProposal={id:crypto.randomUUID(),generation:turn.generation,title:prepared.title,operation:args.operation,args,fingerprint:prepared.fingerprint,details:prepared.details,status:'pending',createdAt:new Date().toISOString()};
       s.db.put(`proposal:${p.id}`,p);return {status:'awaiting_confirmation',proposalId:p.id,title:p.title};
     }
-    if(['read_profile','list_sites','list_tasks','read_inbox','read_activity','read_site_memory'].includes(name))return this.services.read(name,args);
+    if(['read_profile','list_sites','list_tasks','read_inbox','read_activity','read_search_evidence','read_site_memory'].includes(name))return this.services.read(name,args);
     return this.services.execute(name,args,await digest({turn:turn.id,name,args}));
   }
   async turn(input:{id:string;generation:string;text?:string;focus?:{kind:string;id:string}},emit:(event:any)=>void=()=>{},source:'user'|'event'='user'){
@@ -183,7 +184,7 @@ export class ChatAgent {
       if(turn.pending){
         for(const call of turn.pending.calls){
           const key=`execution:${turn.id}:${await digest({name:call.name,args:call.arguments})}`;
-          const readOnly=['read_profile','list_sites','list_tasks','read_inbox','read_activity','read_site_memory','search_history','read_history','list_files','read_file'].includes(call.name);
+          const readOnly=['read_profile','list_sites','list_tasks','read_inbox','read_activity','read_search_evidence','read_site_memory','search_history','read_history','list_files','read_file'].includes(call.name);
           const executionKey=readOnly?`${key}:${call.callId}`:key;
           let record=this.store.db.get<{status:string;result?:any}>(executionKey);
           if(!record){

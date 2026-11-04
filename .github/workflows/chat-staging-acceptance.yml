@@ -2,6 +2,15 @@ name: Chat staging acceptance
 
 on:
   workflow_dispatch:
+    inputs:
+      persistent_agent:
+        description: "Check the persistent chat protocol instead of legacy intent"
+        type: boolean
+        default: false
+      deploy_staging:
+        description: "Deploy this ref to staging before acceptance (never production)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -13,7 +22,7 @@ concurrency:
 jobs:
   acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: backend/cloudflare
@@ -26,5 +35,15 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
+      - name: Record current staging deployment
+        if: inputs.deploy_staging
+        run: npx wrangler deployments list -c wrangler.staging.jsonc
+      - name: Deploy authorized staging branch
+        if: inputs.deploy_staging
+        run: npx wrangler deploy -c wrangler.staging.jsonc
+      - name: Verify persistent chat with a synthetic staging account
+        if: inputs.persistent_agent
+        run: node scripts/persistent-chat-staging-acceptance.mjs
       - name: Verify model intent using a synthetic staging account
+        if: ${{ !inputs.persistent_agent }}
         run: node scripts/chat-staging-acceptance.mjs

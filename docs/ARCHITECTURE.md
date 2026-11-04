@@ -111,15 +111,16 @@ sign in unattended within approved tasks:
 ## Multi-tenancy & privacy invariants
 
 All users call the same shared model weights (muse-spark-1.3 /
-muse-wonder-1.0). Model API calls are stateless: the model retains nothing
-between requests, and Hygge never fine-tunes on user data — all "learning"
-lives in the external site-memory store, precisely so it can be isolated, audited,
-and deleted. Everything an agent appears to "remember" is Hygge state, so
-isolation is enforced there:
+muse-wonder-1.0). Authenticated conversation uses stored Responses chains
+owned by each user’s Durable Object. Browser observations and scripted
+onboarding use stateless calls. Hygge retains its own conversation events,
+results, summaries and versioned working documents; provider state is never
+the only copy. See [persistent conversation](persistent-conversation.md) for
+recovery and deletion behavior. Isolation is enforced in Hygge state:
 
 1. **One agent (Durable Object) per user.** Prompts are assembled only from
-   that user's profile, tasks, and page snapshots. Stateless model calls —
-   no shared provider threads/conversation memory features.
+   that user's profile, tasks, page snapshots and conversation. Provider
+   response pointers and cleanup queues are private to that same object.
 2. **Per-user encryption keys.** Credentials and browser cookie jars are
    encrypted under a per-user DEK (wrapped by the master KEK). Deleting the
    DEK crypto-shreds that user's secrets. One user's key can never decrypt
