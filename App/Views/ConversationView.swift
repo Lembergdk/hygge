@@ -225,7 +225,7 @@ struct ConversationView: View {
                 .lineLimit(1...4)
                 .padding(.horizontal, 16).padding(.vertical, 12)
                 .background(HyggeTheme.card, in: Capsule())
-                .overlay(Capsule().stroke(HyggeTheme.hairline, lineWidth: 1))
+                .overlay(Capsule().stroke(HyggeTheme.hairline, lineWidth: 1).allowsHitTesting(false))
                 .onSubmit { Task { await send() } }
             Button { Task { await send() } } label: {
                 Image(systemName: "paperplane.fill")
@@ -233,6 +233,7 @@ struct ConversationView: View {
                     .frame(width: 44, height: 44)
                     .background(HyggeTheme.sageDeep, in: Circle())
             }
+            .accessibilityLabel("Send message")
             .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty || isThinking || agentState?.activeTurn != nil || retryMessage != nil)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
