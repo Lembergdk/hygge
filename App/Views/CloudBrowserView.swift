@@ -66,6 +66,7 @@ struct BrowserLiveAttachment: View {
 struct CloudBrowserView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let urlString: String
     var existingSessionID: String? = nil
     var taskID: UUID? = nil
@@ -76,32 +77,54 @@ struct CloudBrowserView: View {
     private var task: AgentTask? { store.tasks.first { $0.id == taskID } }
     private var sessionID: String? { if let task { return task.browserSessionID }; return existingSessionID }
     private var title: String { task.map { store.siteName(id: $0.siteID) } ?? URL(string: urlString)?.host ?? "Browser" }
+    private func statusText(_ session: LiveBrowserSession) -> String {
+        session.ended ? "Browser session ended"
+            : session.requiresSignIn ? "Sign in to continue"
+            : session.retryStopped ? "Browser unavailable"
+            : session.ownsControl ? "You’re in control"
+            : session.humanControlled ? "Waiting for you"
+            : task?.needsChatHelp == true ? "Hygge needs you" : "Hygge is working"
+    }
 
     var body: some View {
         ZStack {
             HyggeTheme.paper.ignoresSafeArea()
             if let id = sessionID {
                 let session = store.browserSession(id)
-                VStack(spacing: 16) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "globe").font(.title3).foregroundStyle(HyggeTheme.sageDeep)
-                            .frame(width: 40, height: 40).background(HyggeTheme.sageTint, in: RoundedRectangle(cornerRadius: 12))
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(title).font(.headline)
-                            Text(URL(string: session.pageURL.isEmpty ? urlString : session.pageURL)?.host ?? "")
-                                .font(.caption).foregroundStyle(HyggeTheme.secondary).lineLimit(1)
+                VStack(spacing: 12) {
+                    // One merged bar replaces the old site row + status
+                    // row (+ host caption): the site is named once, the
+                    // status said once, and the ~110 pt reclaimed goes
+                    // to the viewport. At accessibility sizes the
+                    // title/status stack instead of truncating.
+                    HStack(alignment: .center, spacing: 10) {
+                        AnimatedFlame(animation: session.ended || session.retryStopped || session.requiresSignIn || session.humanControlled || task?.needsChatHelp == true ? .notify : .laptop, size: 24)
+                            .accessibilityHidden(true)
+                        Group {
+                            if dynamicTypeSize.isAccessibilitySize {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(title).font(.headline).lineLimit(1)
+                                    Text(statusText(session)).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            } else {
+                                (Text(title).font(.headline)
+                                 + Text(" · ").font(.subheadline).foregroundColor(HyggeTheme.secondary)
+                                 + Text(statusText(session)).font(.subheadline).foregroundColor(HyggeTheme.secondary))
+                                    .lineLimit(1)
+                            }
                         }
-                        Spacer()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .combine)
+                        Circle().fill(session.connected ? HyggeTheme.sageDeep : HyggeTheme.secondary).frame(width: 7, height: 7)
+                            .accessibilityLabel(session.connected ? "Connected" : "Not connected")
+                        // The word only earns its space when unhealthy;
+                        // dot + status sentence already say "live".
+                        if !session.connected || session.isRecovering {
+                            Text(session.status).font(.caption).foregroundStyle(HyggeTheme.secondary)
+                        }
                         Button { fullscreen = true } label: { Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 44, height: 44) }
                             .accessibilityLabel("Fullscreen browser")
-                    }
-                    HStack(spacing: 10) {
-                        AnimatedFlame(animation: session.ended || session.retryStopped || session.requiresSignIn || session.humanControlled || task?.needsChatHelp == true ? .notify : .laptop, size: 36)
-                        Text(session.ended ? "Browser session ended" : session.requiresSignIn ? "Sign in to continue" : session.retryStopped ? "Browser unavailable" : session.ownsControl ? "You’re in control" : session.humanControlled ? "Waiting for you" : task?.needsChatHelp == true ? "Hygge needs you" : "Hygge is working")
-                            .font(.subheadline.weight(.semibold))
-                        Spacer()
-                        Circle().fill(session.connected ? HyggeTheme.sageDeep : HyggeTheme.secondary).frame(width: 7, height: 7)
-                        Text(session.status).font(.caption).foregroundStyle(HyggeTheme.secondary)
                     }
                     BrowserLiveViewport(session: session, interactive: !fullscreen)
                         .clipShape(RoundedRectangle(cornerRadius: 20))
@@ -109,8 +132,10 @@ struct CloudBrowserView: View {
                             Color.clear.task(id: "\(geometry.size)-\(session.connected)-\(session.ownsControl)-\(fullscreen)") { if !fullscreen { session.resize(geometry.size) } }
                         }.allowsHitTesting(false) }
                     if let problem = session.problem {
-                        HStack {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
                             Text(problem).font(.footnote)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             if session.canReconnect {
                                 Button("Reconnect") { session.reconnect() }.font(.footnote.weight(.semibold))
                             } else {
@@ -119,7 +144,7 @@ struct CloudBrowserView: View {
                         }.foregroundStyle(HyggeTheme.secondary)
                     }
                     if !session.keyboardVisible && (session.connected || session.isRecovering) { controls(session) }
-                }.padding(.horizontal, 18).padding(.top, 22).padding(.bottom, 12)
+                }.padding(.horizontal, 18).padding(.top, 10).padding(.bottom, 12)
                     .task(id: session.connected) {
                         if session.connected && takeControlOnOpen && !autoControlAttempted {
                             autoControlAttempted = true

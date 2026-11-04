@@ -5,6 +5,7 @@ struct HomeFeedView: View {
     @Environment(AppStore.self) private var store
     @Environment(FlamePlayStore.self) private var playStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Namespace private var focusAnimation
     @State private var focus: FeedFocus?
     @State private var showConversation = false
@@ -83,7 +84,13 @@ struct HomeFeedView: View {
                         Color.black.opacity(0.55).ignoresSafeArea().onTapGesture { closeFocus() }
                             .accessibilityLabel("Back to feed").accessibilityAddTraits(.isButton)
                         FeedFocusCard(close: { closeFocus() }) { focusedContent(focus) }
-                            .frame(width: min(geometry.size.width - 32, 620), height: min(geometry.size.height * 0.9, focus.maximumHeight))
+                            // At accessibility sizes vertical space is the
+                            // scarce resource: drop the per-surface point
+                            // cap and give the card nearly the full screen.
+                            .frame(width: min(geometry.size.width - 32, 620),
+                                   height: dynamicTypeSize.isAccessibilitySize
+                                       ? geometry.size.height * 0.92
+                                       : min(geometry.size.height * 0.92, focus.maximumHeight))
                             .matchedGeometryEffect(id: focus.id, in: focusAnimation, isSource: true)
                     }.frame(width: geometry.size.width, height: geometry.size.height)
                     .zIndex(2)
@@ -704,8 +711,10 @@ struct HomeFeedView: View {
         }
     }
     private func emailDecisionCard(_ mail: FiledEmailSummary) -> some View {
+        // Domain leads: it is the decision key, so it must be the
+        // last thing large type could ever squeeze out.
         card(id: "email-decision-\(mail.senderDomain)", title: "Mail from a new place",
-             subtitle: "\(mail.subject.isEmpty ? "(no subject)" : mail.subject) · \(mail.senderDomain)",
+             subtitle: "\(mail.senderDomain) · \(mail.subject.isEmpty ? "(no subject)" : mail.subject)",
              icon: "envelope", primaryTitle: "Decide", primaryIcon: "envelope.open",
              open: { openFocus(.emailDecision(mail)) },
              primary: { openFocus(.emailDecision(mail)) },
@@ -716,23 +725,32 @@ struct HomeFeedView: View {
     private func emailDecisionDetail(_ mail: FiledEmailSummary) -> some View {
         FeedDetailContent {
             Text("Mail from \(mail.senderDomain)").font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
+                .fixedSize(horizontal: false, vertical: true)
             Text("This place is new to me, so I filed it and waited for your call. Whatever you pick, I'll remember it for this sender.")
                 .foregroundStyle(HyggeTheme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 8) {
                 Text(mail.subject.isEmpty ? "(no subject)" : mail.subject)
                     .font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
                 if !mail.summary.isEmpty {
                     Text(mail.summary).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 ForEach(mail.highlights ?? [], id: \.self) { label in
                     Label(label, systemImage: "sparkles").font(.subheadline).foregroundStyle(HyggeTheme.sageDeep)
                 }
             }
+        } footer: {
+            // The three-way call is the surface's only job: pinned so
+            // a long summary can never push a choice off the card.
             FeedPrimaryButton(title: "Treat as work mail") { decideEmail(mail, choice: "work") }
             Button("Just file it") { decideEmail(mail, choice: "file") }
-                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
+                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
+                .frame(maxWidth: .infinity, minHeight: 44)
             Button("Ignore this sender") { decideEmail(mail, choice: "ignore") }
-                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary).frame(minHeight: 44)
+                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
+                .frame(maxWidth: .infinity, minHeight: 44)
         }
     }
     private func decideEmail(_ mail: FiledEmailSummary, choice: String) {

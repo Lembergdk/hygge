@@ -7,6 +7,7 @@ enum FeedCardStyle {
 
 struct FeedVisualCard: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.dynamicTypeSize) private var typeSize
     let style: FeedCardStyle
     let title: String
     let subtitle: String
@@ -37,13 +38,19 @@ struct FeedVisualCard: View {
                 VStack(alignment: .leading, spacing: 7) {
                     eyebrow("A NEW PLACE")
                     Text(title).font(.system(.title2, design: .rounded, weight: .bold))
-                    Text(subtitle).font(.subheadline).foregroundStyle(HyggeTheme.secondary).lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // The rationale is the reason to tap: wrap it fully.
+                    Text(subtitle).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }.frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "globe.europe.africa.fill")
-                    .font(.system(size: 48, weight: .light)).foregroundStyle(HyggeTheme.sageDeep)
-                    .rotationEffect(.degrees(-12)).frame(width: 64, height: 64)
-                    .background(HyggeTheme.sageTint, in: RoundedRectangle(cornerRadius: 20))
-                    .accessibilityHidden(true)
+                // Decorative art yields first as type grows.
+                if !typeSize.isAccessibilitySize {
+                    Image(systemName: "globe.europe.africa.fill")
+                        .font(.system(size: 48, weight: .light)).foregroundStyle(HyggeTheme.sageDeep)
+                        .rotationEffect(.degrees(-12)).frame(width: 64, height: 64)
+                        .background(HyggeTheme.sageTint, in: RoundedRectangle(cornerRadius: 20))
+                        .accessibilityHidden(true)
+                }
             }
             HStack(spacing: 9) {
                 Image(systemName: "person.crop.circle.badge.plus")
@@ -64,17 +71,23 @@ struct FeedVisualCard: View {
                     Image(systemName: "sparkle").font(.title2).foregroundStyle(HyggeTheme.butterText)
                 }
                 Spacer()
-                Image(systemName: icon).font(.system(size: 68, weight: .light))
-                    .foregroundStyle(HyggeTheme.butterText).rotationEffect(.degrees(-12)).accessibilityHidden(true)
+                if !typeSize.isAccessibilitySize {
+                    Image(systemName: icon).font(.system(size: 68, weight: .light))
+                        .foregroundStyle(HyggeTheme.butterText).rotationEffect(.degrees(-12)).accessibilityHidden(true)
+                }
             }.padding(.horizontal, 22).padding(.vertical, 18)
                 .background(HyggeTheme.butterTint)
             VStack(alignment: .leading, spacing: 14) {
-                Text(title).font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink).lineLimit(2)
-                HStack {
-                    Text(subtitle).font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep).lineLimit(2)
-                    Spacer(minLength: 10)
+                HStack(alignment: .top, spacing: 10) {
+                    Text(title).font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     arrow
                 }
+                // Pay/place is decision-critical: full width, wraps,
+                // never shares its line with the arrow.
+                Text(subtitle).font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
+                    .fixedSize(horizontal: false, vertical: true)
             }.padding(20)
         }
     }
@@ -91,46 +104,58 @@ struct FeedVisualCard: View {
                     .padding(.horizontal, 10).padding(.vertical, 7).background(HyggeTheme.butterTint, in: Capsule())
             }
             VStack(alignment: .leading, spacing: 5) {
-                Text(title).font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink).lineLimit(2)
-                HStack {
-                    Text(subtitle).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-                    Spacer()
+                HStack(alignment: .top, spacing: 10) {
+                    Text(title).font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     arrow
                 }
+                Text(subtitle).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }.padding(20)
     }
     private var question: some View {
-        HStack(spacing: 16) {
+        HStack(alignment: .top, spacing: 16) {
             Image(systemName: icon).font(.system(size: 28, weight: .medium)).foregroundStyle(HyggeTheme.ember)
                 .frame(width: 52, height: 52).background(HyggeTheme.peach, in: RoundedRectangle(cornerRadius: 18)).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 5) {
-                Text(title).font(.system(.headline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink).lineLimit(2)
+                // A question truncated is a question lost: wrap fully.
+                Text(title).font(.system(.headline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(subtitle).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }.frame(maxWidth: .infinity, alignment: .leading)
             arrow
         }.padding(18)
     }
     private func earnings(_ amount: Double, _ currency: String) -> some View {
-        HStack(spacing: 0) {
+        HStack(alignment: .top, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
                 eyebrow("YOURS, EARNED")
+                // Never shrink money below the user's chosen size:
+                // it wraps to a second line instead.
                 Text(JournalBuilder.money(amount, currencyCode: currency))
                     .font(.system(.largeTitle, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                    .minimumScaleFactor(0.7).lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(subtitle).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }.frame(maxWidth: .infinity, alignment: .leading)
-            Image("SettingsEarnings").resizable().scaledToFit().scaleEffect(1.5)
-                .frame(width: 110, height: 110).accessibilityHidden(true)
+            if !typeSize.isAccessibilitySize {
+                Image("SettingsEarnings").resizable().scaledToFit().scaleEffect(1.5)
+                    .frame(width: 110, height: 110).accessibilityHidden(true)
+            }
             arrow
         }.padding(20).background(HyggeTheme.butterTint.opacity(0.45))
     }
     private var celebration: some View {
-        HStack(spacing: 16) {
+        HStack(alignment: .top, spacing: 16) {
             Image(systemName: "checkmark.seal.fill").font(.system(size: 42)).foregroundStyle(HyggeTheme.sageDeep).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 5) {
-                Text(title).font(.system(.headline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink).lineLimit(2)
+                Text(title).font(.system(.headline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(subtitle).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }.frame(maxWidth: .infinity, alignment: .leading)
             arrow
         }.padding(20).background(HyggeTheme.sageTint.opacity(0.35))
