@@ -340,6 +340,26 @@ export class UserSandbox extends DurableObject<Env> {
     return result;
   }
 
+  /// Response-id chain for one conversation scope, kept in Durable
+  /// Object storage so chained model calls serialize with the
+  /// requests that read and advance them. The chat thread (intent,
+  /// message, stream) shares one chain: every model turn in the
+  /// thread — action decisions and prose replies alike — chains
+  /// onto the previous response, so referents ("both", "that one")
+  /// resolve from history the server holds instead of a transcript
+  /// blob re-sent on every turn. The reply model sees prior intent
+  /// decisions as assistant turns; they are internal decisions, not
+  /// user-visible messages, and the reply prompt treats them so.
+  private responseChain(key: string) {
+    return {
+      get: async (): Promise<string | undefined> =>
+        (await this.ctx.storage.get<string>(key)) ?? undefined,
+      set: async (id: string): Promise<void> => {
+        await this.ctx.storage.put(key, id);
+      },
+    };
+  }
+
   private llmConfig(agentName = "hygge-browser-agent"): LLMConfig {
     return {
       apiKey: this.env.HYGGE_LLM_API_KEY,
@@ -2195,6 +2215,7 @@ export class UserSandbox extends DurableObject<Env> {
                 ...(body as object),
                 sessionId: this.ctx.id.toString(),
                 sessionName: this.userId || undefined,
+                chain: this.responseChain("llm-chain:chat"),
               }, emit);
             } finally {
               await writer.close().catch(() => {});
@@ -2243,6 +2264,7 @@ export class UserSandbox extends DurableObject<Env> {
           ...intentBody,
           context: { ...(intentBody.context ?? {}), candidates },
           conversationId: this.ctx.id.toString(),
+          chain: this.responseChain("llm-chain:chat"),
         }));
       }
       if (request.method === "POST" && parts.join("/") === "onboarding/message") {
@@ -2251,6 +2273,7 @@ export class UserSandbox extends DurableObject<Env> {
           ...(body as object),
           sessionId: this.ctx.id.toString(),
           sessionName: this.userId || undefined,
+          chain: this.responseChain("llm-chain:chat"),
         }));
       }
       if (request.method === "POST" && parts.join("/") === "site-proposals") {

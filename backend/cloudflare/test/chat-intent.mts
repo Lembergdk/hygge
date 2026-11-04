@@ -84,3 +84,67 @@ test("chatIntent falls back to conversation when unconfigured or unparseable", a
   assert.equal(bad.action, null);
   assert.equal(bad.simulated, false);
 });
+
+test("chatIntent on a live chain sends only the latest message, chained, and saves the new id", async () => {
+  const seen: any[] = [];
+  let stored: string | undefined = "resp-prev";
+  const client = {
+    configured: true,
+    cfg: { modelFast: "m-fast" },
+    complete: async (args: any) => {
+      seen.push(args);
+      if (args.onResponseId) await args.onResponseId("resp-new");
+      return JSON.stringify({ actions: [{ kind: "add", domain: "contra.com" }] });
+    },
+  };
+  const chain = {
+    get: async () => stored,
+    set: async (id: string) => { stored = id; },
+  };
+  const out = await chatIntent({
+    client,
+    transcript: [
+      { fromAgent: true, text: "Which other sites did you have in mind — Contra or Toptal for example?" },
+      { fromAgent: false, text: "Both" },
+    ],
+    context: CONTEXT,
+    chain,
+  });
+  assert.deepEqual(out.actions, [{ kind: "add", domain: "contra.com" }]);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].previousResponseId, "resp-prev");
+  // No transcript blob: only the latest message travels; the thread
+  // lives server-side under the chain.
+  assert.equal(seen[0].user, "Both");
+  // Per-turn context still travels, in instructions.
+  assert.ok(String(seen[0].system).includes("rover.com"));
+  assert.equal(stored, "resp-new");
+});
+
+test("chatIntent bootstraps a missing chain with the legacy blob, then saves the id", async () => {
+  const seen: any[] = [];
+  let stored: string | undefined = undefined;
+  const client = {
+    configured: true,
+    cfg: { modelFast: "m-fast" },
+    complete: async (args: any) => {
+      seen.push(args);
+      if (args.onResponseId) await args.onResponseId("resp-1");
+      return JSON.stringify({ actions: [{ kind: "scan", siteId: "rover" }] });
+    },
+  };
+  const chain = {
+    get: async () => stored,
+    set: async (id: string) => { stored = id; },
+  };
+  const out = await chatIntent({
+    client,
+    transcript: [{ fromAgent: false, text: "scan Rover" }],
+    context: CONTEXT,
+    chain,
+  });
+  assert.deepEqual(out.actions, [{ kind: "scan", siteId: "rover" }]);
+  assert.equal(seen[0].previousResponseId, undefined);
+  assert.ok(JSON.parse(seen[0].user).conversation.includes("scan Rover"));
+  assert.equal(stored, "resp-1");
+});

@@ -96,6 +96,19 @@ function capTranscriptText(transcript: any[] = []): string {
   return kept.join("\n");
 }
 
+/// Latest user message in a transcript. The app tags card-linked
+/// messages with [about: …] in the text itself, so a referent like
+/// "that one" survives without the surrounding thread. Empty when
+/// the transcript has no user turn — chained calls then fall back
+/// to the legacy payload instead of sending an empty input.
+function latestUserText(transcript: any[] = []): string {
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    const m = transcript[i];
+    if (m && m.fromAgent === false && typeof m.text === "string" && m.text.trim()) return m.text;
+  }
+  return "";
+}
+
 function traceIdentity(args: any) {
   const suppliedConversation = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
   const cfg = args.client?.cfg ?? {};
@@ -125,7 +138,7 @@ export async function onboardingMessage(args: any) {
   }, () => onboardingMessageInner({ ...args, conversationId: trace.conversationId }));
 }
 
-async function onboardingMessageInner({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "", conversationId }: any) {
+async function onboardingMessageInner({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "", conversationId, chain }: any) {
   const objective = OBJECTIVES[step] ?? OBJECTIVES.welcome;
   const transcriptText = capTranscriptText(transcript);
   if (!client.configured) {
@@ -133,9 +146,23 @@ async function onboardingMessageInner({ client, step = "welcome", transcript = [
              ...heuristicSuggestions(transcriptText), simulated: true };
   }
   try {
+    // Same chaining rule as chatIntent: a live chain sends only the
+    // latest user message (history lives server-side); without one,
+    // the legacy blob bootstraps it. Step/objective/profile travel
+    // in instructions either way, since instructions do not persist.
+    const prev = chain ? await chain.get() : undefined;
+    const latest = latestUserText(transcript);
+    const chained = Boolean(chain && prev);
+    const legacyUser = JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary, conversation: transcriptText });
     const text = await client.complete({
-      model: client.cfg.modelFast, system: SYSTEM, conversationId,
-      user: JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary, conversation: transcriptText }),
+      model: client.cfg.modelFast,
+      system: chained
+        ? `${SYSTEM}\n\nContext for this turn (JSON): ${JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary })} — earlier turns of this conversation are available as history; the input is the latest user message. Prior assistant turns shaped like {"actions":[...]} are internal action decisions, not messages you sent the user — never quote, repeat, or continue them as prose.`
+        : SYSTEM,
+      conversationId,
+      user: chained ? (latest || legacyUser) : legacyUser,
+      ...(chained ? { previousResponseId: prev } : {}),
+      ...(chain ? { onResponseId: (id: string) => chain.set(id) } : {}),
     });
     const parsed = parseDecision(text) as any;
     if (!parsed?.reply) throw new Error("unparseable onboarding reply");
@@ -231,7 +258,7 @@ export async function onboardingMessageStream(args: any, emit: (e: unknown) => v
   }, () => onboardingMessageStreamInner({ ...args, conversationId: trace.conversationId }, emit));
 }
 
-async function onboardingMessageStreamInner({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "", conversationId }: any, emit: (e: unknown) => void) {
+async function onboardingMessageStreamInner({ client, step = "welcome", transcript = [], profile = {}, contextSummary = "", conversationId, chain }: any, emit: (e: unknown) => void) {
   const objective = OBJECTIVES[step] ?? OBJECTIVES.welcome;
   const transcriptText = capTranscriptText(transcript);
   const fallback = () => ({ reply: FALLBACK_REPLIES[step] ?? FALLBACK_REPLIES.welcome,
@@ -244,9 +271,19 @@ async function onboardingMessageStreamInner({ client, step = "welcome", transcri
   if (!client.configured) return streamOut(fallback());
   try {
     const extractor = new ReplyStreamExtractor();
+    const prev = chain ? await chain.get() : undefined;
+    const latest = latestUserText(transcript);
+    const chained = Boolean(chain && prev);
+    const legacyUser = JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary, conversation: transcriptText });
     const full = await client.completeStream({
-      model: client.cfg.modelFast, system: SYSTEM, conversationId,
-      user: JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary, conversation: transcriptText }),
+      model: client.cfg.modelFast,
+      system: chained
+        ? `${SYSTEM}\n\nContext for this turn (JSON): ${JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary })} — earlier turns of this conversation are available as history; the input is the latest user message. Prior assistant turns shaped like {"actions":[...]} are internal action decisions, not messages you sent the user — never quote, repeat, or continue them as prose.`
+        : SYSTEM,
+      conversationId,
+      user: chained ? (latest || legacyUser) : legacyUser,
+      ...(chained ? { previousResponseId: prev } : {}),
+      ...(chain ? { onResponseId: (id: string) => chain.set(id) } : {}),
     }, (delta: string) => {
       const out = extractor.push(delta);
       if (out) emit({ type: "reply-delta", text: out });
@@ -366,19 +403,37 @@ const INTENT_SYSTEM = [
 ].join(" ");
 
 export async function chatIntent(args: any): Promise<{ action: ChatIntentAction | null; actions: ChatIntentAction[] | null; simulated: boolean }> {
-  const { client, transcript = [], context = {}, profile = {} } = args ?? {};
+  const { client, transcript = [], context = {}, profile = {}, chain } = args ?? {};
   if (!client?.configured) return { action: null, actions: null, simulated: true };
   try {
+    // Chained calls send only the latest user message: the server
+    // holds the thread under previous_response_id, so the capped
+    // transcript blob is needed only to bootstrap a chain that does
+    // not exist yet (a thread that predates chaining, or a lost
+    // chain id). The per-turn context (sites, inbox, focus,
+    // candidates) still travels every turn, in instructions,
+    // because instructions do not persist across turns.
+    const prev = chain ? await chain.get() : undefined;
+    const latest = latestUserText(transcript);
+    const chained = Boolean(chain && prev);
+    const profileSubset = {
+      interests: profile.interests ?? [], skills: profile.skills ?? [],
+      locationLabel: profile.locationLabel ?? "", hourlyRateFloor: profile.hourlyRateFloor ?? null,
+    };
+    const legacyUser = JSON.stringify({
+      context,
+      profile: profileSubset,
+      conversation: capTranscriptText(transcript),
+    });
     const text = await client.complete({
-      model: client.cfg.modelFast, system: INTENT_SYSTEM, conversationId: args.conversationId,
-      user: JSON.stringify({
-        context,
-        profile: {
-          interests: profile.interests ?? [], skills: profile.skills ?? [],
-          locationLabel: profile.locationLabel ?? "", hourlyRateFloor: profile.hourlyRateFloor ?? null,
-        },
-        conversation: capTranscriptText(transcript),
-      }),
+      model: client.cfg.modelFast,
+      system: chained
+        ? `${INTENT_SYSTEM}\n\nContext for this turn (JSON): ${JSON.stringify({ context, profile: profileSubset })}`
+        : INTENT_SYSTEM,
+      conversationId: args.conversationId,
+      user: chained ? (latest || legacyUser) : legacyUser,
+      ...(chained ? { previousResponseId: prev } : {}),
+      ...(chain ? { onResponseId: (id: string) => chain.set(id) } : {}),
     });
     const parsed = parseDecision(text);
     return {

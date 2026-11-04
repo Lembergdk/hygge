@@ -110,9 +110,15 @@ export function selectTier(cfg: LLMConfig, ctx: TierContext) {
   return pick("spark", ctx.skillCoverage === "active" ? "active shared skill loaded" : "routine browsing decision");
 }
 
+/// Usage block, both shapes: chat completions (prompt/completion)
+/// and the Responses API (input/output). The client moved to the
+/// Responses API; the chat-completions fields stay so older gateway
+/// payloads and tests keep parsing.
 interface ChatUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
   total_tokens?: number;
   prompt_tokens_details?: { cached_tokens?: number };
   input_token_details?: { cached_tokens?: number };
@@ -133,17 +139,37 @@ export function genAiTextMessage(role: string, text: string, finishReason?: stri
 export function traceUsageAttributes(usage: ChatUsage | undefined) {
   const attrs: Record<string, number> = {};
   if (!usage) return attrs;
-  if (typeof usage.prompt_tokens === "number") attrs["gen_ai.usage.input_tokens"] = usage.prompt_tokens;
-  if (typeof usage.completion_tokens === "number") attrs["gen_ai.usage.output_tokens"] = usage.completion_tokens;
+  const input = usage.prompt_tokens ?? usage.input_tokens;
+  const output = usage.completion_tokens ?? usage.output_tokens;
+  if (typeof input === "number") attrs["gen_ai.usage.input_tokens"] = input;
+  if (typeof output === "number") attrs["gen_ai.usage.output_tokens"] = output;
   const cached = usage.prompt_tokens_details?.cached_tokens ?? usage.input_token_details?.cached_tokens;
   if (typeof cached === "number") attrs["gen_ai.usage.cache_read.input_tokens"] = cached;
   const reasoning = usage.completion_tokens_details?.reasoning_tokens ?? usage.output_token_details?.reasoning_tokens;
   if (typeof reasoning === "number") attrs["gen_ai.usage.reasoning.output_tokens"] = reasoning;
   const total = typeof usage.total_tokens === "number"
     ? usage.total_tokens
-    : (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+    : (input ?? 0) + (output ?? 0);
   if (total > 0) attrs["cloudflare.agents.usage.total_tokens"] = total;
   return attrs;
+}
+
+/// Text of a Responses API response: the message items' output_text
+/// parts, in order. Reasoning and other items carry no user-visible
+/// text and are skipped. A top-level `output_text` aggregate is the
+/// fallback for providers that supply one.
+export function extractResponsesText(data: any): string {
+  const parts: string[] = [];
+  if (Array.isArray(data?.output)) {
+    for (const item of data.output) {
+      if (item?.type !== "message") continue;
+      for (const part of (item?.content ?? [])) {
+        if (part?.type === "output_text" && typeof part?.text === "string") parts.push(part.text);
+      }
+    }
+  }
+  if (parts.length) return parts.join("");
+  return typeof data?.output_text === "string" ? data.output_text : "";
 }
 
 export class LLMClient {
@@ -206,7 +232,17 @@ export class LLMClient {
     if (logId) span.setAttribute("cloudflare.ai_gateway.log.id", logId.slice(0, 256));
   }
 
-  async complete({ model, system, user, conversationId, imageDataURL }: { model: string; system: string; user: string; conversationId?: string; imageDataURL?: string }): Promise<string> {
+  /// One model turn over the Responses API. `system` becomes
+  /// `instructions` and `user` becomes `input`; instructions do not
+  /// persist across turns, so callers resend them on every call.
+  /// `previousResponseId` chains this turn onto a prior response
+  /// in the same conversation — the server holds the history, so
+  /// chained callers send only the new turn instead of a transcript
+  /// blob. A 400 on a chained call means the chain outgrew the
+  /// model's window (the API never trims it): restart fresh once
+  /// rather than failing the turn, and report the fresh id through
+  /// `onResponseId` so the caller's chain store advances to it.
+  async complete({ model, system, user, conversationId, imageDataURL, previousResponseId, onResponseId }: { model: string; system: string; user: string; conversationId?: string; imageDataURL?: string; previousResponseId?: string; onResponseId?: (id: string) => void | Promise<void> }): Promise<string> {
     return withSpan(`chat ${model}`, this.chatAttrs(model, conversationId), async (span) => {
       this.payloadAttrs(span, system, user);
       if (imageDataURL && (!/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(imageDataURL) || imageDataURL.length > 5_400_000)) throw new Error("Invalid or oversized model image");
@@ -214,55 +250,68 @@ export class LLMClient {
       // Images never enter application traces or gateway body logs.
       if (imageDataURL) headers["cf-aig-collect-log-payload"] = "false";
       span.setAttribute("hygge.vision.attached", Boolean(imageDataURL));
-      const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: "system", content: system },
-            { role: "user", content: imageDataURL ? [{ type: "text", text: user }, { type: "image_url", image_url: { url: imageDataURL } }] : user },
-          ],
-        }),
+      const bodyFor = (prev: string | undefined) => JSON.stringify({
+        model,
+        instructions: system,
+        input: imageDataURL
+          ? [{ type: "input_text", text: user }, { type: "input_image", image_url: imageDataURL }]
+          : user,
+        ...(prev ? { previous_response_id: prev } : {}),
       });
+      const url = `${this.cfg.baseUrl.replace(/\/$/, "")}/responses`;
+      let res = await fetch(url, { method: "POST", headers, body: bodyFor(previousResponseId) });
+      if (!res.ok && res.status === 400 && previousResponseId) {
+        res = await fetch(url, { method: "POST", headers, body: bodyFor(undefined) });
+      }
       if (!res.ok) throw new Error(`LLM ${model} returned ${res.status}`);
       this.gatewayLogAttr(span, res);
       const data = (await res.json()) as {
         id?: string;
         model?: string;
-        choices?: { finish_reason?: string | null; message?: { content?: string } }[];
+        status?: string;
+        output?: unknown;
+        output_text?: unknown;
         usage?: ChatUsage;
       };
       this.usageAttrs(span, data.usage);
       this.responseAttrs(span, {
         id: data.id,
         model: data.model,
-        finishReason: data.choices?.[0]?.finish_reason,
+        finishReason: data.status ?? null,
       }, model);
-      const text = data.choices?.[0]?.message?.content ?? "";
-      this.payloadAttrs(span, system, user, text, data.choices?.[0]?.finish_reason);
+      const text = extractResponsesText(data);
+      this.payloadAttrs(span, system, user, text, data.status ?? null);
+      if (data.id && onResponseId) await onResponseId(data.id);
       return text;
     });
   }
 
+  /// Streaming variant of `complete` over the Responses API.
+  /// Only `response.output_text.delta` events carry user-visible
+  /// text; `response.completed` carries the id and usage, and
+  /// `response.created` the id early. All other event types (item
+  /// added/done, reasoning deltas, annotations) are ignored. The
+  /// same chained-400 rule as `complete` applies before the body
+  /// is read; a failure mid-stream propagates, it is not retried.
   async completeStream(
-    { model, system, user, conversationId }: { model: string; system: string; user: string; conversationId?: string },
+    { model, system, user, conversationId, previousResponseId, onResponseId }: { model: string; system: string; user: string; conversationId?: string; previousResponseId?: string; onResponseId?: (id: string) => void | Promise<void> },
     onDelta: (delta: string) => void,
   ): Promise<string> {
     return withSpan(`chat ${model}`, this.chatAttrs(model, conversationId), async (span) => {
     this.payloadAttrs(span, system, user);
-    const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: llmRequestHeaders(this.cfg, model),
-      body: JSON.stringify({
-        model,
-        stream: true,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-      }),
+    const headers = llmRequestHeaders(this.cfg, model);
+    const bodyFor = (prev: string | undefined) => JSON.stringify({
+      model,
+      instructions: system,
+      input: user,
+      stream: true,
+      ...(prev ? { previous_response_id: prev } : {}),
     });
+    const url = `${this.cfg.baseUrl.replace(/\/$/, "")}/responses`;
+    let res = await fetch(url, { method: "POST", headers, body: bodyFor(previousResponseId) });
+    if (!res.ok && res.status === 400 && previousResponseId) {
+      res = await fetch(url, { method: "POST", headers, body: bodyFor(undefined) });
+    }
     if (!res.ok) throw new Error(`LLM ${model} returned ${res.status}`);
     if (!res.body) throw new Error("LLM stream had no body");
     this.gatewayLogAttr(span, res);
@@ -284,29 +333,31 @@ export class LLMClient {
         if (!trimmed.startsWith("data:")) continue;
         const data = trimmed.slice(5).trim();
         if (data === "[DONE]") continue;
+        let event: any;
         try {
-          const chunk = JSON.parse(data) as {
-            id?: string;
-            model?: string;
-            choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
-            usage?: ChatUsage;
-          };
-          responseId ??= chunk.id;
-          responseModel ??= chunk.model;
-          finishReason ??= chunk.choices?.[0]?.finish_reason ?? undefined;
-          this.usageAttrs(span, chunk.usage);
-          const delta = chunk.choices?.[0]?.delta?.content ?? "";
-          if (delta) {
-            full += delta;
-            onDelta(delta);
-          }
+          event = JSON.parse(data);
         } catch {
           /* partial/keepalive lines are ignored */
+          continue;
+        }
+        if (event?.type === "response.output_text.delta" && typeof event.delta === "string" && event.delta) {
+          full += event.delta;
+          onDelta(event.delta);
+        } else if (event?.type === "response.created" && event.response?.id) {
+          responseId ??= event.response.id;
+        } else if (event?.type === "response.completed" && event.response) {
+          responseId ??= event.response.id;
+          responseModel ??= event.response.model;
+          finishReason ??= event.response.status ?? undefined;
+          this.usageAttrs(span, event.response.usage);
+        } else if (event?.type === "error") {
+          throw new Error(`LLM stream error: ${String(event.message ?? event.code ?? "unknown")}`);
         }
       }
     }
     this.responseAttrs(span, { id: responseId, model: responseModel, finishReason }, model);
     this.payloadAttrs(span, system, user, full, finishReason);
+    if (responseId && onResponseId) await onResponseId(responseId);
     return full;
     });
   }

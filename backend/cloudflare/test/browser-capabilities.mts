@@ -26,19 +26,21 @@ test('browser model gets bounded semantic input, last results and safe screensho
   assert.equal(input.imageDataURL, undefined, 'old snapshots do not implicitly enable vision');
 });
 
-test('LLM multimodal request uses image_url content and prevents gateway image-body logging', async () => {
+test('LLM multimodal request uses input_image content and prevents gateway image-body logging', async () => {
   const original = globalThis.fetch;
   const requests: any[] = [];
   globalThis.fetch = (async (_url: any, init: any) => {
-    requests.push(init); return Response.json({ choices: [{ message: { content: '{"action":"done"}' } }] });
+    requests.push(init);
+    return Response.json({ id: 'resp-1', model: 'm-fast', status: 'completed',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: '{"action":"done"}' }] }] });
   }) as any;
   try {
     const client = new LLMClient({ ...cfg, gatewayToken: 'test', gatewayCollectPayload: true });
     await client.complete({ model: cfg.modelStrong, system: 'system', user: 'page', imageDataURL: 'data:image/png;base64,aW1hZ2U=' });
-    assert.deepEqual(JSON.parse(requests[0].body).messages[1].content, [{ type: 'text', text: 'page' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } }]);
+    assert.deepEqual(JSON.parse(requests[0].body).input, [{ type: 'input_text', text: 'page' }, { type: 'input_image', image_url: 'data:image/png;base64,aW1hZ2U=' }]);
     assert.equal(requests[0].headers['cf-aig-collect-log-payload'], 'false');
     await client.complete({ model: cfg.modelFast, system: 'system', user: 'text only' });
-    assert.equal(JSON.parse(requests[1].body).messages[1].content, 'text only');
+    assert.equal(JSON.parse(requests[1].body).input, 'text only');
     await assert.rejects(client.complete({ model: cfg.modelFast, system: '', user: '', imageDataURL: 'https://arbitrary.example/private' }), /Invalid/);
     assert.equal(requests.length, 2);
   } finally { globalThis.fetch = original; }
