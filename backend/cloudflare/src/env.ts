@@ -49,10 +49,6 @@ export interface Env {
   /// (staging only; production keeps metadata + usage).
   HYGGE_TRACE_PAYLOADS?: string;
   HYGGE_MASTER_KEY?: string; // base64, 32 bytes
-  /// TEMPORARY (purge.ts): one-shot fleet-wipe authority. Set only
-  /// for minutes around the wipe run, then deleted; route is inert
-  /// (404) while unset. Removed with purge.ts afterwards.
-  HYGGE_PURGE_TOKEN?: string;
   HYGGE_DEV_TOKENS?: string; // staging only: JSON map token -> userId
   HYGGE_APPLE_BUNDLE_ID?: string;
   HYGGE_MAGIC_BASE_URL?: string; // public API origin magic links point at
