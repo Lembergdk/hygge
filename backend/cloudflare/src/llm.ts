@@ -315,6 +315,7 @@ export class LLMClient {
       span.setAttribute("hygge.vision.attached", Boolean(imageDataURL));
       const url = `${this.cfg.baseUrl.replace(/\/$/, "")}/responses`;
       const res = await fetch(url, {
+        signal: AbortSignal.timeout(120_000),
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -360,6 +361,7 @@ export class LLMClient {
     const headers = llmRequestHeaders(this.cfg, model);
     const url = `${this.cfg.baseUrl.replace(/\/$/, "")}/responses`;
     const res = await fetch(url, {
+        signal: AbortSignal.timeout(120_000),
       method: "POST",
       headers,
       body: JSON.stringify({

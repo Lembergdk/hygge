@@ -77,3 +77,10 @@ test("consumer ack decision: poison and completed ack, transient retries", () =>
   assert.equal(jobAckDecision(500), "retry");
   assert.equal(jobAckDecision(0), "retry", "no response at all retries");
 });
+
+test('latest delivery metadata distinguishes a replacement job even with an identical creation timestamp',async()=>{
+ const {latestMissionJob}=await import('../src/jobs.ts');const f=sqliteWorkspace();
+ enqueueMissionJob(f.storage,'task',NOW,'old');finishMissionJob(f.storage,'old','failed',LATER);
+ enqueueMissionJob(f.storage,'task',NOW,'new');assert.equal(latestMissionJob(f.storage,'task')?.jobId,'new');
+ assert.equal(getMissionJob(f.storage,'old')?.state,'failed');f.sqlite.close();
+});

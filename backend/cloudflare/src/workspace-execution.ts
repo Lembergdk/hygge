@@ -145,13 +145,26 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   });
   return {browser:bridge.browser,foundation,skills,runner,ensure,
     async saveDocument(path:string,revision:number,bytes:Uint8Array){
-      await ensure(); const ref=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_${revision}`;
-      await bridge.writeArtifact(ref,bytes); return save({task:{id:'document-save',kind:'discover',target_url:'https://invalid.example',status:'running'},runId:'document-save',reason:'pause',evidence:[],requiresBrowserFreeze:true});
+      await ensure();
+      return runner.withWorkspaceMutation('document-save',async lease=>{
+        const pin=crypto.randomUUID();lineagePins.set(pin,lease);
+        try{
+          const ref=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_${revision}`;
+          await bridge.writeArtifact(ref,bytes);
+          return await save({expectedLease:lease,task:{id:'document-save',kind:'discover',target_url:'https://invalid.example',status:'running'},runId:'document-save',reason:'pause',evidence:[],requiresBrowserFreeze:true});
+        }finally{lineagePins.delete(pin);}
+      });
     },
-    async eraseDocument(path:string){
-      await ensure();const prefix=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_`;
-      for(const ref of (await bridge.listArtifacts()).filter(ref=>ref.startsWith(prefix)))await bridge.writeArtifact(ref,new Uint8Array());
-      return save({task:{id:'document-delete',kind:'discover',target_url:'https://invalid.example',status:'running'},runId:'document-delete',reason:'pause',evidence:[],requiresBrowserFreeze:true});
+    async eraseDocument(path:string,throughRevision:number){
+      await ensure();
+      return runner.withWorkspaceMutation('document-delete',async lease=>{
+        const pin=crypto.randomUUID();lineagePins.set(pin,lease);
+        try{
+          const prefix=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_`;
+          await bridge.deleteDocumentArtifacts(prefix,throughRevision);
+          return await save({expectedLease:lease,task:{id:'document-delete',kind:'discover',target_url:'https://invalid.example',status:'running'},runId:'document-delete',reason:'pause',evidence:[],requiresBrowserFreeze:true});
+        }finally{lineagePins.delete(pin);}
+      });
     },
     /** Maintainer-only shared-library kill switch; secret-gated, never agent-callable. */
     async quarantineSkill(token:string,input:{operationId:string;skillId:string;reason:'privacy'|'unsafe_guidance'|'integrity'}){return skills.quarantine(token,input);},
@@ -175,7 +188,9 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     },
     /** Renew only while a user mission/live connection is active. Expiry never grants a replacement. */
     async run(task:any,mission:Parameters<typeof runner.run>[0]['mission'],resume=false) {
-      await ensure();let renewalError:unknown;
+      runner.waiting(task.id);
+      try{await ensure();}catch(error){runner.unavailable(task.id);throw error;}
+      let renewalError:unknown;
       const timer=setInterval(()=>{void ensure().catch(error=>{renewalError=error;});},15_000);
       try {
         const site=new URL(task.target_url).origin,outcome=outcomeForTaskKind(task.kind);

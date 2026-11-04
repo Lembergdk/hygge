@@ -1,6 +1,8 @@
+import { recordWorkspaceTaskOutcome } from './chat-task-outcomes.ts';
 import { ChatAgent } from './chat-agent.ts';
 import { ChatStore, sqlChatStorage, type ChatDocument } from './chat-store.ts';
 import { chatServices } from './chat-services.ts';
+import { latestMissionJob } from './jobs.ts';
 import { classifyBrowserFailure } from "./browser-failure.ts";
 import { help, applyHelpReply, mobileTask, canResumeWithInboxCode, reconcileEndedSession, rejectTaskHelp } from "./task-help.ts";
 import { bindWorkspaceOwner, workspaceMode } from './workspace-owner.ts';
@@ -426,7 +428,7 @@ export class UserSandbox extends DurableObject<Env> {
     return this.workspaceExecution ??= createWorkspaceExecution({
       owner:bindWorkspaceOwner(this.ctx.storage,this.userId,this.env.HYGGE_ENV,this.ctx.id.toString()),
       env:this.env,storage:this.ctx.storage,container:this.ctx.container!,
-      loadTask:id=>this.loadTask(id),projectTask:task=>this.saveTask(task),
+      loadTask:id=>this.loadTask(id),projectTask:task=>{this.saveTask(task);recordWorkspaceTaskOutcome(this.chatStore(),task);},
       denyFetcher:(this.ctx as any).exports?.OutboundDeny?.({props:{}}) as Fetcher,
     });
   }
@@ -514,6 +516,13 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   // ---- tasks ----------------------------------------------------
+
+  private executionView(task:any) {
+    const job=latestMissionJob(this.ctx.storage,task.id);
+    const progress=workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2'?this.workspace().runner.progress(task.id):null;
+    return {...task,execution:{jobId:job?.jobId??null,jobState:job?.state??null,attempts:job?.attempts??0,
+      ...(progress??{}),...(job?.state==='queued'?{phase:'queued',updatedAt:job.updatedAt}:{})}};
+  }
 
   private loadTask(id: string): any | null {
     const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks WHERE id = ?", id)] as Row[];
@@ -1296,10 +1305,20 @@ export class UserSandbox extends DurableObject<Env> {
     if (!jobId || !taskId) return json({ error: "jobId and taskId required" }, 400);
     const existing = getMissionJob(this.ctx.storage, jobId);
     if (!existing || existing.taskId !== taskId) return json({ error: "unknown job" }, 404);
+    if (existing.state === "done") return json({ ok:true,jobState:"done",duplicate:true });
+    const latest=latestMissionJob(this.ctx.storage,taskId);
+    if(latest&&latest.jobId!==jobId){
+      finishMissionJob(this.ctx.storage,jobId,"failed",new Date().toISOString(),"superseded delivery exhausted");
+      return json({ok:true,jobState:"failed",superseded:true});
+    }
+    const task = this.loadTask(taskId);
+    if (task && workspaceMode(this.env.HYGGE_WORKSPACE_MODE) === "retained-v2") {
+      // Canonical recovery is durable before the terminal queue acknowledgement.
+      this.workspace().runner.deliveryFailed(task,jobId);
+    }
     if (!isTerminalJobState(existing.state)) {
       finishMissionJob(this.ctx.storage, jobId, "failed", new Date().toISOString(), "delivery retries exhausted");
     }
-    const task = this.loadTask(taskId);
     if (task && workspaceMode(this.env.HYGGE_WORKSPACE_MODE) === "legacy"
         && ["approved", "running"].includes(String(task.status))
         && !this.activeMissions.has(task.id)) {
@@ -1954,7 +1973,7 @@ export class UserSandbox extends DurableObject<Env> {
     const services=chatServices({
       rows:entity=>state.list(entity), get:(entity,id)=>state.get(entity,id),
       put:(entity,id,data)=>{const before=entity==='profile'||entity==='sites'?this.reopenSnapshot(state):null;state.upsert(entity,id,data);if(before)this.applyCategoryReopen(before,state);},remove:(entity,id)=>{state.remove(entity,id);},
-      tasks:()=>[...this.ctx.storage.sql.exec('SELECT task FROM tasks ORDER BY created_at')].map(r=>JSON.parse(String(r.task))),
+      tasks:()=>[...this.ctx.storage.sql.exec('SELECT task FROM tasks ORDER BY created_at')].map(r=>this.executionView(JSON.parse(String(r.task)))),
       saveTask:task=>this.saveTask(task),enqueue:task=>this.enqueueOrRunMission(task),
       hints:domain=>[...this.ctx.storage.sql.exec('SELECT kind,hints,success_count,failure_count FROM memories WHERE domain=?',domain)].map(r=>({...r,hints:JSON.parse(String(r.hints))})),
       inbox:()=>[...this.ctx.storage.sql.exec("SELECT id,sender_domain,subject,summary,kind,created_at FROM email_summaries WHERE kind='other' ORDER BY created_at DESC LIMIT 30")],
@@ -1962,7 +1981,7 @@ export class UserSandbox extends DurableObject<Env> {
       credentialForDomain:domain=>{const r=[...this.ctx.storage.sql.exec('SELECT id FROM credentials WHERE domain=? LIMIT 1',domain)][0];return r?String(r.id):undefined;},
       plus:async()=>!!this.userId && (await activeTier(d1SubscriptionDb(this.env.DB),this.userId,new Date()))==='plus',
       mirror:async(doc:ChatDocument)=>{await this.workspace().saveDocument(`${doc.generation}/${doc.path}`,doc.revision,new TextEncoder().encode(doc.content));},
-      erase:async(doc:ChatDocument)=>{await this.workspace().eraseDocument(`${doc.generation}/${doc.path}`);},
+      erase:async(doc:ChatDocument)=>{await this.workspace().eraseDocument(`${doc.generation}/${doc.path}`,doc.revision);},
       deletedMessage:id=>Boolean(store.db.get(`deleted-message:${id}`)),
     });
     return new ChatAgent(store,new LLMClient(this.llmConfig('hygge-conversation')),services);
@@ -2437,7 +2456,7 @@ export class UserSandbox extends DurableObject<Env> {
           if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='legacy'
               && reconcileEndedSession(t, Boolean(t.session_id && browser.hasSession(t.session_id)),
               this.activeMissions.has(t.id) || this.browserResumes.has(t.id))) this.saveTask(t);
-          return { ...t, mobile_task: mobileTask(t) };
+          return { ...this.executionView(t), mobile_task: mobileTask(t) };
         }) });
       }
       if (request.method === "POST" && parts.join("/") === "skills/quarantine") {
