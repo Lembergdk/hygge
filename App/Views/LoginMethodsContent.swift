@@ -78,17 +78,20 @@ struct LoginMethodsContent: View {
         }
         .disabled(isWorking)
         .overlay(alignment: .topTrailing) { if isWorking { ProgressView() } }
-        .task {
-            await load()
-            if let token = store.pendingMagicToken {
-                store.pendingMagicToken = nil
-                await consumeLink(token)
-            }
+        .task { await load() }
+        // The shared "Check your email" page, as a sheet here
+        // (ContentView hosts it when settings isn't on screen).
+        .sheet(isPresented: Binding(
+            get: { store.magicLinkFlow?.purpose == .addEmail },
+            set: { if !$0 && store.magicLinkFlow?.phase != .working { store.magicLinkFlow = nil } })) {
+            MagicLinkWaitView().presentationDragIndicator(.visible)
         }
-        .onChange(of: store.pendingMagicToken) { _, token in
-            guard let token else { return }
-            store.pendingMagicToken = nil
-            Task { await consumeLink(token) }
+        .onChange(of: store.magicLinkFlow?.phase) { _, phase in
+            if phase == .done {
+                linkEmail = ""
+                message = "Email sign-in added."
+                Task { await load() }
+            }
         }
         .onDisappear { password = "" }
         .task(id: passwordConfirmation) {
@@ -202,23 +205,9 @@ struct LoginMethodsContent: View {
 
     private func sendLink(to email: String) async {
         isWorking = true
-        store.magicLinkError = nil
+        message = nil
         defer { isWorking = false }
-        do { message = try await store.backend.requestMagicLink(email: email) }
-        catch { message = AuthCopy.message(for: error) }
-    }
-
-    private func consumeLink(_ token: String) async {
-        isWorking = true
-        defer { isWorking = false }
-        do {
-            if let updated = try await store.backend.consumeMagicLink(token: token) {
-                methods = updated
-                linkEmail = ""
-                message = "Email sign-in added."
-                store.magicLinkError = nil
-            }
-        } catch { store.magicLinkError = AuthCopy.message(for: error) }
+        await store.beginMagicLink(purpose: .addEmail, email: email)
     }
 
     private func remove(_ method: LinkedLoginMethod) async {

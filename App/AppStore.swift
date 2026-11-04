@@ -284,9 +284,15 @@ final class AppStore {
 
     // MARK: - Identity
 
-    /// A magic-link token that arrived via a URL, waiting for the
-    /// sign-in step to consume it. Never persisted, never logged.
-    var pendingMagicToken: String?
+    /// The one emailed-link flow (MagicLinkFlow.swift). Tokens
+    /// themselves are never stored here — a tapped link is
+    /// consumed immediately, in place.
+    var magicLinkFlow: MagicLinkFlowState?
+    /// Onboarding answers handed over when the sign-up link was
+    /// sent, so consuming it anywhere (cold launch included) can
+    /// still finish onboarding with them. Cleared once imported.
+    var pendingOnboardingProfile: EarningsProfile?
+    var magicConsumeInFlight = false
     var passwordFlow: PasswordConfirmationState?
     var isShowingLogins = false
     var isShowingProfile = false
@@ -308,17 +314,18 @@ final class AppStore {
         if isSignedIn { UserDefaults.standard.set(true, forKey: Self.hasSignedInBeforeKey) }
     }
 
-    /// Universal-link and hygge:// entry: remember the token and
-    /// steer routing to the sign-in message, which consumes it.
+    /// Universal-link and hygge:// entry: consume the token in
+    /// place under the purpose that sent it. Deliberately does
+    /// NOT steer routing — swapping screens here once destroyed
+    /// an in-progress onboarding (and its answers) and restarted
+    /// the chat after a successful sign-up.
     func handleMagicURL(_ url: URL) -> Bool {
         guard let token = MagicLink.token(from: url) else { return false }
         if MagicLink.isPasswordConfirmation(url) {
             Task { await finishPasswordConfirmation(token: token) }
             return true
         }
-        pendingMagicToken = token
-        magicLinkError = nil
-        if !isSignedIn { wantsSignIn = true }
+        Task { await consumeMagicToken(token) }
         return true
     }
 
@@ -340,6 +347,7 @@ final class AppStore {
                 refreshAuthState()
                 wantsSignIn = false
                 wantsOnboarding = false
+                pendingOnboardingProfile = nil
             }
         }
         // Keep the sign-in view mounted until adoption finishes. In particular,
@@ -369,7 +377,7 @@ final class AppStore {
             if let url = storeURL { try? FileManager.default.removeItem(at: url) }
             writeCache()
         }
-        let answers = localProfile ?? profile
+        let answers = localProfile ?? pendingOnboardingProfile ?? profile
         let localComplete = answers.isComplete
         // The account probe is part of finishing: if it cannot run,
         // stay on the sign-in step with a clear message rather than
@@ -555,7 +563,8 @@ final class AppStore {
         isSignedIn = false
         isExistingAccount = false
         passwordFlow = nil
-        pendingMagicToken = nil
+        magicLinkFlow = nil
+        pendingOnboardingProfile = nil
         magicLinkError = nil
         wantsOnboarding = false
         // hasSignedInBefore now routes signed-out launches (this
