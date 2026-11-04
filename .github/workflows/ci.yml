@@ -72,6 +72,11 @@ jobs:
       - run: npm ci
       - name: Ensure password confirmation table
         run: npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --file migrations/0007_password_confirmations.sql
+      - name: Ensure mission queues
+        run: |
+          for q in hygge-missions-staging hygge-missions-staging-dlq; do
+            npx wrangler queues list | grep -qw "$q" || npx wrangler queues create "$q"
+          done
       - name: Deploy staging
         run: npx wrangler deploy -c wrangler.staging.jsonc
       - name: Health check
@@ -95,6 +100,11 @@ jobs:
       - run: npm ci
       - name: Ensure password confirmation table
         run: npx wrangler d1 execute hygge-production -c wrangler.production.jsonc --remote --file migrations/0007_password_confirmations.sql
+      - name: Ensure mission queues
+        run: |
+          for q in hygge-missions-production hygge-missions-production-dlq; do
+            npx wrangler queues list | grep -qw "$q" || npx wrangler queues create "$q"
+          done
       - name: Deploy production
         run: npx wrangler deploy -c wrangler.production.jsonc
       - name: Health check

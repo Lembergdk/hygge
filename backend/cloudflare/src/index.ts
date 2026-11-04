@@ -7,6 +7,7 @@ import { onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { runDateOf, slotForCron, sweepOrder } from "./scan.ts";
 import { handleEmailAddressRequest, handleEmailMessage } from "./email.ts";
 import { d1PushDb, handleDeviceTokenRequest } from "./push.ts";
+import { jobAckDecision, parseMissionJobMessage, type MissionJobMessage } from "./jobs.ts";
 
 export { UserSandbox } from "./user-sandbox.ts";
 
@@ -195,6 +196,10 @@ export default {
         browser: "browser-run",
         llm: env.HYGGE_LLM_API_KEY ? "live" : "simulated",
         models: { routine: env.HYGGE_LLM_MODEL_FAST, escalated: env.HYGGE_LLM_MODEL_STRONG },
+        // Durable mission execution mode (jobs.ts): "queued" when
+        // approved work is submitted to the mission queue,
+        // "inline" for the legacy request-driven fallback.
+        jobs: env.MISSION_QUEUE ? "queued" : "inline",
       });
     }
 
@@ -251,12 +256,51 @@ export default {
     // mail delivery into even their own inbox.
     forwarded.headers.delete("x-hygge-scheduled-sweep");
     forwarded.headers.delete("x-hygge-email-delivery");
+    forwarded.headers.delete("x-hygge-job-consumer");
     forwarded.headers.set("x-hygge-user-id", userId);
     return stub.fetch(forwarded);
   },
 
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(sweepScheduledScans(env, controller.cron, controller.scheduledTime));
+  },
+
+  // Durable mission queue (jobs.ts): each message names one job in
+  // one user's object. Delivery forwards the ids to that object,
+  // which claims and runs the mission; the ack/retry decision is
+  // the object's answer. Dead-letter deliveries take the same path
+  // to the object's close-out route, so an exhausted job ends
+  // visibly instead of vanishing. Per-user isolation is unchanged:
+  // the object name still comes from the user id, and the ids were
+  // minted inside that object at submission time.
+  async queue(batch: MessageBatch<MissionJobMessage>, env: Env): Promise<void> {
+    const deadLetter = batch.queue.endsWith("-dlq");
+    for (const message of batch.messages) {
+      const parsed = parseMissionJobMessage(message.body);
+      if (!parsed) {
+        console.log(`mission queue: dropping malformed message from ${batch.queue}`);
+        message.ack();
+        continue;
+      }
+      try {
+        const stub = sandboxFor(env, parsed.userId);
+        const response = await stub.fetch(new Request(
+          `https://hygge.internal/internal/jobs/${deadLetter ? "dead" : "run"}`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-hygge-user-id": parsed.userId,
+              "x-hygge-job-consumer": "1",
+            },
+            body: JSON.stringify({ jobId: parsed.jobId, taskId: parsed.taskId }),
+          }));
+        await response.body?.cancel().catch(() => {});
+        if (jobAckDecision(response.status) === "ack") message.ack();
+        else message.retry();
+      } catch {
+        message.retry(); // one delivery's failure never fails the batch
+      }
+    }
   },
 
   // Brief 04: Cloudflare Email Routing catch-all target. Receive

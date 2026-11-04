@@ -413,7 +413,7 @@ iOS build settings that matter: `HYGGE_REQUIRE_CLOUD` (`NO` in Debug, `YES` in R
 
 - **Site reliability varies.** Some sites prohibit automated access in their terms and actively detect bots, so expect per-site reliability to differ. Use Hygge only on sites and accounts where you are allowed to do so, and respect each site's terms.
 - **Scan sweep is sequential.** One cron invocation walks users one at a time (rotating the start for fairness). Sharding or per-user alarms is the documented follow-up if the fleet grows. Scan times are fixed UTC slots for now.
-- **Long missions are request-driven.** There is no durable background job queue guaranteeing execution across process termination; recovery and checkpoints are built around that reality.
+- **Mission execution is queued, not step-sliced.** Approved work runs from a durable job queue (see [docs/durable-jobs.md](docs/durable-jobs.md)): a mission still executes as one delivery inside the owner's object, so a process termination mid-mission is retried and resumes from the task's checkpoints rather than continuing mid-action. One-shot approvals are never replayed after an uncertain outcome.
 - **Local Chrome ≠ Browser Run acceptance.** Browser tests verify the CDP protocol locally; deployed-session behavior is validated on staging. Live third-party sign-in flows still need device acceptance per site.
 - **Architecture doc lag.** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the model correctly but still shows the retired local Node service in its diagram. This README reflects the current Cloudflare-only backend; the doc update is tracked with the code.
 

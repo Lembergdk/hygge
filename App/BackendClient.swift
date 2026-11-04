@@ -164,20 +164,49 @@ struct BackendClient {
     }
 
     func runTask(task: AgentTask) async throws -> BackendTaskResult {
-        do { return try await submitTask(task) }
+        let submitted: BackendTaskResult
+        do { submitted = try await submitTask(task) }
         catch {
             // A timeout or stale reply is not proof of failed execution. Read
             // the original task before offering any retry or repeating a write.
-            if let current = try? await setupTasks().first(where: { $0.id == task.id }),
-               current.backendTaskID != nil {
-                return BackendTaskResult(id: current.backendTaskID, help: current.help,
-                    status: current.status.rawValue, memory_id: current.memoryID?.uuidString,
-                    session_id: current.browserSessionID, extracted_items: nil,
-                    information_requests: current.informationRequests,
-                    browser_trace: current.browserTrace, log: current.log)
+            if let row = try? await setupTaskRows().first(where: { $0.task.id == task.id }),
+               row.task.backendTaskID != nil {
+                submitted = Self.result(from: row)
+            } else {
+                throw error
             }
-            throw error
         }
+        return await pollToResting(submitted, taskID: task.id)
+    }
+
+    private static func result(from row: (task: AgentTask, extractedItems: [String])) -> BackendTaskResult {
+        BackendTaskResult(id: row.task.backendTaskID, help: row.task.help,
+            status: row.task.status.rawValue, memory_id: row.task.memoryID?.uuidString,
+            session_id: row.task.browserSessionID,
+            extracted_items: row.extractedItems.isEmpty ? nil : row.extractedItems,
+            information_requests: row.task.informationRequests,
+            browser_trace: row.task.browserTrace, log: row.task.log)
+    }
+
+    /// Approved work now runs from the durable job queue (backend
+    /// jobs.ts): submission returns as soon as the job is recorded,
+    /// with the task still running. Poll the task list until it
+    /// rests so callers keep today's "await the outcome" shape,
+    /// while execution no longer depends on this connection. The
+    /// wait is capped; past it the running result stands and the
+    /// regular server pull merges the eventual outcome.
+    private func pollToResting(_ initial: BackendTaskResult, taskID: UUID) async -> BackendTaskResult {
+        var result = initial
+        var polls = 0
+        while result.status == "running" || result.status == "approved" {
+            polls += 1
+            if polls > 200 { break } // ~10 minutes at 3 s
+            try? await Task.sleep(for: .seconds(3))
+            guard let row = try? await setupTaskRows().first(where: { $0.task.id == taskID }),
+                  row.task.backendTaskID != nil else { continue }
+            result = Self.result(from: row)
+        }
+        return result
     }
 
     private func submitTask(_ task: AgentTask) async throws -> BackendTaskResult {
@@ -198,10 +227,20 @@ struct BackendClient {
     }
 
     func setupTasks() async throws -> [AgentTask] {
-        struct Row: Decodable { var mobile_task: AgentTask? }
+        try await setupTaskRows().map(\.task)
+    }
+
+    /// Task list with each task's extracted items alongside: the
+    /// items ride the backend task row, not the mobile task shape,
+    /// and a queued discovery's finds must survive whichever path
+    /// first observes its completion.
+    func setupTaskRows() async throws -> [(task: AgentTask, extractedItems: [String])] {
+        struct Row: Decodable { var mobile_task: AgentTask?; var extracted_items: [String]? }
         struct Response: Decodable { var tasks: [Row] }
         let response: Response = try await get("tasks")
-        return response.tasks.compactMap(\.mobile_task)
+        return response.tasks.compactMap { row in
+            row.mobile_task.map { (task: $0, extractedItems: row.extracted_items ?? []) }
+        }
     }
 
     func rejectTask(id: String, helpID: UUID? = nil) async throws {
