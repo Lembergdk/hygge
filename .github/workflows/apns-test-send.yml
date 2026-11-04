@@ -1,0 +1,38 @@
+name: APNs test send
+
+# Manual: Actions -> APNs test send -> Run workflow (pick env).
+# Sends ONE real alert to the newest registered device in that
+# environment's D1, using the same .p8 the workers use. The device
+# token is fetched and used inside the runner only (masked, never
+# printed); the log shows the APNs HTTP status/reason. This talks
+# to Apple directly — it proves key + token + delivery; the
+# worker's own trigger paths are covered by backend tests and by
+# push_log (see the APNs diagnostics workflow).
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Which environment's newest device gets the test
+        type: choice
+        options: [production, staging]
+        default: production
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/cloudflare
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      HYGGE_APNS_KEY_P8: ${{ secrets.HYGGE_APNS_KEY_P8 }}
+      APNS_ENV: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Send test push
+        run: node scripts/apns-test-send.mjs
