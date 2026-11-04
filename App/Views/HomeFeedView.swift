@@ -85,18 +85,9 @@ struct HomeFeedView: View {
                         Color.black.opacity(0.55).ignoresSafeArea().onTapGesture { closeFocus() }
                             .accessibilityLabel("Back to feed").accessibilityAddTraits(.isButton)
                         FeedFocusCard(close: { closeFocus() }) { focusedContent(focus) }
-                            // Height hugs the content up to the cap (the
-                            // detail scroll only engages past it); the
-                            // browser keeps its fixed tall card because
-                            // its viewport is flexible space. At
-                            // accessibility sizes vertical space is the
-                            // scarce resource, so the cap becomes
-                            // nearly the full screen.
-                            .frame(width: min(geometry.size.width - 32, 620),
-                                   height: focus.hugsContent ? nil
-                                       : (dynamicTypeSize.isAccessibilitySize
-                                          ? geometry.size.height * 0.92
-                                          : min(geometry.size.height * 0.92, focus.maximumHeight)))
+                            // Short cards keep their natural height; longer content
+                            // scrolls inside this viewport, including at large type.
+                            .frame(width: min(geometry.size.width - 32, 620))
                             .frame(maxHeight: dynamicTypeSize.isAccessibilitySize
                                        ? geometry.size.height * 0.92
                                        : min(geometry.size.height * 0.92, focus.maximumHeight))
@@ -754,6 +745,7 @@ struct HomeFeedView: View {
                 Text("Mail from \(mail.senderDomain)").font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .feedCardDismissRegion()
             Text("I filed this for now, and I'll keep filing this sender's mail. If it's work mail, tell me — I'll remember.")
                 .foregroundStyle(HyggeTheme.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -869,6 +861,7 @@ struct HomeFeedView: View {
         case .paused:
             FeedDetailContent {
                 Text("Hygge is paused").font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
+                    .feedCardDismissRegion()
                 Text("Searching, sending and booking will wait until you resume.").foregroundStyle(HyggeTheme.secondary)
                 FeedPrimaryButton(title: "Resume Hygge") { store.setPaused(false); closeFocus() }
             }

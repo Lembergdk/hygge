@@ -84,30 +84,38 @@ struct FeedDetailContent<Content: View, Footer: View>: View {
     @ViewBuilder var content: Content
     @ViewBuilder var footer: Footer
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) { content }
-                .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 24)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        // Scrolls (and bounces) only when content genuinely
-        // exceeds the viewport — SwiftUI accounts for the
-        // pinned footer inset itself. (A hand-rolled
-        // content-vs-visible measurement counted the footer as
-        // visible space and wrongly disabled scrolling at
-        // large type, stranding content below the fold.)
-        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
-        .background(HyggeTheme.card)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if ObjectIdentifier(Footer.self) != ObjectIdentifier(EmptyView.self) {
-                VStack(spacing: 2) { footer }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 12).padding(.bottom, 16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(HyggeTheme.card)
-                    .overlay(alignment: .top) {
-                        Rectangle().fill(HyggeTheme.hairline).frame(height: 1)
-                    }
+        ViewThatFits(in: .vertical) {
+            // Ask the complete body + footer for their natural height first.
+            // A flexible ScrollView alone would always consume the card's cap.
+            VStack(spacing: 0) {
+                detailBody
+                pinnedFooter
             }
+            .fixedSize(horizontal: false, vertical: true)
+
+            VStack(spacing: 0) {
+                ScrollView { detailBody }
+                    .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                pinnedFooter
+            }
+        }
+        .background(HyggeTheme.card)
+    }
+    private var detailBody: some View {
+        VStack(alignment: .leading, spacing: 24) { content }
+            .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    @ViewBuilder private var pinnedFooter: some View {
+        if ObjectIdentifier(Footer.self) != ObjectIdentifier(EmptyView.self) {
+            VStack(spacing: 2) { footer }
+                .padding(.horizontal, 24)
+                .padding(.top, 12).padding(.bottom, 16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(HyggeTheme.card)
+                .overlay(alignment: .top) {
+                    Rectangle().fill(HyggeTheme.hairline).frame(height: 1)
+                }
         }
     }
 }
