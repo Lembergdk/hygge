@@ -84,6 +84,7 @@ struct ConversationView: View {
                         }
                         .scrollDismissesKeyboard(.interactively)
                         .onAppear {
+                            store.markChatRead()
                             for task in store.chatHelpTasks { store.surfaceTaskHelp(taskID: task.id) }
                             if let id = store.conversationTaskID,
                                let entry = store.chatTranscript.last(where: { $0.taskID == id }) {
@@ -97,9 +98,11 @@ struct ConversationView: View {
                             }
                         }
                         .onChange(of: store.chatTranscript.count) { _, _ in
+                            store.markChatRead()
                             withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
                             if let id = store.chatTranscript.last?.taskID { prepareReply(to: id) }
                         }
+                        .onDisappear { store.markChatRead() }
                         .onChange(of: streamingText?.count ?? 0) { _, _ in
                             proxy.scrollTo("bottom", anchor: .bottom)
                         }

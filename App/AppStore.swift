@@ -101,6 +101,12 @@ final class AppStore {
     var proposals: [ProposedSite] = []
     var accountStates: [String: SiteAccountState] = [:]
     var chatTranscript: [ChatEntry] = []
+    /// When the user last actually read the thread, on this
+    /// device. Drives the flame badge — which must only promise
+    /// what opening the chat can resolve.
+    private(set) var chatLastReadAt: Date = UserDefaults.standard.object(forKey: "hygge.chatLastReadAt") as? Date ?? .distantPast {
+        didSet { UserDefaults.standard.set(chatLastReadAt, forKey: "hygge.chatLastReadAt") }
+    }
     var activityEvents: [ActivityEvent] = []
     var isPaused = false
     var beliefs = BeliefBook()
@@ -630,6 +636,11 @@ final class AppStore {
     func dismissProposal(proposalID: UUID) {
         guard let index = proposals.firstIndex(where: { $0.id == proposalID }) else { return }
         proposals[index].status = .dismissed
+        // A mail-born suggestion dismissed = also the answer for
+        // that sender: just file their mail, never re-suggest.
+        if let domain = proposals[index].sourceMailDomain, !domain.isEmpty {
+            Task { await decideEmailSender(domain: domain, choice: "file") }
+        }
         dismissedProposalID = proposalID
         recordFeedback(FeedbackEvent(subjectType: .siteProposal,
                                      subjectId: proposalID.uuidString.lowercased(),
@@ -1266,6 +1277,25 @@ final class AppStore {
     var needsYouCount: Int {
         tasks.filter { $0.status == .awaitingApproval || $0.needsChatHelp }.count
             + pendingEmailDecisions.count
+    }
+
+    /// What the flame badge may promise: only what tapping him
+    /// (opening the chat) can actually resolve — help waiting in
+    /// the thread, plus agent messages not yet read there. Feed
+    /// decisions and drafts live in the feed the user is already
+    /// looking at; counting them here strands the badge forever.
+    var chatBadgeCount: Int {
+        let waitingHelp = tasks.filter { $0.needsChatHelp }.count
+        let unread = chatTranscript.filter {
+            $0.fromAgent && $0.taskID == nil && $0.createdAt > chatLastReadAt
+        }.count
+        return waitingHelp + unread
+    }
+
+    func markChatRead() {
+        if let latest = chatTranscript.map(\.createdAt).max(), latest > chatLastReadAt {
+            chatLastReadAt = latest
+        }
     }
 
     /// Value waiting in pending drafts, for the calm header number.
@@ -2030,6 +2060,9 @@ final class AppStore {
         proposals = snapshot.proposals
         accountStates = snapshot.accountStates
         chatTranscript = snapshot.chatTranscript
+        // First run after the badge learned to count unread: treat
+        // history as read rather than badging the whole past.
+        if UserDefaults.standard.object(forKey: "hygge.chatLastReadAt") == nil { markChatRead() }
         activityEvents = snapshot.activityEvents
         isPaused = snapshot.isPaused
         beliefs = snapshot.beliefs

@@ -15,11 +15,15 @@ public struct ProposedSite: Codable, Identifiable, Equatable, Sendable {
     public var dataShared: String
     public var verification: String
     public var status: ProposalStatus
+    /// When this suggestion was born from filed mail: the sender
+    /// domain it came from, so dismissing the place can also
+    /// answer that sender ("just file it") in one motion.
+    public var sourceMailDomain: String?
     public init(id: UUID = UUID(), siteID: String, rationale: String,
                 payPattern: String = "Paid per job, rates vary by listing",
                 dataShared: String = "Your name, photo and profile text",
                 verification: String = "Email confirmation; a bot check may need you",
-                status: ProposalStatus = .proposed) {
+                status: ProposalStatus = .proposed, sourceMailDomain: String? = nil) {
         self.id = id
         self.siteID = siteID
         self.rationale = rationale
@@ -27,6 +31,7 @@ public struct ProposedSite: Codable, Identifiable, Equatable, Sendable {
         self.dataShared = dataShared
         self.verification = verification
         self.status = status
+        self.sourceMailDomain = sourceMailDomain
     }
 }
 
