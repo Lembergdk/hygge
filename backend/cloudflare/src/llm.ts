@@ -165,6 +165,26 @@ function llmHttpError(model: string, status: number): Error & { status: number }
   return err;
 }
 
+/// Native function calls from a Responses API response: the
+/// `function_call` output items, in order. `arguments` is the parsed
+/// JSON object, or null when the model emitted unparseable
+/// arguments — callers drop those like any other invalid call.
+/// Message, reasoning, and other items are not calls.
+export interface ResponsesFunctionCall { name: string; arguments: any }
+
+export function extractResponsesCalls(data: { output?: unknown }): ResponsesFunctionCall[] {
+  const output = Array.isArray(data.output) ? data.output : [];
+  const calls: ResponsesFunctionCall[] = [];
+  for (const item of output) {
+    const it = item as any;
+    if (it?.type !== "function_call" || typeof it?.name !== "string") continue;
+    let args: any = null;
+    try { args = typeof it.arguments === "string" ? JSON.parse(it.arguments) : it.arguments; } catch { args = null; }
+    calls.push({ name: it.name, arguments: args });
+  }
+  return calls;
+}
+
 /// Text of a Responses API response: the message items' output_text
 /// parts, in order. Reasoning and other items carry no user-visible
 /// text and are skipped. A top-level `output_text` aggregate is the
@@ -296,6 +316,62 @@ export class LLMClient {
       this.payloadAttrs(span, system, user, text, data.status ?? null);
       if (data.id && onResponseId) await onResponseId(data.id);
       return text;
+    });
+  }
+
+  /// One model turn with native function calling over the Responses
+  /// API. `tools` become `type: "function"` definitions in the
+  /// request; the model answers with `function_call` output items
+  /// (plus optional message text). Returns both: text (usually
+  /// empty for an intent call) and the calls with parsed arguments.
+  /// `tool_choice` stays at the default (auto): the model calls when
+  /// there is something to do and stays silent otherwise — forcing
+  /// a call would invent actions for pure conversation. Chaining,
+  /// compaction, and the response id work exactly like `complete`
+  /// (same chain, same onResponseId). This is one-shot calling: the
+  /// caller validates and executes the calls; results are not fed
+  /// back for further turns here.
+  async completeWithTools({ model, system, user, conversationId, previousResponseId, onResponseId, tools }: {
+    model: string; system: string; user: string; conversationId?: string;
+    previousResponseId?: string; onResponseId?: (id: string) => void | Promise<void>;
+    tools: Array<{ name: string; description: string; parameters: any }>;
+  }): Promise<{ text: string; calls: ResponsesFunctionCall[] }> {
+    return withSpan(`chat ${model}`, this.chatAttrs(model, conversationId), async (span) => {
+      this.payloadAttrs(span, system, user);
+      const headers = llmRequestHeaders(this.cfg, model);
+      const url = `${this.cfg.baseUrl.replace(/\/$/, "")}/responses`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model,
+          instructions: system,
+          input: user,
+          tools: tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters })),
+          ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
+        }),
+      });
+      if (!res.ok) throw llmHttpError(model, res.status);
+      this.gatewayLogAttr(span, res);
+      const data = (await res.json()) as {
+        id?: string;
+        model?: string;
+        status?: string;
+        output?: unknown;
+        output_text?: unknown;
+        usage?: ChatUsage;
+      };
+      this.usageAttrs(span, data.usage);
+      this.responseAttrs(span, {
+        id: data.id,
+        model: data.model,
+        finishReason: data.status ?? null,
+      }, model);
+      const text = extractResponsesText(data);
+      const calls = extractResponsesCalls(data);
+      this.payloadAttrs(span, system, user, text, data.status ?? null);
+      if (data.id && onResponseId) await onResponseId(data.id);
+      return { text, calls };
     });
   }
 

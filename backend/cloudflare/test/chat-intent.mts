@@ -59,10 +59,14 @@ test("validateChatIntentList validates each tool call, drops the bad ones", () =
 });
 
 test("chatIntent returns the model's validated action", async () => {
+  const seen: any[] = [];
   const client = {
     configured: true,
     cfg: { modelFast: "m-fast" },
-    complete: async () => JSON.stringify({ action: { kind: "email", mailId: "mail-1", act: true } }),
+    completeWithTools: async (args: any) => {
+      seen.push(args);
+      return { text: "", calls: [{ name: "email", arguments: { mailId: "mail-1", act: true } }] };
+    },
   };
   const out = await chatIntent({
     client,
@@ -70,19 +74,50 @@ test("chatIntent returns the model's validated action", async () => {
     context: CONTEXT,
   });
   assert.deepEqual(out.action, { kind: "email", mailId: "mail-1", act: true });
+  assert.deepEqual(out.actions, [{ kind: "email", mailId: "mail-1", act: true }]);
   assert.equal(out.simulated, false);
+  assert.deepEqual(seen[0].tools.map((t: any) => t.name), ["scan", "join", "stop", "add", "email", "floor", "pause", "resume", "approve", "book", "explainDropped"]);
 });
 
-test("chatIntent falls back to conversation when unconfigured or unparseable", async () => {
-  const unconfigured = { configured: false, cfg: { modelFast: "m-fast" }, complete: async () => "{}" };
+test("chatIntent falls back to conversation when unconfigured or when the model calls nothing", async () => {
+  const unconfigured = { configured: false, cfg: { modelFast: "m-fast" }, completeWithTools: async () => ({ text: "", calls: [] }) };
   const off = await chatIntent({ client: unconfigured, transcript: [], context: CONTEXT });
   assert.equal(off.action, null);
   assert.equal(off.simulated, true);
 
-  const junk = { configured: true, cfg: { modelFast: "m-fast" }, complete: async () => "sure thing!" };
+  const junk = { configured: true, cfg: { modelFast: "m-fast" }, completeWithTools: async () => ({ text: "sure thing!", calls: [] }) };
   const bad = await chatIntent({ client: junk, transcript: [], context: CONTEXT });
   assert.equal(bad.action, null);
+  assert.equal(bad.actions, null);
   assert.equal(bad.simulated, false);
+});
+
+test("chatIntent passes native tool definitions and drops invalid calls", async () => {
+  const seen: any[] = [];
+  const client = {
+    configured: true,
+    cfg: { modelFast: "m-fast" },
+    completeWithTools: async (args: any) => {
+      seen.push(args);
+      if (args.onResponseId) await args.onResponseId("resp-1");
+      return { text: "", calls: [
+        { name: "scan", arguments: { siteId: "rover" } },
+        { name: "join", arguments: { siteId: "no-such-site" } },
+        { name: "add", arguments: { domain: "not a domain" } },
+        { name: "floor", arguments: { amount: 5000 } },
+        { name: "wire_money", arguments: {} },
+        { name: "add", arguments: null },
+      ] };
+    },
+  };
+  const out = await chatIntent({
+    client,
+    transcript: [{ fromAgent: false, text: "scan Rover and whatever" }],
+    context: CONTEXT,
+  });
+  assert.deepEqual(out.actions, [{ kind: "scan", siteId: "rover" }]);
+  assert.deepEqual(out.action, { kind: "scan", siteId: "rover" });
+  assert.equal(seen[0].tools.length, 11);
 });
 
 test("chatIntent on a live chain sends only the latest message, chained, and saves the new id", async () => {
@@ -91,10 +126,10 @@ test("chatIntent on a live chain sends only the latest message, chained, and sav
   const client = {
     configured: true,
     cfg: { modelFast: "m-fast" },
-    complete: async (args: any) => {
+    completeWithTools: async (args: any) => {
       seen.push(args);
       if (args.onResponseId) await args.onResponseId("resp-new");
-      return JSON.stringify({ actions: [{ kind: "add", domain: "contra.com" }] });
+      return { text: "", calls: [{ name: "add", arguments: { domain: "contra.com" } }] };
     },
   };
   const chain = {
@@ -127,10 +162,10 @@ test("chatIntent bootstraps a missing chain with the legacy blob, then saves the
   const client = {
     configured: true,
     cfg: { modelFast: "m-fast" },
-    complete: async (args: any) => {
+    completeWithTools: async (args: any) => {
       seen.push(args);
       if (args.onResponseId) await args.onResponseId("resp-1");
-      return JSON.stringify({ actions: [{ kind: "scan", siteId: "rover" }] });
+      return { text: "", calls: [{ name: "scan", arguments: { siteId: "rover" } }] };
     },
   };
   const chain = {
@@ -172,12 +207,13 @@ function summarizingClient(seen: any[], summaries: string[]) {
     cfg: { modelFast: "m-fast" },
     complete: async (args: any) => {
       seen.push(args);
-      if (String(args.system).includes("Summarize a chat thread")) {
-        summaries.push(args.user);
-        return "Summary: user discussed Rover; assistant offered Contra and Toptal, awaiting reply.";
-      }
+      summaries.push(args.user);
+      return "Summary: user discussed Rover; assistant offered Contra and Toptal, awaiting reply.";
+    },
+    completeWithTools: async (args: any) => {
+      seen.push(args);
       if (args.onResponseId) await args.onResponseId("resp-new");
-      return JSON.stringify({ actions: [{ kind: "add", domain: "contra.com" }] });
+      return { text: "", calls: [{ name: "add", arguments: { domain: "contra.com" } }] };
     },
   };
 }
@@ -223,16 +259,17 @@ test("chatIntent on a chained 400 compacts and retries WITH the summary", async 
     cfg: { modelFast: "m-fast" },
     complete: async (args: any) => {
       seen.push(args);
-      if (String(args.system).includes("Summarize a chat thread")) {
-        return "Summary: assistant offered Contra and Toptal, awaiting reply.";
-      }
+      return "Summary: assistant offered Contra and Toptal, awaiting reply.";
+    },
+    completeWithTools: async (args: any) => {
+      seen.push(args);
       if (args.previousResponseId === "resp-prev") {
         const err = new Error("LLM m-fast returned 400") as any;
         err.status = 400;
         throw err;
       }
       if (args.onResponseId) await args.onResponseId("resp-retry");
-      return JSON.stringify({ actions: [{ kind: "add", domain: "contra.com" }] });
+      return { text: "", calls: [{ name: "add", arguments: { domain: "contra.com" } }] };
     },
   };
   const out = await chatIntent({ client, transcript, context: CONTEXT, chain });
@@ -253,7 +290,7 @@ test("chatIntent never restarts fresh without a summary: an uncompactable 400 pr
   const client = {
     configured: true,
     cfg: { modelFast: "m-fast" },
-    complete: async () => {
+    completeWithTools: async () => {
       calls++;
       const err = new Error("LLM m-fast returned 400") as any;
       err.status = 400;
@@ -283,14 +320,14 @@ test("chatIntent survives a proactive summarizer failure: live chain, turn succe
   const client = {
     configured: true,
     cfg: { modelFast: "m-fast" },
-    complete: async (args: any) => {
+    complete: async () => {
+      summarizerCalls++;
+      throw new Error("summarizer down");
+    },
+    completeWithTools: async (args: any) => {
       seen.push(args);
-      if (String(args.system).includes("Summarize a chat thread")) {
-        summarizerCalls++;
-        throw new Error("summarizer down");
-      }
       if (args.onResponseId) await args.onResponseId("resp-new");
-      return JSON.stringify({ actions: [{ kind: "add", domain: "contra.com" }] });
+      return { text: "", calls: [{ name: "add", arguments: { domain: "contra.com" } }] };
     },
   };
   const out = await chatIntent({ client, transcript, context: CONTEXT, chain });
@@ -315,12 +352,12 @@ test("chatIntent caps summarizer input on a giant thread: most recent turns only
     configured: true,
     cfg: { modelFast: "m-fast" },
     complete: async (args: any) => {
-      if (String(args.system).includes("Summarize a chat thread")) {
-        summarizerInput = args.user;
-        return "Summary: long thread condensed.";
-      }
+      summarizerInput = args.user;
+      return "Summary: long thread condensed.";
+    },
+    completeWithTools: async (args: any) => {
       if (args.onResponseId) await args.onResponseId("resp-new");
-      return JSON.stringify({ actions: [{ kind: "add", domain: "contra.com" }] });
+      return { text: "", calls: [{ name: "add", arguments: { domain: "contra.com" } }] };
     },
   };
   const out = await chatIntent({ client, transcript, context: CONTEXT, chain });

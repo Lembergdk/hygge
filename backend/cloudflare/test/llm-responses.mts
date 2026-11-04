@@ -154,3 +154,60 @@ test("extractResponsesText skips reasoning items, joins message parts, falls bac
   assert.equal(extractResponsesText({ output_text: "aggregate" }), "aggregate");
   assert.equal(extractResponsesText({ output: [] }), "");
 });
+
+test("completeWithTools passes function definitions and parses function_call items", async () => {
+  const originalFetch = globalThis.fetch;
+  const seen: Array<{ url: string; body: any }> = [];
+  let reported: string | undefined;
+  globalThis.fetch = (async (url: any, init: any) => {
+    seen.push({ url: String(url), body: JSON.parse(String(init.body)) });
+    return jsonResponse({
+      id: "resp-t1", model: "m-fast", status: "completed",
+      output: [
+        { type: "message", content: [{ type: "output_text", text: "done" }] },
+        { type: "function_call", call_id: "call-1", name: "add", arguments: "{\"domain\":\"contra.com\"}" },
+        { type: "function_call", call_id: "call-2", name: "scan", arguments: "{\"siteId\":\"rover\"}" },
+        { type: "reasoning", content: [] },
+      ],
+      usage: { input_tokens: 11, output_tokens: 7 },
+    });
+  }) as any;
+  try {
+    const out = await client().completeWithTools({
+      model: "m-fast", system: "s", user: "u", previousResponseId: "resp-prev",
+      tools: [
+        { name: "add", description: "Track a site.", parameters: { type: "object", properties: { domain: { type: "string" } }, required: ["domain"] } },
+        { name: "scan", description: "Search a site.", parameters: { type: "object", properties: { siteId: { type: "string" } }, required: ["siteId"] } },
+      ],
+      onResponseId: async (id) => { reported = id; },
+    });
+    assert.equal(out.text, "done");
+    assert.deepEqual(out.calls, [
+      { name: "add", arguments: { domain: "contra.com" } },
+      { name: "scan", arguments: { siteId: "rover" } },
+    ]);
+    assert.equal(seen[0].body.previous_response_id, "resp-prev");
+    assert.deepEqual(seen[0].body.tools, [
+      { type: "function", name: "add", description: "Track a site.", parameters: { type: "object", properties: { domain: { type: "string" } }, required: ["domain"] } },
+      { type: "function", name: "scan", description: "Search a site.", parameters: { type: "object", properties: { siteId: { type: "string" } }, required: ["siteId"] } },
+    ]);
+    assert.equal(reported, "resp-t1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("completeWithTools nulls unparseable function arguments", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => jsonResponse({
+    id: "resp-t2", model: "m-fast", status: "completed",
+    output: [{ type: "function_call", call_id: "call-1", name: "add", arguments: "{bad json" }],
+    usage: { input_tokens: 1, output_tokens: 1 },
+  })) as any;
+  try {
+    const out = await client().completeWithTools({ model: "m-fast", system: "s", user: "u", tools: [] });
+    assert.deepEqual(out.calls, [{ name: "add", arguments: null }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

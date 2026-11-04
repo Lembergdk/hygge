@@ -245,7 +245,9 @@ async function compactChatThread(o: { client: any; model: string; chain: any; tr
 }
 
 /// One chained chat turn (o: { client, chain, transcript, model,
-/// system, contextNote, legacyUser, conversationId?, onDelta? }).
+/// system, contextNote, legacyUser, conversationId?, onDelta?,
+/// tools? }). With tools, the call goes through completeWithTools
+/// and returns { text, calls }; otherwise it returns plain text.
 /// `system` is the base prompt; `contextNote` is the per-turn context
 /// suffix (sites/inbox/focus, or objective/step/profile) appended to
 /// instructions whenever history comes from the chain or a summary;
@@ -293,6 +295,10 @@ async function callChainedModel(o: any): Promise<string> {
     const args: any = { model: o.model, system: sys, conversationId: o.conversationId, user: usr,
       ...(prevId ? { previousResponseId: prevId } : {}),
       ...(saveId ? { onResponseId: saveId } : {}) };
+    // Native tools imply a non-streaming call returning { text,
+    // calls }; anything else returns plain text as before. The
+    // intent call is the only tools caller, and it never streams.
+    if (o.tools) return o.client.completeWithTools({ ...args, tools: o.tools });
     return o.onDelta ? o.client.completeStream(args, o.onDelta) : o.client.complete(args);
   };
   try {
@@ -353,7 +359,7 @@ async function onboardingMessageInner({ client, step = "welcome", transcript = [
     const text = await callChainedModel({
       client, chain, transcript,
       model: client.cfg.modelFast, system: SYSTEM,
-      contextNote: `\n\nContext for this turn (JSON): ${JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary })} — earlier turns of this conversation are available as history; the input is the latest user message. Prior assistant turns shaped like {"actions":[...]} are internal action decisions, not messages you sent the user — never quote, repeat, or continue them as prose.`,
+      contextNote: `\n\nContext for this turn (JSON): ${JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary })} — earlier turns of this conversation are available as history; the input is the latest user message. Prior assistant turns may include function calls (tool calls) — those are internal action decisions, not messages you sent the user — never quote, repeat, or continue them as prose.`,
       legacyUser, conversationId,
     });
     const parsed = parseDecision(text) as any;
@@ -467,7 +473,7 @@ async function onboardingMessageStreamInner({ client, step = "welcome", transcri
     const full = await callChainedModel({
       client, chain, transcript,
       model: client.cfg.modelFast, system: SYSTEM,
-      contextNote: `\n\nContext for this turn (JSON): ${JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary })} — earlier turns of this conversation are available as history; the input is the latest user message. Prior assistant turns shaped like {"actions":[...]} are internal action decisions, not messages you sent the user — never quote, repeat, or continue them as prose.`,
+      contextNote: `\n\nContext for this turn (JSON): ${JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary })} — earlier turns of this conversation are available as history; the input is the latest user message. Prior assistant turns may include function calls (tool calls) — those are internal action decisions, not messages you sent the user — never quote, repeat, or continue them as prose.`,
       legacyUser, conversationId,
       onDelta: (delta: string) => {
         const out = extractor.push(delta);
@@ -565,24 +571,45 @@ function validateOneAction(action: any, context: any): ChatIntentAction | null {
   }
 }
 
+/// Native function definitions for the chat agent's tools, passed to
+/// the Responses API — not described in prose. Names and shapes
+/// mirror validateChatIntentList exactly, so the existing validator
+/// is the single gate: a call runs only if it validates (siteId in
+/// context, well-formed domain, amount in range, mailId in inbox),
+/// and at most five calls per message run.
+const siteIdParams = (description: string) => ({
+  type: "object",
+  properties: { siteId: { type: "string", description } },
+  required: ["siteId"], additionalProperties: false,
+});
+const noParams = { type: "object", properties: {}, required: [], additionalProperties: false };
+
+const CHAT_TOOLS = [
+  { name: "scan", description: "Look for work on a tracked site: start a read-only search now.", parameters: siteIdParams("Id of a tracked site, from context.") },
+  { name: "join", description: "Start tracking a proposed site (add or re-add it).", parameters: siteIdParams("Id of a proposed site, from context.") },
+  { name: "stop", description: "Stop watching a tracked site.", parameters: siteIdParams("Id of a tracked site, from context.") },
+  { name: "add", description: "Track a brand-new site by its address.", parameters: { type: "object", properties: { domain: { type: "string", description: "Site address or domain, e.g. contra.com — from candidates when named there, else the address as you know it." } }, required: ["domain"], additionalProperties: false } },
+  { name: "email", description: "Read the inbox, or act on one mail.", parameters: { type: "object", properties: { mailId: { type: "string", description: "Id of an inbox mail, from context; omit for the inbox in general." }, act: { type: "boolean", description: "True when the user wants something DONE about the mail, false when asking what it says." } }, required: [], additionalProperties: false } },
+  { name: "floor", description: "Change the hourly rate floor.", parameters: { type: "object", properties: { amount: { type: "number", description: "New hourly rate floor." } }, required: ["amount"], additionalProperties: false } },
+  { name: "pause", description: "Pause scanning.", parameters: noParams },
+  { name: "resume", description: "Resume scanning.", parameters: noParams },
+  { name: "approve", description: "Approve the waiting draft (sends in the user's name).", parameters: noParams },
+  { name: "book", description: "Book the waiting booking.", parameters: noParams },
+  { name: "explainDropped", description: "Explain what was skipped in search.", parameters: noParams },
+];
+
 const INTENT_SYSTEM = [
   "You are Hygge's action layer: you have tools, and you decide what to do with them.",
   "context.focus, when present, is the exact feed card the latest message is about —",
   "\"this\", \"it\", and \"that one\" refer to it; prefer its ids over any other referent.",
   "Reason freely about what the user wants — phrasing is free, there are no magic words,",
-  "and there is no limit of one: do everything they asked for, in an order that makes sense.",
+  "and there is no limit of one: do everything they asked for, in an order that makes sense,",
+  "with at most five tool calls per message.",
   "Reason about referents from the conversation (\"it\", \"that forward\", \"the Rover one\")",
   "and about intent in your own judgment — phrasing is free, there are no magic words.",
-  "Reply ONLY with JSON: {\"actions\": [ ... ] } or {\"action\": {...} } for a single call, or null/empty when",
-  "nothing should be done (conversation, questions the context cannot act on, stated preferences,",
-  "anything negated like \"don't scan Rover\", anything you are genuinely unsure is an instruction).",
-  "Tools: {\"kind\":\"scan\"|\"join\"|\"stop\",\"siteId\":<id from context>} (look for work on a tracked site /",
-  "add or re-add it / stop watching it), {\"kind\":\"add\",\"domain\":<site address — from candidates",
-  "when named there, else the address as you know it>} (track a brand-new site),",
-  "{\"kind\":\"email\",\"mailId\":<id from inbox or null for the inbox in general>,\"act\":<true when they",
-  "want something DONE about it, false when asking what it says>}, {\"kind\":\"floor\",\"amount\":<number>},",
-  "{\"kind\":\"pause\"|\"resume\"|\"approve\"|\"book\"|\"explainDropped\"} (approve/book = the waiting draft",
-  "or booking; explainDropped = asking what was skipped in search).",
+  "Make no tool call when nothing should be done (conversation, questions the context cannot",
+  "act on, stated preferences, anything negated like \"don't scan Rover\", anything you are",
+  "genuinely unsure is an instruction).",
   "context.candidates lists sites you may offer or the user may confirm — prefer a candidate's domain",
   "when they name it. A confirmation (\"both\", \"yes, add them\", \"all three\") becomes one tool call per site.",
   "Use ONLY ids present in the context; for \"add\", any well-formed domain is fine.",
@@ -606,16 +633,24 @@ export async function chatIntent(args: any): Promise<{ action: ChatIntentAction 
       profile: profileSubset,
       conversation: capTranscriptText(transcript),
     });
-    const text = await callChainedModel({
+    const result = await callChainedModel({
       client, chain, transcript,
       model: client.cfg.modelFast, system: INTENT_SYSTEM,
       contextNote: `\n\nContext for this turn (JSON): ${JSON.stringify({ context, profile: profileSubset })}`,
       legacyUser, conversationId: args.conversationId,
+      tools: CHAT_TOOLS,
     });
-    const parsed = parseDecision(text);
+    // Native calls map straight onto the existing validator: a call
+    // is { kind, ...arguments }, and the validator drops anything
+    // invalid (unknown site, bad domain, out-of-range amount, unknown
+    // mail) and caps at five — the same gate the JSON path had. A
+    // single validated call still fills `action` for old clients;
+    // several carry `action: null`, as multi responses always did.
+    const parsed = { actions: (Array.isArray((result as any)?.calls) ? (result as any).calls : []).map((c: any) => ({ kind: c?.name, ...(c?.arguments ?? {}) })) };
+    const actions = validateChatIntentList(parsed, context);
     return {
-      action: validateChatIntent(parsed, context),
-      actions: validateChatIntentList(parsed, context),
+      action: actions?.length === 1 ? actions[0] : null,
+      actions,
       simulated: false,
     };
   } catch {
