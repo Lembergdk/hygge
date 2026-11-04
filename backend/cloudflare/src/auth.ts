@@ -771,7 +771,8 @@ export function magicLandingHtml(rawToken: string, passwordConfirmation = false)
     '<meta name="referrer" content="no-referrer">',
     '<meta name="color-scheme" content="light dark">',
     "<title>Sign in to Hygge</title>",
-    '<style>body{font-family:system-ui,sans-serif;text-align:center;margin:0;padding:64px 24px;background:#281e18;color:#f5e8d1}main{max-width:420px;margin:auto}h1{font-size:30px}p{line-height:1.6;color:#c3b39d}a{display:inline-block;padding:14px 28px;border-radius:999px;background:#a1cbb2;color:#281e18;text-decoration:none;font-weight:600}</style></head>',
+    // Warm Nordic tokens, matching the app's "Check your email" page.
+    '<style>body{font-family:ui-rounded,system-ui,sans-serif;text-align:center;margin:0;padding:64px 24px;background:#faf6ef;color:#2b2320}main{max-width:420px;margin:auto}h1{font-size:30px}p{line-height:1.6;color:#7a6a61}a{display:inline-block;padding:14px 28px;border-radius:999px;background:#c93a26;color:#ffffff;text-decoration:none;font-weight:600}@media (prefers-color-scheme:dark){body{background:#251c15;color:#f4ead9}p{color:#bdae9c}a{background:#db573d}}</style></head>',
     "<body><main>",
     canOpen ? '<h1 id="title">Opening Hygge…</h1>' : '<h1>This link doesn’t look right</h1>',
     canOpen ? '<p id="help">Your sign-in will finish in the app.</p>' : '<p>Ask for a new sign-in link in Hygge.</p>',

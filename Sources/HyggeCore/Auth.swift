@@ -71,6 +71,75 @@ public enum MagicLink {
     public static func isMagicLink(_ url: URL) -> Bool { token(from: url) != nil }
 }
 
+/// Why an emailed link was sent. One page serves all four; only
+/// the purpose sentence and the ending differ.
+public enum MagicLinkPurpose: Equatable {
+    case signUp
+    case signIn
+    case addEmail
+    case password
+}
+
+/// Shared words and rules for the one "Check your email" page.
+/// Pure so every surface (onboarding cover, log-in page, settings
+/// sheet) shows the identical page instead of drifting captions.
+public enum MagicLinkPageCopy {
+    public static let resendCooldownSeconds = 30
+
+    /// A tapped link is consumed in place under the purpose that
+    /// sent it — never re-routed (re-routing mid-sign-up destroyed
+    /// the onboarding conversation). With no flow on screen (cold
+    /// launch from the tap), a live session means the link adds
+    /// email sign-in; no session means a plain sign-in.
+    public static func arrivalPurpose(isSignedIn: Bool, activePurpose: MagicLinkPurpose?) -> MagicLinkPurpose {
+        if let activePurpose { return activePurpose }
+        return isSignedIn ? .addEmail : .signIn
+    }
+
+    public static func sentSentence(_ purpose: MagicLinkPurpose) -> String {
+        purpose == .password ? "We sent a confirmation email to" : "We sent a sign-in link to"
+    }
+
+    public static func tapSentence(_ purpose: MagicLinkPurpose) -> String {
+        let action: String
+        switch purpose {
+        case .signUp: action = "finish signing up"
+        case .signIn: action = "sign in"
+        case .addEmail: action = "add email sign-in"
+        case .password: action = "save your new password"
+        }
+        return "Tap the link in that email to \(action). It works for 15 minutes."
+    }
+
+    public static func workingText(_ purpose: MagicLinkPurpose) -> String {
+        switch purpose {
+        case .signUp, .signIn: return "Signing you in…"
+        case .addEmail: return "Adding email sign-in…"
+        case .password: return "Saving your password…"
+        }
+    }
+
+    /// Only settings scenarios end on a Done screen (there is a
+    /// screen to return to). Sign-in success goes straight Home.
+    public static func doneTitle(_ purpose: MagicLinkPurpose) -> String? {
+        switch purpose {
+        case .signUp, .signIn: return nil
+        case .addEmail: return "Email sign-in added"
+        case .password: return "Password saved"
+        }
+    }
+
+    public static func resendSecondsRemaining(sentAt: Date, now: Date) -> Int {
+        let elapsed = Int(now.timeIntervalSince(sentAt).rounded(.down))
+        return max(0, resendCooldownSeconds - elapsed)
+    }
+
+    public static func resendLabel(secondsRemaining: Int) -> String {
+        guard secondsRemaining > 0 else { return "Resend email" }
+        return String(format: "Resend in 0:%02d", secondsRemaining)
+    }
+}
+
 /// One linked way into an account, as the backend reports it. Carries
 /// no secret material (no token material, no Apple subject id).
 public struct LinkedLoginMethod: Codable, Identifiable, Equatable {

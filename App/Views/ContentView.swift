@@ -25,6 +25,21 @@ struct ContentView: View {
                                         set: { if !$0 { store.passwordFlow = nil } })) {
                 PasswordConfirmationView().presentationDragIndicator(.visible)
             }
+            // The one "Check your email" page: a cover for sign
+            // up / log in (whatever is underneath — onboarding
+            // chat included — stays mounted and intact), a sheet
+            // when adding email sign-in away from settings.
+            .fullScreenCover(isPresented: Binding(
+                get: { guard let flow = store.magicLinkFlow else { return false }
+                       return flow.purpose == .signUp || flow.purpose == .signIn },
+                set: { if !$0 && store.magicLinkFlow?.phase != .working { store.magicLinkFlow = nil } })) {
+                MagicLinkWaitView()
+            }
+            .sheet(isPresented: Binding(
+                get: { store.magicLinkFlow?.purpose == .addEmail && !store.isShowingLogins && !store.isShowingProfile },
+                set: { if !$0 && store.magicLinkFlow?.phase != .working { store.magicLinkFlow = nil } })) {
+                MagicLinkWaitView().presentationDragIndicator(.visible)
+            }
     }
 
     @ViewBuilder private var routedContent: some View {

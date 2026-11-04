@@ -136,11 +136,6 @@ struct SignInCard: View {
         }
         .disabled(isWorking)
         .onDisappear { password = "" }
-        .onChange(of: store.pendingMagicToken) { _, token in
-            guard let token else { return }
-            store.pendingMagicToken = nil
-            Task { await consume(token) }
-        }
         .task {
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--settings-preview") {
@@ -148,11 +143,6 @@ struct SignInCard: View {
                 usesPassword = UserDefaults.standard.bool(forKey: "loginPreviewPassword")
             }
             #endif
-            // A link tapped before this card appeared (cold launch).
-            if let token = store.pendingMagicToken {
-                store.pendingMagicToken = nil
-                await consume(token)
-            }
         }
     }
 
@@ -172,26 +162,12 @@ struct SignInCard: View {
     private func sendLink() async {
         isWorking = true
         message = nil
-        store.magicLinkError = nil
         defer { isWorking = false }
-        do {
-            message = try await store.backend.requestMagicLink(email: email)
-        } catch {
-            message = AuthCopy.message(for: error)
-        }
-    }
-
-    private func consume(_ token: String) async {
-        isWorking = true
-        defer { isWorking = false }
-        do {
-            try await store.backend.consumeMagicLink(token: token)
-            await store.finishSignIn(localProfile: localProfile)
-            onSignedIn()
-        } catch {
-            store.magicLinkError = AuthCopy.message(for: error)
-            message = nil
-        }
+        // Opens the shared "Check your email" page (store-driven);
+        // the tapped link is consumed there, in place.
+        await store.beginMagicLink(
+            purpose: isReturningLogin ? .signIn : .signUp,
+            email: email, localProfile: localProfile)
     }
 
     private func handleApple(_ result: Result<ASAuthorization, Error>) {
