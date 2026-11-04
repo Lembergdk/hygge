@@ -34,22 +34,23 @@ action itself. Afterwards, runs are distilled into per-domain **site memory**
 smarter, never more scripted.
 
 ```
-iPhone (SwiftUI)                Agent service (Node)                 Cloud browser
-─────────────────               ─────────────────────                ─────────────
-Onboarding → earnings profile   Tasks API (approval gate)            Cloudflare Browser Run
-Opportunity feed + matching     Site memory (JSON store)  ←→   (isolated Chrome per
-Approvals (edit drafts)         Credential vault (AES-256-GCM)       session, via CDP wss)
-Interactive browser view        Browser worker (CDP)                 or local Playwright
-Applications + calendar         Session manager (takeover)           or simulated (dev)
+iPhone (SwiftUI)          Cloudflare Worker + per-user Durable Object     Browser
+─────────────────         ─────────────────────────────────────────────     ─────────────
+Onboarding → profile      Router: auth, push, email, scan sweep, queue    Retained-workspace
+Opportunity feed          consumer → owned Durable Object only            container Chromium
+Approvals (edit drafts)   UserSandbox: tasks + approval gate, vault,  ←→  (V2, per user, via
+Interactive browser view  site memory, learning ranker, mission ledger    signed RPC) — or
+Applications + calendar   D1 control plane · R2 workspace checkpoints     Browser Run on the
+                          Mission jobs: Cloudflare Queue → owner object   legacy path
 ```
 
 ## Cloud browser
 
-- Production worker: **Cloudflare Browser Run** over CDP —
-  `wss://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/browser-rendering/devtools/browser?keep_alive=600000`
-  with a Bearer API token, driven via Playwright `connectOverCDP`
-  (`HYGGE_BROWSER=cloudflare`, needs `CF_ACCOUNT_ID`, `CF_API_TOKEN`,
-  `npm i playwright-core`). Each session is an isolated sandbox browser.
+- Deployed mode is **retained workspace V2**: Chromium runs in the
+  user's own container, driven over signed owner RPC
+  (`workspace-container.ts`), with the full profile checkpointed to
+  R2. Cloudflare Browser Run over CDP remains the legacy browser
+  implementation in the same codebase (`browser.ts`).
 - **Interactive**: the app renders the session snapshot (screenshot + element
   list) and can send actions (`click`, `type`, `navigate`) or flip
   human/agent control. The agent gets a bounded attempt window at
@@ -98,17 +99,19 @@ Per the product decision, logins are stored **server-side** so the agent can
 sign in unattended within approved tasks:
 
 - AES-256-GCM at rest, random nonce per credential, domain+username as
-  authenticated data. Master key from `HYGGE_VAULT_KEY` — in production
-  this must come from a KMS/HSM or secret manager, not an env file on disk.
+  authenticated data, under a per-user data key wrapped by the
+  `HYGGE_MASTER_KEY` environment secret (the wrapped copy also
+  lives in D1 `user_keys` as recovery backup).
 - Secrets leave the vault only inside `vault.use()`, called by the browser
   worker to fill a login form. No endpoint returns a secret; the app holds
   only `CredentialRef {id, domain, username}` — a type that cannot carry one.
   Tests prove the secret appears in neither the vault file nor any response.
 - The agent references `credential.secret` placeholders; substitution
   happens in the worker, so secrets never reach prompts, drafts, or logs.
-- Production hardening still required: user authn/z on every endpoint
-  (optional bearer token exists: `HYGGE_API_TOKEN`), per-user keys, KMS
-  key rotation, an audit log of every vault use, and TLS in transit.
+- Sessions are server-issued (Sign in with Apple, magic links,
+  optional passwords); the user id on every route comes from the
+  verified credential, never from request data. KMS key rotation
+  and a dedicated vault-use audit log remain future hardening.
 
 ## Multi-tenancy & privacy invariants
 
@@ -140,10 +143,9 @@ isolation is enforced there:
    constrained to the approved goal; anything state-changing needs the user's
    approval, and secrets are vault-placeholders the model can't exfiltrate.
 
-Note: the current local prototype is single-tenant (one Node process, one
-vault file, no user auth). These invariants land with the production
-Worker + Durable Object + D1 build; the prototype must never be exposed to
-multiple users as-is.
+These invariants are implemented in the deployed Worker + per-user
+Durable Object + D1 architecture described above; the retired local
+Node prototype no longer exists in this repository.
 
 ## Guardrails that did not change
 
