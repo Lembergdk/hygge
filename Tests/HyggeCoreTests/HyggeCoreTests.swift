@@ -571,6 +571,27 @@ final class HyggeCoreTests: XCTestCase {
         XCTAssertTrue(OnboardingStep.firstMessage.contains("enjoy"))
     }
 
+    func testWhenStepAsksForCalendarAndNotificationsTogether() {
+        // One step, one message, two optional permissions — so a
+        // new user is actually asked about notifications during
+        // onboarding instead of never meeting the question.
+        let prompt = OnboardingStep.when.prompt.lowercased()
+        XCTAssertTrue(prompt.contains("calendar"))
+        XCTAssertTrue(prompt.contains("notification"))
+        XCTAssertTrue(prompt.contains("optional") || prompt.contains("without"))
+    }
+
+    func testPermissionReplyNamesExactlyWhatWasGranted() {
+        XCTAssertEqual(OnboardingStep.permissionReply(calendar: true, notifications: true),
+                       "Calendar and notifications allowed")
+        XCTAssertEqual(OnboardingStep.permissionReply(calendar: true, notifications: false),
+                       "Calendar allowed")
+        XCTAssertEqual(OnboardingStep.permissionReply(calendar: nil, notifications: true),
+                       "Notifications allowed")
+        XCTAssertEqual(OnboardingStep.permissionReply(calendar: false, notifications: nil), "Not now")
+        XCTAssertEqual(OnboardingStep.permissionReply(calendar: nil, notifications: nil), "Not now")
+    }
+
     func testPasswordConfirmationAdoptsChangedOrUnknownAccount() {
         XCTAssertTrue(AccountSessionTransition.requiresAdoption(wasSignedIn: false, previousUserID: nil, nextUserID: "a"))
         XCTAssertTrue(AccountSessionTransition.requiresAdoption(wasSignedIn: true, previousUserID: "expired-account", nextUserID: "b"))

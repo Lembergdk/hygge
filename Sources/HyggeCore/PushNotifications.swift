@@ -63,12 +63,14 @@ public enum DeviceTokenEncoding {
     }
 }
 
-/// The one permission ask (Brief 07): an inline primer appears
-/// only after the first thing worth telling the user about exists,
-/// only while the system answer is still undecided, and only once.
-/// After a "not now" or a system denial it never shows again —
-/// turning notifications back on is a Settings visit from the
-/// profile hub, never another in-app ask.
+/// The one permission ask (Brief 07): onboarding asks alongside
+/// calendar, with the reason stated first. This primer is only
+/// the second chance for people who skipped that undecided — it
+/// appears only after the first thing worth telling the user
+/// about exists, only while the system answer is still
+/// undecided, and only once. After an answer either place it
+/// never shows again — turning notifications back on is a
+/// Settings visit from the profile hub, never another in-app ask.
 public enum NotificationAuthorizationKind: Equatable, Sendable {
     case notDetermined
     case authorized
