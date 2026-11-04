@@ -1,3 +1,5 @@
+import { readEmailHistory } from "./email-history.ts";
+import { EmailOwnerAddresses, normalizeOwnEmail } from "./email-owner-addresses.ts";
 import { recordWorkspaceTaskOutcome } from './chat-task-outcomes.ts';
 import { ChatAgent } from './chat-agent.ts';
 import { ChatStore, sqlChatStorage, type ChatDocument } from './chat-store.ts';
@@ -27,7 +29,7 @@ import {
   type SharedSkill, type SkillCandidate, type SkillOutcome,
 } from "./skills.ts";
 import {
-  attachEmailToTasks, parseOwnerEmailCommand, takeFreshCode, addressForUser, d1EmailAddressDb,
+  attachEmailToTasks, parseOwnerEmailCommand, takeFreshCode, accountEmailAddresses, senderEmailOf, addressForUser, d1EmailAddressDb,
   type InboundEmailDelivery,
 } from "./email.ts";
 import {
@@ -174,7 +176,8 @@ export class UserSandbox extends DurableObject<Env> {
       -- never touches this table, and vice versa.
       -- Brief 04 receive-only email. Codes are sealed with this
       -- user's DEK, expire in 30 minutes, and are deleted on first
-      -- consumption; summaries hold no code and no full body.
+      -- consumption; summaries hold no code. Ordinary original bodies
+      -- are sealed separately and fetched only by the authenticated user.
       CREATE TABLE IF NOT EXISTS email_codes (
         id TEXT PRIMARY KEY, sender_domain TEXT NOT NULL,
         iv TEXT NOT NULL, ciphertext TEXT NOT NULL,
@@ -193,6 +196,9 @@ export class UserSandbox extends DurableObject<Env> {
       );
       -- The user's remembered answer per sender domain, so unknown
       -- senders are only ever asked about once.
+      CREATE TABLE IF NOT EXISTS email_originals (
+        message_id TEXT PRIMARY KEY, iv TEXT NOT NULL, ciphertext TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS email_sender_rules (
         sender_domain TEXT PRIMARY KEY, choice TEXT NOT NULL,
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -217,9 +223,12 @@ export class UserSandbox extends DurableObject<Env> {
       ["site_id", "TEXT"],
       ["content_hash", "TEXT"],
       ["jobs", "TEXT NOT NULL DEFAULT '[]'"],
+      ["title", "TEXT"], ["sender_email", "TEXT"], ["marked_me", "INTEGER NOT NULL DEFAULT 0"],
     ] as const) {
       if (!summaryColumns.has(name)) ctx.storage.sql.exec(`ALTER TABLE email_summaries ADD COLUMN ${name} ${def}`);
     }
+    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS idx_email_history ON email_summaries(created_at DESC, id DESC)");
+    new EmailOwnerAddresses(ctx.storage.sql).ensure();
     // Brief 01: per-user state tables (feed items, messages, profile,
     // sites, opportunities, applications, proposals, account states,
     // journal events, beliefs, search evidence). tasks/credentials/
@@ -400,7 +409,7 @@ export class UserSandbox extends DurableObject<Env> {
       await this.ctx.storage.put('wrappedDek', backup.wrapped);
       return recovered;
     }
-    const encrypted = ['credentials', 'email_codes'].some(table => Number(([...this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`)] as Row[])[0]?.n) > 0)
+    const encrypted = ['credentials', 'email_codes', 'email_originals'].some(table => Number(([...this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`)] as Row[])[0]?.n) > 0)
       || Number(([...this.ctx.storage.sql.exec('SELECT COUNT(*) AS n FROM session_profiles WHERE has_profile=1')] as Row[])[0]?.n) > 0;
     if (encrypted) throw new Error('MISSING_ORIGINAL_ENCRYPTION_KEY');
     const dek = await vault.generateDEK();
@@ -912,6 +921,9 @@ export class UserSandbox extends DurableObject<Env> {
   private async handleEmailInbound(delivery: InboundEmailDelivery) {
     this.pruneExpiredEmailCodes();
     const s = delivery.summary;
+    const verifiedAddress = await new EmailOwnerAddresses(this.ctx.storage.sql).verify(
+      delivery.triage?.senderEmail ?? "", delivery.triage?.senderAuthenticated === true, s.subject);
+    if (verifiedAddress) return { filed: false, kind: delivery.kind, outcome: "address_verified" };
     // One mail, one event: a re-forward (or any re-delivery) of
     // content already filed changes nothing — no second summary,
     // journal entry, proposal, or push.
@@ -946,16 +958,22 @@ export class UserSandbox extends DurableObject<Env> {
     const chatAsk = evaluated && !siteCandidate && triage.relation === "unknown" && delivery.kind === "other"
       && (mentionsWorkOrMessage || readingJobs.length > 0);
     const finalDecision = siteCandidate ? "proposed" : chatAsk ? "chat" : triage.decision;
+    const original = delivery.kind === "other" && delivery.original
+      ? await vault.seal(await this.dek(), JSON.stringify(delivery.original), `email-original:${summaryId}`) : null;
+    this.ctx.storage.transactionSync(() => {
     this.ctx.storage.sql.exec(
-      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, content_hash, jobs)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, content_hash, jobs, title, sender_email)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       summaryId, s.sender, s.senderDomain, s.subject, s.date, s.kind,
       s.summary, JSON.stringify(s.actionableItems), JSON.stringify(s.attachments),
       triage.relation, finalDecision, JSON.stringify(highlightLabels),
       triage.relation === "site" ? (triage.site?.siteID ?? null) : null,
       delivery.contentHash ?? null,
-      JSON.stringify(readingJobs),
+      JSON.stringify(readingJobs), s.title ?? null, delivery.triage?.senderEmail ?? null,
     );
+      if (original) this.ctx.storage.sql.exec(
+        "INSERT INTO email_originals (message_id, iv, ciphertext) VALUES (?, ?, ?)", summaryId, original.iv, original.ciphertext);
+    });
     if (delivery.code) {
       const blob = await vault.seal(await this.dek(), delivery.code, this.emailCodeAAD(s.senderDomain));
       this.ctx.storage.sql.exec(
@@ -2145,15 +2163,67 @@ export class UserSandbox extends DurableObject<Env> {
         }
         return this.deadMissionJob(body);
       }
+      if (parts[0] === "email" && parts[1] === "addresses") {
+        const addresses = new EmailOwnerAddresses(this.ctx.storage.sql);
+        const account = await accountEmailAddresses(this.env.DB, this.userId!);
+        if (request.method === "GET") {
+          return json({ addresses: [...account.map(address => ({ address, verified: true, source: "account" })),
+            ...addresses.list().filter(r => !account.includes(r.address))] });
+        }
+        if (request.method === "POST" && parts.length === 2) {
+          const address = normalizeOwnEmail(body?.address);
+          if (!address) return json({ error: "Enter a valid email address." }, 400);
+          if (account.includes(address)) return json({ address, verified: true, source: "account" });
+          try { return json(await addresses.add(address), 201); }
+          catch (e) { return json({ error: (e as Error).message }, 400); }
+        }
+        if (request.method === "DELETE" && parts.length === 2) {
+          const address = normalizeOwnEmail(url.searchParams.get("address"));
+          if (!address || account.includes(address)) return json({ error: "Account addresses are managed in your login settings." }, 400);
+          addresses.remove(address);
+          return json({ removed: true });
+        }
+      }
+      if (parts[0] === "email" && parts[1] === "messages" && parts.length === 4) {
+        const id = decodeURIComponent(parts[2]);
+        const mail = [...this.ctx.storage.sql.exec("SELECT id, sender, sender_email, kind FROM email_summaries WHERE id = ?", id)][0] as Row | undefined;
+        if (!mail) return json({ error: "Email not found." }, 404);
+        if (request.method === "GET" && parts[3] === "original") {
+          const sealed = [...this.ctx.storage.sql.exec("SELECT iv, ciphertext FROM email_originals WHERE message_id = ?", id)][0] as { iv: string; ciphertext: string } | undefined;
+          const response = json({ original: sealed ? JSON.parse(await vault.open(await this.dek(), sealed, `email-original:${id}`)) : null });
+          response.headers.set("Cache-Control", "no-store");
+          return response;
+        }
+        if (request.method === "POST" && parts[3] === "me") {
+          const historical = String(mail.sender ?? "").includes("[code]") ? "" : senderEmailOf(String(mail.sender ?? ""));
+          const address = normalizeOwnEmail(mail.sender_email ?? historical);
+          if (body?.marked === false) {
+            this.ctx.storage.sql.exec("UPDATE email_summaries SET marked_me = 0 WHERE id = ?", id);
+            return json({ marked: false });
+          }
+          if (!address) {
+            this.ctx.storage.sql.exec("UPDATE email_summaries SET marked_me = 1 WHERE id = ?", id);
+            return json({ marked: true, ownerAddress: null });
+          }
+          const account = await accountEmailAddresses(this.env.DB, this.userId!);
+          let ownerAddress;
+          try { ownerAddress = account.includes(address) ? { address, verified: true, source: "account" } : await new EmailOwnerAddresses(this.ctx.storage.sql).add(address); }
+          catch (e) { return json({ error: (e as Error).message }, 400); }
+          this.ctx.storage.sql.exec("UPDATE email_summaries SET marked_me = 1 WHERE id = ?", id);
+          return json({ marked: true, ownerAddress });
+        }
+      }
       if (request.method === "GET" && parts.join("/") === "email/messages") {
-        const rows = [...this.ctx.storage.sql.exec(
-          "SELECT id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, created_at, jobs FROM email_summaries ORDER BY created_at DESC LIMIT 100",
-        )] as Row[];
+        let history;
+        try { history = readEmailHistory(this.ctx.storage.sql, url.searchParams.get("cursor")); }
+        catch { return json({ error: "Invalid history cursor." }, 400); }
         const ruleRows = [...this.ctx.storage.sql.exec(
           "SELECT sender_domain, choice FROM email_sender_rules")] as Row[];
         return json({
           senderRules: ruleRows.map((r) => ({ senderDomain: r.sender_domain, choice: r.choice })),
-          messages: rows.map((r) => ({
+          nextCursor: history.nextCursor,
+          messages: history.page.map((r) => ({
+            title: r.title ?? null, senderEmail: r.sender_email ?? null, markedAsMe: !!r.marked_me, hasOriginal: !!r.has_original,
             id: r.id, sender: r.sender, senderDomain: r.sender_domain,
             subject: r.subject, date: r.mail_date, kind: r.kind,
             summary: r.summary,

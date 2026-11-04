@@ -9,6 +9,7 @@ struct SettingsPreviewHost: View {
     @AppStorage("settingsPreviewScreen") private var screen = "main"
     var body: some View {
         if ProcessInfo.processInfo.arguments.contains("--flame-render-check") { FlameRenderCheckView() }
+        else if ProcessInfo.processInfo.arguments.contains("--email-feed-preview") { EmailFeedPreviewHost() }
         else if ProcessInfo.processInfo.arguments.contains("--plan-preview") { PlanPreviewHost() }
         else if ProcessInfo.processInfo.arguments.contains("--feed-preview") { FeedPreviewHost() }
         else if ProcessInfo.processInfo.arguments.contains("--browser-preview") { BrowserPreviewHost() }
@@ -57,6 +58,10 @@ struct SettingsPreviewHost: View {
             if let site = store.sites.first { ApprovedSiteDetailView(site: site) }
         case "site-login": CredentialSaveSheet(siteName: "Upwork", domain: "upwork.com")
         case "email": SettingsEmailView()
+        case "email-history": EmailHistoryView()
+        case "email-preferences": EmailPreferencesView()
+        case "email-original": EmailOriginalPreviewHost()
+        case "email-summary": EmailOriginalPreviewHost(showOriginal: false)
         case "permissions": SettingsPermissionsView()
         case "flamelab": FlameLabView()
         default: ProfileHubView()
@@ -85,5 +90,38 @@ struct SettingsPreviewHost: View {
         print("APPROVED_SITES_FAILURE_CHECKS_PASSED: credential, session, disconnect credential failure, disconnect session failure, retained notes")
     }
 
+}
+private struct EmailOriginalPreviewHost: View {
+    var showOriginal = true
+    @Environment(AppStore.self) private var store
+    var body: some View {
+        Group {
+            if let mail = store.filedEmailSummaries.first {
+                if showOriginal { OriginalEmailDetailView(mail: mail) }
+                else { FiledEmailDetailView(mail: mail) }
+            }
+            else { ProgressView("Loading fixture…") }
+        }.task { await store.refreshHyggeEmail() }
+    }
+}
+private struct EmailFeedPreviewHost: View {
+    @Environment(AppStore.self) private var store
+    @State private var ready = false
+    var body: some View {
+        Group {
+            if ready { HomeFeedView() }
+            else { ProgressView("Loading fixture…") }
+        }.task {
+            await store.refreshHyggeEmail()
+            store.tasks = []; store.opportunities = []; store.applications = []; store.proposals = []
+            store.isPaused = false; store.archivedFeedIDs = []; store.visitMarker = .distantPast
+            store.notificationPrimerVisible = false
+            store.activityEvents = store.filedEmailSummaries.compactMap { mail in
+                guard let id = UUID(uuidString: mail.id) else { return nil }
+                return ActivityEvent(id: id, kind: .filedEmail, sentence: "Filed mail: \(mail.subject)", siteID: mail.siteID)
+            }
+            ready = true
+        }
+    }
 }
 #endif

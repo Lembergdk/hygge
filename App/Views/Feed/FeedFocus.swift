@@ -14,7 +14,7 @@ enum FeedFocus: Identifiable {
     var maximumHeight: CGFloat {
         switch self {
         case .paused: return 320
-        case .event: return 560
+        case .event(let event): return event.kind == .filedEmail ? 720 : 560
         case .proposal: return 600
         case .opportunity, .task: return 680
         case .browser: return 780
@@ -27,6 +27,7 @@ enum FeedFocus: Identifiable {
     var hugsContent: Bool {
         switch self {
         case .browser: return false
+        case .event: return true
         default: return true
         }
     }
@@ -57,7 +58,7 @@ struct FeedFocusCard<Content: View>: View {
                     .frame(width: 38, height: 5)
                     .padding(.top, 8)
             }
-            .frame(width: 160, height: 32)
+            .frame(width: 160, height: 44)
             .contentShape(Rectangle())
             .highPriorityGesture(
                 DragGesture(minimumDistance: 4)

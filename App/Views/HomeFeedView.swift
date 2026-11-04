@@ -729,7 +729,15 @@ struct HomeFeedView: View {
             }.padding(.top, 8)
         }
     }
-    private func eventCard(_ event: ActivityEvent) -> some View {
+    @ViewBuilder private func eventCard(_ event: ActivityEvent) -> some View {
+        if event.kind == .filedEmail, let mail = store.filedEmailSummaries.first(where: { $0.id.lowercased() == event.id.uuidString.lowercased() }) {
+            SwipeFeedCard(id: eventKey(event), openCardID: $openCardID,
+                          open: { openCardID = nil; openFocus(.event(event)) },
+                          chat: { chatAbout(ChatContextRef(kind: "mail", id: mail.id, title: mail.displayTitle, subtitle: mail.senderAddress, siteID: mail.siteID, siteDomain: mail.senderDomain)) },
+                          dismiss: { archive(eventKey(event)) }) { EmailFeedCard(mail: mail) }
+                .matchedGeometryEffect(id: eventKey(event), in: focusAnimation, isSource: focus?.id != eventKey(event))
+                .opacity(focus?.id == eventKey(event) ? 0 : 1)
+        } else {
         card(id: eventKey(event), title: FeedEventPresentation.title(event),
              subtitle: event.siteID.map { store.siteName(id: $0) } ?? JournalBuilder.dayLabel(for: event.occurredAt),
              icon: FeedEventPresentation.icon(event), asset: event.kind == .workCompleted ? "SettingsEarnings" : nil, style: event.kind == .workCompleted ? eventStyle(event) : .update,
@@ -738,6 +746,7 @@ struct HomeFeedView: View {
                                          subtitle: event.siteID.map { store.siteName(id: $0) } ?? JournalBuilder.dayLabel(for: event.occurredAt),
                                          siteID: event.siteID, siteDomain: event.siteID.flatMap { store.siteDomain(id: $0) }),
              open: { openFocus(.event(event)) })
+        }
     }
     private func card(id: String, title: String, subtitle: String, icon: String, asset: String? = nil, usesProfilePhoto: Bool = false, style: FeedCardStyle = .update,
                       siteDomain: String? = nil, siteName: String? = nil,
@@ -818,7 +827,11 @@ struct HomeFeedView: View {
         switch value {
         case .proposal(let proposal): FeedProposalDetail(close: { closeFocus() }, proposalID: proposal.id)
         case .opportunity(let opportunity): FeedOpportunityDetail(close: { closeFocus() }, opportunityID: opportunity.id)
-        case .event(let event): FeedEventDetail(event: event)
+        case .event(let event):
+            if event.kind == .filedEmail, let mail = store.filedEmailSummaries.first(where: { $0.id.lowercased() == event.id.uuidString.lowercased() }) {
+                NavigationStack { FiledEmailDetailView(mail: mail) }
+                    .frame(maxHeight: (mail.jobs ?? []).isEmpty ? 540 : 680)
+            } else { FeedEventDetail(event: event) }
         case .task(let task): FeedTaskReview(close: { closeFocus() }, taskID: task.id)
         case .browser(let task): CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id, onClose: { closeFocus() })
         case .paused:
