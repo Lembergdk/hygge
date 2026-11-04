@@ -1,0 +1,42 @@
+name: APNs diagnostics
+
+# Manual, read-only: Actions -> APNs diagnostics -> Run workflow.
+# Prints device_tokens counts and the latest push_log rows for both
+# environments so APNs configuration problems (rows stuck at
+# 'unconfigured') can be told apart from delivery problems (HTTP
+# status rows) and no-coverage problems ('no-token' / zero tokens)
+# without local Cloudflare credentials for the deployment account.
+on:
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/cloudflare
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Staging push state
+        run: |
+          echo "--- staging device_tokens"
+          npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --command "SELECT platform, COUNT(*) AS tokens, MAX(updated_at) AS newest FROM device_tokens GROUP BY platform"
+          echo "--- staging push_log (latest 12)"
+          npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --command "SELECT created_at, kind, apns_status FROM push_log ORDER BY id DESC LIMIT 12"
+          echo "--- staging push_log by status"
+          npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --command "SELECT apns_status, COUNT(*) AS n FROM push_log GROUP BY apns_status ORDER BY n DESC"
+      - name: Production push state
+        run: |
+          echo "--- production device_tokens"
+          npx wrangler d1 execute hygge-production -c wrangler.production.jsonc --remote --command "SELECT platform, COUNT(*) AS tokens, MAX(updated_at) AS newest FROM device_tokens GROUP BY platform"
+          echo "--- production push_log (latest 12)"
+          npx wrangler d1 execute hygge-production -c wrangler.production.jsonc --remote --command "SELECT created_at, kind, apns_status FROM push_log ORDER BY id DESC LIMIT 12"
+          echo "--- production push_log by status"
+          npx wrangler d1 execute hygge-production -c wrangler.production.jsonc --remote --command "SELECT apns_status, COUNT(*) AS n FROM push_log GROUP BY apns_status ORDER BY n DESC"
