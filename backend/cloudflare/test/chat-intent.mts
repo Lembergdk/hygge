@@ -268,3 +268,68 @@ test("chatIntent never restarts fresh without a summary: an uncompactable 400 pr
   assert.equal(chain.state().id, "resp-prev");
   assert.equal(chain.state().summary, null);
 });
+
+test("chatIntent survives a proactive summarizer failure: live chain, turn succeeds", async () => {
+  // Proactive compaction is an optimization, not a precondition: a
+  // failing summarizer must not kill a turn the live chain could
+  // still serve.
+  const filler = Array.from({ length: 30 }, (_, i) => ({
+    fromAgent: i % 2 === 0, text: `filler turn ${i} `.padEnd(300, "x"),
+  }));
+  const transcript = [...filler, { fromAgent: false, text: "Both" }];
+  const seen: any[] = [];
+  let summarizerCalls = 0;
+  const chain = fullChain("resp-prev");
+  const client = {
+    configured: true,
+    cfg: { modelFast: "m-fast" },
+    complete: async (args: any) => {
+      seen.push(args);
+      if (String(args.system).includes("Summarize a chat thread")) {
+        summarizerCalls++;
+        throw new Error("summarizer down");
+      }
+      if (args.onResponseId) await args.onResponseId("resp-new");
+      return JSON.stringify({ actions: [{ kind: "add", domain: "contra.com" }] });
+    },
+  };
+  const out = await chatIntent({ client, transcript, context: CONTEXT, chain });
+  assert.deepEqual(out.actions, [{ kind: "add", domain: "contra.com" }]);
+  assert.equal(summarizerCalls, 1);
+  // Proceeded with the live chain, not a reset.
+  const chatCall = seen.find((a) => !String(a.system).includes("Summarize a chat thread"));
+  assert.equal(chatCall.previousResponseId, "resp-prev");
+  assert.equal(chatCall.user, "Both");
+  assert.equal(chain.state().id, "resp-new");
+  assert.equal(chain.state().summary, null);
+});
+
+test("chatIntent caps summarizer input on a giant thread: most recent turns only, chain still resets", async () => {
+  const filler = Array.from({ length: 100 }, (_, i) => ({
+    fromAgent: i % 2 === 0, text: `filler turn ${i} `.padEnd(300, "x"),
+  }));
+  const transcript = [...filler, { fromAgent: false, text: "Both" }];
+  let summarizerInput = "";
+  const chain = fullChain("resp-prev");
+  const client = {
+    configured: true,
+    cfg: { modelFast: "m-fast" },
+    complete: async (args: any) => {
+      if (String(args.system).includes("Summarize a chat thread")) {
+        summarizerInput = args.user;
+        return "Summary: long thread condensed.";
+      }
+      if (args.onResponseId) await args.onResponseId("resp-new");
+      return JSON.stringify({ actions: [{ kind: "add", domain: "contra.com" }] });
+    },
+  };
+  const out = await chatIntent({ client, transcript, context: CONTEXT, chain });
+  assert.deepEqual(out.actions, [{ kind: "add", domain: "contra.com" }]);
+  // 30,000 chars of turns capped to the most recent ~8,000.
+  assert.ok(summarizerInput.length < 9000);
+  assert.ok(summarizerInput.includes("filler turn 99 "));
+  assert.ok(!summarizerInput.includes("filler turn 0 "));
+  // Compaction still happened; the turn count is a high-water mark.
+  assert.equal(chain.state().id, "resp-new");
+  assert.equal(chain.state().summary?.turns, 100);
+});

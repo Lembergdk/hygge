@@ -129,6 +129,7 @@ function latestUserText(transcript: any[] = []): string {
 const COMPACT_TRANSCRIPT_CHARS = 8000;
 const COMPACT_MIN_NEW_CHARS = 2000;
 const SUMMARY_MAX_CHARS = 2000;
+const SUMMARIZE_MAX_INPUT_CHARS = 8000;
 
 const SUMMARIZE_SYSTEM = [
   "Summarize a chat thread for continuity, so a later turn can pick",
@@ -161,13 +162,35 @@ async function readStoredSummary(chain: any): Promise<{ text: string; turns: num
   } catch { return null; }
 }
 
+/// Turns text for the summarizer, capped to the most recent whole
+/// turns within budget (plus a hard slice as an absolute bound, for
+/// a single giant turn). On a giant first compaction — a long thread
+/// that predates chaining — the oldest turns fall out of the summary
+/// instead of making the summarization itself overflow. The stored
+/// turn count is then a high-water mark: turns before it are
+/// accounted for (summarized or dropped), never re-fed.
+function capTurnsText(transcript: any[], from: number, to: number, maxChars: number): string {
+  const lines = transcriptLines(transcript.slice(from, to));
+  const kept: string[] = [];
+  let len = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const lineLen = lines[i].length + 1;
+    if (kept.length > 0 && len + lineLen > maxChars) break;
+    kept.unshift(lines[i]);
+    len += lineLen;
+  }
+  return kept.join("\n").slice(-maxChars);
+}
+
 /// Summarize turns [from, to) (plus a previous summary, if any) in
 /// one single-shot call. Single-shot by design: no previousResponseId
 /// and no onResponseId, so summarizing never touches the chat chain
-/// it compacts. Throws on an empty summary so callers never store
-/// — or reset the chain for — a vacuous compaction.
+/// it compacts. Input is capped (see capTurnsText) so a giant thread
+/// cannot make the summarization itself overflow. Throws on an empty
+/// summary so callers never store — or reset the chain for — a
+/// vacuous compaction.
 async function summarizeTurns(client: any, model: string, transcript: any[], prevSummary: string | null, from: number, to: number): Promise<{ text: string; turns: number }> {
-  const turnsText = transcriptLines(transcript.slice(from, to)).join("\n");
+  const turnsText = capTurnsText(transcript, from, to, SUMMARIZE_MAX_INPUT_CHARS);
   const user = [
     prevSummary ? `Previous summary:\n${prevSummary}` : null,
     `Conversation turns to summarize:\n${turnsText}`,
@@ -189,7 +212,11 @@ async function summarizeTurns(client: any, model: string, transcript: any[], pre
 /// and chain id are dropped so the next turn bootstraps instead of
 /// chaining onto an unrelated thread. State changes only on
 /// success — a failed summarization leaves chain and summary
-/// untouched, and the caller falls back.
+/// untouched. In the reactive path the caller then falls back; in
+/// the proactive path the caller proceeds with the live chain (see
+/// callChainedModel). The stored turn count is a high-water mark:
+/// with capped summarizer input, turns before it are accounted for
+/// (summarized or dropped), never re-fed.
 async function compactChatThread(o: { client: any; model: string; chain: any; transcript: any[]; force: boolean }): Promise<{ summary: string | null; reset: boolean }> {
   const stored = await readStoredSummary(o.chain);
   if (stored && o.transcript.length < stored.turns) {
@@ -241,9 +268,19 @@ async function callChainedModel(o: any): Promise<string> {
   let prev: string | undefined = hasChain ? await o.chain.get() : undefined;
   let summary: string | null = null;
   if (hasSummary) {
-    const state = await compactChatThread({ client: o.client, model: o.model, chain: o.chain, transcript: o.transcript, force: false });
-    summary = state.summary;
-    if (state.reset) prev = undefined;
+    try {
+      const state = await compactChatThread({ client: o.client, model: o.model, chain: o.chain, transcript: o.transcript, force: false });
+      summary = state.summary;
+      if (state.reset) prev = undefined;
+    } catch {
+      // Proactive compaction is an optimization, not a precondition:
+      // the chain hasn't overflowed, so the turn can still succeed.
+      // Proceed with the live chain and the last stored summary (if
+      // any); the reactive path below remains the backstop if this
+      // call then 400s. The stored summary is re-read rather than
+      // assumed empty, so a failure mid-compaction never loses it.
+      summary = await readStoredSummary(o.chain);
+    }
   }
   const mode = !hasChain ? "legacy" : (prev ? "chained" : (summary ? "compacted" : "bootstrap"));
   const system = (mode === "chained" || mode === "compacted")
