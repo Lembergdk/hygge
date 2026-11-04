@@ -70,6 +70,9 @@ jobs:
   deploy-staging:
     needs: [core-tests, backend-tests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: hygge-staging-deployment
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -83,20 +86,45 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
+      - name: Check this revision is still current main
+        id: current-main
+        run: |
+          current_main=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$current_main" = "$GITHUB_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipping stale main revision $GITHUB_SHA; current main is $current_main"
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Ensure password confirmation table
+        if: steps.current-main.outputs.current == 'true'
         run: npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --file migrations/0007_password_confirmations.sql
       - name: Ensure mission queues
+        if: steps.current-main.outputs.current == 'true'
         run: |
           for q in hygge-missions-staging hygge-missions-staging-dlq; do
             npx wrangler queues list | grep -qw "$q" || npx wrangler queues create "$q"
           done
       - name: Ensure workspace checkpoint bucket
+        if: steps.current-main.outputs.current == 'true'
         run: npx wrangler r2 bucket info hygge-workspace-checkpoints-staging >/dev/null 2>&1 || npx wrangler r2 bucket create hygge-workspace-checkpoints-staging
       - name: Ensure shared skills V2 tables
+        if: steps.current-main.outputs.current == 'true'
         run: npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --file migrations/0008_shared_skills_v2.sql
       - name: Deploy staging
-        run: npx wrangler deploy -c wrangler.staging.jsonc
+        if: steps.current-main.outputs.current == 'true'
+        id: deployment
+        run: |
+          # main may have advanced while the idempotent prerequisites ran.
+          current_main=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$current_main" != "$GITHUB_SHA" ]; then
+            echo "::notice::Skipping revision superseded during staging preparation"
+            exit 0
+          fi
+          npx wrangler deploy -c wrangler.staging.jsonc
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
       - name: Health check
+        if: steps.deployment.outputs.deployed == 'true'
         run: curl -fsS https://api-staging.usehygge.app/health
 
   deploy-production:
