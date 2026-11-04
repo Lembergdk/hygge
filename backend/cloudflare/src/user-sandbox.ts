@@ -657,16 +657,41 @@ export class UserSandbox extends DurableObject<Env> {
   /// its Home-screen suggestion (the app owns the signup itself:
   /// email choice and login asks live there). Returns the journal
   /// sentence, or null when the mail held no instruction.
+  /// The ingest model's owner instruction, mapped onto the same
+  /// command shape the strict parser produces. Site references
+  /// resolve only against this user's real sites; anything else
+  /// is dropped, never guessed.
+  private commandFromModelReading(
+    delivery: InboundEmailDelivery,
+    triage: ReturnType<UserSandbox["triageEmail"]>,
+  ): ReturnType<typeof parseOwnerEmailCommand> {
+    const instruction = delivery.triage?.reading?.instruction;
+    if (!instruction) return null;
+    if (instruction.kind === "pause" || instruction.kind === "resume") {
+      return { type: instruction.kind };
+    }
+    if (instruction.kind === "add") return { type: "add", domain: instruction.domain };
+    const siteInstruction = instruction as { kind: "scan" | "readd"; site: string };
+    const needle = siteInstruction.site.toLowerCase();
+    const site = triage.sites.find((candidate) =>
+      candidate.siteID.toLowerCase() === needle
+      || candidate.name.toLowerCase() === needle
+      || domainOfUrl(candidate.startURLString) === needle);
+    return site ? { type: siteInstruction.kind, siteID: site.siteID } : null;
+  }
+
   private runOwnerEmailCommand(
     delivery: InboundEmailDelivery,
     triage: ReturnType<UserSandbox["triageEmail"]>,
   ): string | null {
     const s = delivery.summary;
     const store = this.stateStore();
-    const command = parseOwnerEmailCommand(
-      { subject: s.subject, text: s.summary },
-      triage.sites.map((site) => ({ siteID: site.siteID, name: site.name, domain: domainOfUrl(site.startURLString) })),
-    );
+    const ownerSites = triage.sites.map((site) => ({ siteID: site.siteID, name: site.name, domain: domainOfUrl(site.startURLString) }));
+    // The strict reading first (exact, free); the model's reading
+    // of the same proven-owner mail second, its site reference
+    // re-validated against the sites that actually exist here.
+    const command = parseOwnerEmailCommand({ subject: s.subject, text: s.extractiveSummary ?? s.summary }, ownerSites)
+      ?? this.commandFromModelReading(delivery, triage);
     if (!command) return null;
     const siteByID = (id: string) => triage.sites.find((site) => site.siteID === id) ?? null;
     const restoreSuggestion = (site: ScanSite) => {
@@ -756,7 +781,13 @@ export class UserSandbox extends DurableObject<Env> {
     const summaryId = crypto.randomUUID();
     const s = delivery.summary;
     const triage = this.triageEmail(delivery);
-    const highlightLabels = (delivery.triage?.highlights ?? []).map((h) => h.label);
+    // The model's concrete mentions read better than fixed
+    // keyword labels ("4 maintenance jobs near Leeds"); keyword
+    // labels remain the fallback when no model read the mail.
+    const readingMentions = delivery.triage?.reading?.mentions ?? [];
+    const highlightLabels = readingMentions.length
+      ? readingMentions.map((m) => m.detail)
+      : (delivery.triage?.highlights ?? []).map((h) => h.label);
     this.ctx.storage.sql.exec(
       `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -824,7 +855,8 @@ export class UserSandbox extends DurableObject<Env> {
       // a push. Authenticated tracked (or work-ruled) senders only,
       // at most one per sender per day — the rest stay in the
       // journal. The tap opens this exact filed mail.
-      const mentionsMessage = (delivery.triage?.highlights ?? []).some((h) => h.kind === "client_message");
+      const mentionsMessage = (delivery.triage?.highlights ?? []).some((h) => h.kind === "client_message")
+        || readingMentions.some((m) => m.kind === "client_message");
       if (mentionsMessage && triage.decision === "work" && triage.relation !== "owner"
         && delivery.triage?.senderAuthenticated === true) {
         const day = delivery.receivedAt.slice(0, 10);
