@@ -64,6 +64,7 @@ Staging, with fresh test users:
 7. Quarantine: an authorized maintainer can quarantine a shared
    skill and no owner can resurrect the same body privately.
 
-Production dispatch is a separate explicit action after staging
-acceptance. Passing local tests or a successful deploy is not by
+Staging acceptance is also automated: `.github/workflows/v2-staging-acceptance.yml` (manual dispatch) drives the deployed staging API as two ephemeral users (minted and deleted by the script) and prints one ACCEPT line per gate. It never touches production.
+
+Production dispatch is a separate explicit action after staging acceptance. Passing local tests or a successful deploy is not by
 itself production acceptance.
