@@ -4,13 +4,24 @@ struct FeedProposalDetail: View {
     @Environment(AppStore.self) private var store
     let close: () -> Void
     let proposalID: UUID
+    private var proposal: ProposedSite? { store.proposals.first(where: { $0.id == proposalID }) }
     var body: some View {
         FeedDetailContent {
-            if let proposal = store.proposals.first(where: { $0.id == proposalID }) {
+            if let proposal {
                 VStack(alignment: .leading, spacing: 10) {
-                    Label(store.siteName(id: proposal.siteID), systemImage: "link")
-                        .font(.system(.title, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
+                    // Long unbroken site names ("TrustedHousesitters")
+                    // hyphen-break in an icon+title row at large type:
+                    // beside when it fits, icon above when it doesn't.
+                    ViewThatFits(in: .horizontal) {
+                        Label(store.siteName(id: proposal.siteID), systemImage: "link")
+                        VStack(alignment: .leading, spacing: 10) {
+                            Image(systemName: "link").foregroundStyle(HyggeTheme.sageDeep)
+                            Text(store.siteName(id: proposal.siteID))
+                        }
+                    }
+                    .font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
                     Text(proposal.rationale).foregroundStyle(HyggeTheme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 VStack(spacing: 18) {
                     FeedFact(icon: "banknote", title: "Pay", value: proposal.payPattern)
@@ -19,17 +30,16 @@ struct FeedProposalDetail: View {
                     Divider().overlay(HyggeTheme.hairline)
                     FeedFact(icon: "checkmark.shield", title: "Checks", value: proposal.verification)
                 }.padding(20).hyggeCard(radius: 22)
-                if proposal.status == .proposed {
-                    VStack(spacing: 12) {
-                        FeedPrimaryButton(title: "Create my account") {
-                            store.approveProposal(proposalID: proposalID, alreadyHasAccount: false); close()
-                        }
-                        Button("I have one") {
-                            store.approveProposal(proposalID: proposalID, alreadyHasAccount: true); close()
-                        }.foregroundStyle(HyggeTheme.ink).frame(maxWidth: .infinity, minHeight: 44)
-                    }.padding(.top, 12)
-                }
             } else { Text("This suggestion is no longer available.").foregroundStyle(HyggeTheme.secondary) }
+        } footer: {
+            if let proposal, proposal.status == .proposed {
+                FeedPrimaryButton(title: "Create my account") {
+                    store.approveProposal(proposalID: proposalID, alreadyHasAccount: false); close()
+                }
+                Button("I have one") {
+                    store.approveProposal(proposalID: proposalID, alreadyHasAccount: true); close()
+                }.foregroundStyle(HyggeTheme.ink).frame(maxWidth: .infinity, minHeight: 44)
+            }
         }
     }
 }
@@ -40,34 +50,49 @@ struct FeedOpportunityDetail: View {
     let opportunityID: UUID
     @State private var saveLogin = false
     @State private var openSite = false
+    private var opportunity: Opportunity? { store.opportunities.first(where: { $0.id == opportunityID }) }
     var body: some View {
         FeedDetailContent {
-            if let opportunity = store.opportunities.first(where: { $0.id == opportunityID }) {
-                Text(opportunity.title).font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                Text(store.siteName(id: opportunity.siteID)).foregroundStyle(HyggeTheme.sageDeep)
-                if let blockedKind = opportunity.needsYouKind {
-                    // A blocked look, not work: the one action is the fix.
+            if let opportunity {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(opportunity.title).font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(store.siteName(id: opportunity.siteID)).font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
+                }
+                if opportunity.needsYouKind != nil {
+                    // A blocked look, not work: the one action is the fix (footer).
                     Text(opportunity.summary).foregroundStyle(HyggeTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    // All facts in the one inset container, summary
+                    // included, so nothing renders in a second style.
+                    VStack(spacing: 18) {
+                        FeedFact(icon: "banknote", title: "Pay", value: opportunity.payLabel)
+                        Divider().overlay(HyggeTheme.hairline)
+                        FeedFact(icon: "mappin", title: "Location", value: opportunity.isRemote ? "Remote" : opportunity.locationLabel)
+                        if !opportunity.requiredSkills.isEmpty {
+                            Divider().overlay(HyggeTheme.hairline)
+                            FeedFact(icon: "sparkles", title: "Skills", value: opportunity.requiredSkills.joined(separator: ", "))
+                        }
+                    }.padding(20).hyggeCard(radius: 22)
+                    Text(opportunity.summary).foregroundStyle(HyggeTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else { Text("This opportunity is no longer available.").foregroundStyle(HyggeTheme.secondary) }
+        } footer: {
+            if let opportunity {
+                if let blockedKind = opportunity.needsYouKind {
                     if blockedKind == "login" {
                         FeedPrimaryButton(title: "Save login again") { saveLogin = true }
                     } else {
                         FeedPrimaryButton(title: "Open \(store.siteName(id: opportunity.siteID))") { openSite = true }
                     }
-                } else {
-                    VStack(spacing: 18) {
-                        FeedFact(icon: "banknote", title: "Pay", value: opportunity.payLabel)
-                        FeedFact(icon: "mappin", title: "Location", value: opportunity.isRemote ? "Remote" : opportunity.locationLabel)
-                    }.padding(20).hyggeCard(radius: 22)
-                    Text(opportunity.summary).foregroundStyle(HyggeTheme.ink)
-                    if !opportunity.requiredSkills.isEmpty {
-                        FeedFact(icon: "sparkles", title: "Skills", value: opportunity.requiredSkills.joined(separator: ", "))
-                    }
-                    if !store.applications.contains(where: { $0.opportunityID == opportunity.id }) {
-                        FeedPrimaryButton(title: "Prepare an application") { store.draftApplication(for: opportunity); close() }
-                        Text("You’ll review it before anything is sent.").font(.caption).foregroundStyle(HyggeTheme.secondary)
-                    }
+                } else if !store.applications.contains(where: { $0.opportunityID == opportunity.id }) {
+                    FeedPrimaryButton(title: "Prepare an application") { store.draftApplication(for: opportunity); close() }
+                    Text("You’ll review it before anything is sent.").font(.caption).foregroundStyle(HyggeTheme.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center).padding(.top, 6)
                 }
-            } else { Text("This opportunity is no longer available.").foregroundStyle(HyggeTheme.secondary) }
+            }
         }
         .sheet(isPresented: $saveLogin) {
             if let opportunity = store.opportunities.first(where: { $0.id == opportunityID }) {
@@ -122,14 +147,15 @@ struct FeedTaskReview: View {
     var body: some View {
         FeedDetailContent {
             if let task {
-                Text(task.kind == .buildProfile ? "Review your profile" : task.title)
-                    .font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                Text(store.siteName(id: task.siteID)).foregroundStyle(HyggeTheme.sageDeep)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(task.kind == .buildProfile ? "Review your profile" : task.title)
+                        .font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(store.siteName(id: task.siteID)).font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
+                }
                 if task.needsChatHelp {
                     Text(task.help?.message ?? "Hygge needs your help to continue.").foregroundStyle(HyggeTheme.ink)
-                    FeedPrimaryButton(title: "Continue in chat") {
-                        store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id; close()
-                    }
+                        .fixedSize(horizontal: false, vertical: true)
                 } else {
                     ForEach(visibleKeys.filter { task.draftedPayload[$0]?.isEmpty == false }, id: \.self) { key in
                         VStack(alignment: .leading, spacing: 8) {
@@ -142,18 +168,31 @@ struct FeedTaskReview: View {
                             } else { Text(task.draftedPayload[key] ?? "").foregroundStyle(HyggeTheme.ink) }
                         }.padding(18).hyggeCard(radius: 18)
                     }
-                    if task.status == .awaitingApproval || task.status == .draft {
-                        Text(effect(task)).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-                        FeedPrimaryButton(title: submitting ? "Starting…" : actionTitle(task)) {
-                            guard !submitting else { return }; submitting = true
-                            Task { await store.approveAndRun(taskID: taskID) }
-                            close()
-                        }.disabled(submitting || store.isPaused)
-                        if store.isPaused { Text("Resume Hygge before continuing.").font(.caption).foregroundStyle(HyggeTheme.secondary) }
-                    }
                 }
                 Button("Full details") { audit = true }.foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
             } else { Text("This work is no longer available.").foregroundStyle(HyggeTheme.secondary) }
+        } footer: {
+            // The approve action is the point of this surface: pinned,
+            // never below the fold behind the field cards.
+            if let task {
+                if task.needsChatHelp {
+                    FeedPrimaryButton(title: "Continue in chat") {
+                        store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id; close()
+                    }
+                } else if task.status == .awaitingApproval || task.status == .draft {
+                    Text(effect(task)).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                        .fixedSize(horizontal: false, vertical: true).padding(.bottom, 8)
+                    FeedPrimaryButton(title: submitting ? "Starting…" : actionTitle(task)) {
+                        guard !submitting else { return }; submitting = true
+                        Task { await store.approveAndRun(taskID: taskID) }
+                        close()
+                    }.disabled(submitting || store.isPaused)
+                    if store.isPaused {
+                        Text("Resume Hygge before continuing.").font(.caption).foregroundStyle(HyggeTheme.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center).padding(.top, 6)
+                    }
+                }
+            }
         }.sheet(isPresented: $audit) { NavigationStack { TaskDetailView(taskID: taskID) } }
     }
     private func label(_ key: String) -> String {
