@@ -138,9 +138,9 @@ the coordinator):
   the user exactly as before.
 - Other site mail: filed as a summary (`email_summaries` plus a
   `filedEmail` journal event in Brief 01 server state). Summaries
-  redact codes and replace links with their host; full bodies are
-  not retained. Retention follows Brief 01 journal/feed
-  retention — no separate expiry in this brief.
+  redact codes and replace links with their host. New ordinary originals
+  are now retained separately under the encrypted receive-only experience
+  update below. Older summary-only records cannot recover their bodies.
 - Model reading (2026-11-03): ordinary mail ("other" kind only —
   verification/code mail never reaches a model) is read once at
   ingest, while the parsed text still exists (`reasonAboutEmail`
@@ -186,3 +186,24 @@ the coordinator):
   (received / dropped_unknown / dropped_malformed / kind /
   link_follow_ok|failed / delivery_failed). No addresses, senders,
   subjects, bodies, or codes are logged anywhere in this brief.
+
+
+## Receive-only email experience (implemented; not deployed)
+
+This update supersedes the older summary-only retention policy for new ordinary emails. It does not add any outbound send, reply, SMTP binding, or broader magic-link sender permission.
+
+- New ordinary mail retains the original subject, From/To/Cc, decoded text and HTML body, encrypted with the user's DEK in their Durable Object. Protection/verification mail retains its existing separate code handling and is never exposed as an original. Attachments remain metadata only.
+- Bodies are bounded by the existing 512 KiB inbound limit and a 750 KB serialized-original budget. Any retained partial message is explicitly marked truncated. Older rows cannot recover bodies that were never retained; their detail view labels the saved summary as a fallback.
+- Generated titles are separate from original subjects. Old rows and unavailable model output fall back to the original subject. No backfill or replay is performed.
+- `/email/messages` paginates by timestamp plus ID, returns 100 summaries and an opaque `nextCursor`; original bodies are excluded. `/email/messages/:id/original` reads only that user's sealed message, with `Cache-Control: no-store`.
+- Email detail renders the original in an isolated, nonpersistent WebKit view with content JavaScript disabled, a blocking resource rule and CSP. Remote resources/forms/automatic navigation are blocked. Deliberate HTTP(S) link taps can open externally. No reply composer is added; Discuss opens the regular chat with the mail context.
+- `/email/addresses` lists account addresses and separately managed personal addresses. Adding a personal address returns a 24-hour verification subject. The user sends a new email from that address to their Hygge address with the exact subject. An aligned authenticated sender plus the one-use hashed challenge verifies ownership. Hygge sends no verification mail. Challenge emails bypass model reading and are consumed without replaying old messages or executing instructions.
+- Inbound owner recognition merges verified managed addresses with the existing account identities, retaining sender-authentication checks. Managed addresses are not login methods. Account addresses remain managed through account login settings.
+- `/email/messages/:id/me` records a reversible manual label and adds the exact sender to the personal-address flow when available. The label does not set verified-owner authority or rerun the email. Older redacted/missing sender addresses can still be labelled; the user adds the actual address separately.
+- Domain ignores remain reversible and take effect in the UI only after server acknowledgment.
+
+### Validation and deployment
+
+The implementation includes local SQLite history/verification tests, ingestion/encryption tests, backward-compatible Swift model tests, and a localhost-only UI fixture (`scripts/receive-email-ui-fixture.py`). Launch DEBUG with `--settings-preview --settings-populated --email-ui-fixture` and `-settingsPreviewScreen email-original`, `email-history`, or `email-preferences`; `--email-feed-preview` opens the real feed using fixture metadata.
+
+No production/staging deployment, DNS change, live schema activation, live identity change, incoming mail replay, or outbound mail send is authorized by this implementation. New DO tables/columns initialize on the first request after a future deployment. Deploy the backend capability before releasing the corresponding client. Original-body retention starts only with newly ingested ordinary mail after that deployment.

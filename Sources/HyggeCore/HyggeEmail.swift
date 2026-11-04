@@ -96,6 +96,10 @@ public struct FiledEmailSummary: Codable, Equatable, Sendable, Identifiable {
     }
 
     public var id: String
+    public var title: String?
+    public var senderEmail: String?
+    public var markedAsMe: Bool?
+    public var hasOriginal: Bool?
     public var sender: String
     public var senderDomain: String
     public var subject: String
@@ -136,6 +140,10 @@ public struct FiledEmailSummary: Codable, Equatable, Sendable, Identifiable {
                 filedAt: String? = nil, relation: String? = nil, decision: String? = nil,
                 highlights: [String]? = nil, jobs: [JobMention]? = nil, siteID: String? = nil) {
         self.id = id
+        self.title = nil
+        self.senderEmail = nil
+        self.markedAsMe = nil
+        self.hasOriginal = nil
         self.sender = sender
         self.senderDomain = senderDomain
         self.subject = subject
@@ -186,5 +194,45 @@ public enum SitePasswordSuggestion {
             && value.contains(where: \.isUppercase)
             && value.contains(where: \.isNumber)
             && value.contains { !$0.isLetter && !$0.isNumber }
+    }
+}
+
+/// Original bodies are fetched on opening a message and not cached in the feed.
+public struct OriginalEmail: Codable, Equatable, Sendable {
+    public var from: String
+    public var to: String
+    public var cc: String?
+    public var subject: String
+    public var date: String?
+    public var text: String
+    public var html: String?
+    public var truncated: Bool
+}
+public struct OwnEmailAddress: Codable, Equatable, Sendable, Identifiable {
+    public var id: String { address }
+    public var address: String
+    public var verified: Bool
+    public var source: String
+    public var verificationSubject: String?
+}
+public extension FiledEmailSummary {
+    var displayTitle: String {
+        let generated = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !generated.isEmpty ? generated : subject.isEmpty ? "Email from \(senderDomain)" : subject
+    }
+    var senderAddress: String { senderEmail ?? sender }
+    var receivedAt: Date? {
+        for raw in [date, filedAt].compactMap({ $0 }) {
+            let iso = ISO8601DateFormatter()
+            if let date = iso.date(from: raw) { return date }
+            iso.formatOptions.insert(.withFractionalSeconds)
+            if let date = iso.date(from: raw) { return date }
+            let sqlite = DateFormatter()
+            sqlite.locale = Locale(identifier: "en_US_POSIX")
+            sqlite.timeZone = TimeZone(secondsFromGMT: 0)
+            sqlite.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            if let date = sqlite.date(from: raw) { return date }
+        }
+        return nil
     }
 }

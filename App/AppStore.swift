@@ -162,6 +162,12 @@ final class AppStore {
     /// own inbox; codes never come to the device.
     var hyggeEmailAddress: HyggeEmailAddress?
     var filedEmailSummaries: [FiledEmailSummary] = []
+    var emailNextCursor: String?
+    var emailRefreshError: String?
+    var emailHasLoaded = false
+    var refreshingEmail = false
+    var loadingOlderEmail = false
+    var ownEmailAddresses: [OwnEmailAddress] = []
     /// Senders the user opted out of evaluation (silent filing).
     /// The only remembered sender rule the app surfaces.
     var ignoredSenderDomains: [String] = []
@@ -940,32 +946,75 @@ final class AppStore {
     }
 
     func refreshHyggeEmail() async {
-        if let address = try? await backend.hyggeEmailAddress() {
-            hyggeEmailAddress = address
-        }
-        if let inbox = try? await backend.filedEmailInbox() {
+        guard !refreshingEmail else { return }
+        refreshingEmail = true
+        defer { refreshingEmail = false }
+        if let address = try? await backend.hyggeEmailAddress() { hyggeEmailAddress = address }
+        do {
+            let inbox = try await backend.filedEmailInbox()
             filedEmailSummaries = inbox.messages
             ignoredSenderDomains = inbox.ignoredDomains
+            emailNextCursor = inbox.nextCursor
+            emailHasLoaded = true
+            emailRefreshError = nil
+        } catch {
+            emailRefreshError = "Couldn’t refresh email. Previously loaded summaries are still here."
         }
+    }
+
+    func loadOlderEmail() async {
+        guard let cursor = emailNextCursor, !loadingOlderEmail, !refreshingEmail else { return }
+        loadingOlderEmail = true
+        defer { loadingOlderEmail = false }
+        do {
+            let page = try await backend.filedEmailInbox(cursor: cursor)
+            guard emailNextCursor == cursor else { return }
+            let known = Set(filedEmailSummaries.map(\.id))
+            filedEmailSummaries += page.messages.filter { !known.contains($0.id) }
+            emailNextCursor = page.nextCursor
+            emailRefreshError = nil
+        } catch { emailRefreshError = "Couldn’t load older mail. Please try again." }
+    }
+
+    func originalEmail(id: String) async throws -> OriginalEmail? { try await backend.originalEmail(id: id) }
+    func refreshOwnEmailAddresses() async throws { ownEmailAddresses = try await backend.ownEmailAddresses() }
+    func addOwnEmailAddress(_ address: String) async throws -> OwnEmailAddress {
+        let result = try await backend.addOwnEmailAddress(address)
+        ownEmailAddresses.removeAll { $0.address == result.address }
+        ownEmailAddresses.append(result)
+        return result
+    }
+    func removeOwnEmailAddress(_ address: String) async -> Bool {
+        guard await backend.removeOwnEmailAddress(address) else { return false }
+        ownEmailAddresses.removeAll { $0.address == address }
+        return true
+    }
+    func markEmailAsMe(id: String, marked: Bool) async throws -> OwnEmailAddress? {
+        let response = try await backend.markEmailAsMe(id: id, marked: marked)
+        if let index = filedEmailSummaries.firstIndex(where: { $0.id == id }) { filedEmailSummaries[index].markedAsMe = response.marked }
+        if let address = response.ownerAddress {
+            ownEmailAddresses.removeAll { $0.address == address.address }
+            ownEmailAddresses.append(address)
+        }
+        return response.ownerAddress
     }
 
     /// The one sender call the user can make: ignore this sender
     /// (silent filing, no evaluation) — or undo that. Remembered
     /// where the mail arrives.
-    func decideEmailSender(domain: String, choice: String) async {
-        let ignoring = choice == "ignore"
-        ignoredSenderDomains = ignoring
+    @discardableResult
+    func decideEmailSender(domain: String, choice: String) async -> Bool {
+        guard await backend.decideEmailSender(domain: domain, choice: choice) else { return false }
+        ignoredSenderDomains = choice == "ignore"
             ? Array(Set(ignoredSenderDomains + [domain])).sorted()
             : ignoredSenderDomains.filter { $0 != domain }
         filedEmailSummaries = filedEmailSummaries.map { mail in
             guard mail.senderDomain == domain else { return mail }
             var copy = mail
-            copy.decision = ignoring ? "ignore" : "work"
+            copy.decision = choice == "ignore" ? "ignore" : "work"
             return copy
         }
-        if await backend.decideEmailSender(domain: domain, choice: choice) == nil {
-            await refreshHyggeEmail()
-        }
+        return true
     }
 
     /// The moment the user chooses a Hygge address: allocated once
@@ -1307,6 +1356,10 @@ final class AppStore {
         profileEditRevision += 1
         hyggeEmailAddress = nil
         filedEmailSummaries = []
+        ownEmailAddresses = []
+        emailNextCursor = nil
+        emailHasLoaded = false
+        emailRefreshError = nil
         hasOnboarded = false
         sites = SeedSites.all
         siteMemory = SiteMemoryRepository()
