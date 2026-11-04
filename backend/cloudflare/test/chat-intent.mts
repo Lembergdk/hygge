@@ -1,0 +1,63 @@
+// Model-led chat intent: the model decides what the user wants
+// done; validation against the app-supplied context decides
+// whether it may run. Invented ids, unknown kinds, and junk all
+// fall back to plain conversation.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { chatIntent, validateChatIntent } from "../src/onboarding.ts";
+
+const CONTEXT = {
+  sites: [
+    { id: "rover", name: "Rover", domain: "rover.com", state: "watching" },
+    { id: "upwork", name: "Upwork", domain: "upwork.com", state: "proposed" },
+  ],
+  inbox: [
+    { id: "mail-1", senderDomain: "gmail.com", subject: "Fwd: New maintenance jobs at ApartmentIQ", summary: "Jobs near Leeds", highlights: ["Possible new work mentioned"] },
+  ],
+  paused: false,
+};
+
+test("validateChatIntent keeps only known kinds with context-bound ids", () => {
+  assert.deepEqual(validateChatIntent({ action: { kind: "scan", siteId: "rover" } }, CONTEXT),
+    { kind: "scan", siteId: "rover" });
+  assert.deepEqual(validateChatIntent({ action: { kind: "email", mailId: "mail-1", act: true } }, CONTEXT),
+    { kind: "email", mailId: "mail-1", act: true });
+  assert.deepEqual(validateChatIntent({ action: { kind: "add", domain: "https://www.pawshake.com/jobs" } }, CONTEXT),
+    { kind: "add", domain: "pawshake.com" });
+  assert.deepEqual(validateChatIntent({ action: { kind: "floor", amount: 30 } }, CONTEXT),
+    { kind: "floor", amount: 30 });
+  assert.equal(validateChatIntent({ action: { kind: "scan", siteId: "invented" } }, CONTEXT), null);
+  assert.equal(validateChatIntent({ action: { kind: "email", mailId: "nope" } }, CONTEXT), null);
+  assert.equal(validateChatIntent({ action: { kind: "wire_money", amount: 5 } }, CONTEXT), null);
+  assert.equal(validateChatIntent({ action: { kind: "floor", amount: 50000 } }, CONTEXT), null);
+  assert.equal(validateChatIntent({ action: null }, CONTEXT), null);
+  assert.equal(validateChatIntent({}, CONTEXT), null);
+  assert.equal(validateChatIntent(null, CONTEXT), null);
+});
+
+test("chatIntent returns the model's validated action", async () => {
+  const client = {
+    configured: true,
+    cfg: { modelFast: "m-fast" },
+    complete: async () => JSON.stringify({ action: { kind: "email", mailId: "mail-1", act: true } }),
+  };
+  const out = await chatIntent({
+    client,
+    transcript: [{ fromAgent: false, text: "do something about that forwarded email" }],
+    context: CONTEXT,
+  });
+  assert.deepEqual(out.action, { kind: "email", mailId: "mail-1", act: true });
+  assert.equal(out.simulated, false);
+});
+
+test("chatIntent falls back to conversation when unconfigured or unparseable", async () => {
+  const unconfigured = { configured: false, cfg: { modelFast: "m-fast" }, complete: async () => "{}" };
+  const off = await chatIntent({ client: unconfigured, transcript: [], context: CONTEXT });
+  assert.equal(off.action, null);
+  assert.equal(off.simulated, true);
+
+  const junk = { configured: true, cfg: { modelFast: "m-fast" }, complete: async () => "sure thing!" };
+  const bad = await chatIntent({ client: junk, transcript: [], context: CONTEXT });
+  assert.equal(bad.action, null);
+  assert.equal(bad.simulated, false);
+});
