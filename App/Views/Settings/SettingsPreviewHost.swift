@@ -8,7 +8,8 @@ struct SettingsPreviewHost: View {
     @State private var presented = true
     @AppStorage("settingsPreviewScreen") private var screen = "main"
     var body: some View {
-        if ProcessInfo.processInfo.arguments.contains("--email-feed-preview") { EmailFeedPreviewHost() }
+        if ProcessInfo.processInfo.arguments.contains("--flame-render-check") { FlameRenderCheckView() }
+        else if ProcessInfo.processInfo.arguments.contains("--email-feed-preview") { EmailFeedPreviewHost() }
         else if ProcessInfo.processInfo.arguments.contains("--plan-preview") { PlanPreviewHost() }
         else if ProcessInfo.processInfo.arguments.contains("--feed-preview") { FeedPreviewHost() }
         else if ProcessInfo.processInfo.arguments.contains("--browser-preview") { BrowserPreviewHost() }

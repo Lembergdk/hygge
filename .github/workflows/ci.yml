@@ -28,6 +28,11 @@ jobs:
         run: python3 scripts/check-flame-assets.py
       - name: Release app-link validation tests
         run: python3 scripts/test-release-app-links.py
+      - name: Ensure Metal compiler for flame stretch shader
+        run: |
+          if ! xcrun metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
       - name: iOS build (unsigned)
         run: >
           xcodebuild -project Hygge.xcodeproj -scheme Hygge
