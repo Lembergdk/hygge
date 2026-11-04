@@ -207,7 +207,7 @@ public enum OnboardingStep: String, Codable, CaseIterable, Sendable {
         case .enjoyWork: return "What kinds of work do you actually enjoy? Tap any that fit, or just tell me."
         case .lowestRate: return "What's your lowest rate? Anything below it, I'll quietly drop — you'll never see it."
         case .where: return "Roughly where are you? It keeps local work close to home."
-        case .when: return "One permission helps: your calendar, so I never double-book you and approved gigs land in it."
+        case .when: return "Two permissions help, both optional: your calendar, so I never double-book you and approved gigs land in it — and notifications, so I can tap you when something needs you or new work turns up. Continuing without them is fine."
         case .summary: return "That's all I need to start. I'll look overnight and tell you in the morning — sooner if something needs you."
         // Sign-in is the final question, in the same conversation.
         // This exact wording is the one fixed local line.
@@ -219,6 +219,19 @@ public enum OnboardingStep: String, Codable, CaseIterable, Sendable {
     /// The backend script has no signIn objective (the question is
     /// fixed and local), so generated turns use `summary` wording.
     public var backendStep: OnboardingStep { self == .signIn ? .summary : self }
+
+    /// The user's own reply bubble after the .when permission card:
+    /// names exactly what was granted (nil = never asked/tapped,
+    /// false = declined). Anything short of a grant is the same
+    /// quiet "Not now" — never a guilt-trip list of what is off.
+    public static func permissionReply(calendar: Bool?, notifications: Bool?) -> String {
+        switch (calendar == true, notifications == true) {
+        case (true, true): return "Calendar and notifications allowed"
+        case (true, false): return "Calendar allowed"
+        case (false, true): return "Notifications allowed"
+        case (false, false): return "Not now"
+        }
+    }
 }
 
 /// Facts the onboarding LLM extracted from free text (any step, any order).
@@ -287,8 +300,9 @@ public struct OnboardingConversation: Equatable, Sendable {
         switch step {
         case .enjoyWork: return false // taste always confirms with the user
         case .where: return !profile.locationLabel.isEmpty
-        // .when asks for calendar access now; it always runs, even
-        // when availability was volunteered earlier in the chat.
+        // .when asks for calendar and notification access now; it
+        // always runs, even when availability was volunteered
+        // earlier in the chat.
         default: return false
         }
     }
