@@ -1653,10 +1653,38 @@ final class AppStore {
             await refreshHyggeEmail()
         }
         let transcript = chatTranscriptLines()
-        guard let dto = try? await backend.chatIntent(transcript: transcript, profile: profile,
-                                                      context: chatIntentContext()) else {
+        guard let dtos = try? await backend.chatIntentActions(transcript: transcript, profile: profile,
+                                                             context: chatIntentContext()),
+              !dtos.isEmpty else {
             return .unhandled
         }
+        // Tool calls, not a form: the model may use any number of
+        // them. Join/add/scan run straight through (each validated
+        // below); anything consequential still goes through the
+        // single-action confirmation path for safety.
+        if dtos.allSatisfy({ ["join", "add", "scan"].contains($0.kind) }) {
+            var replies: [String] = []
+            for dto in dtos {
+                switch dto.kind {
+                case "scan":
+                    guard let id = dto.siteId, site(id: id) != nil else { continue }
+                    replies.append(await performChatAction(.scanSite(siteID: id)))
+                case "join":
+                    guard let id = dto.siteId, site(id: id) != nil else { continue }
+                    replies.append(await performChatAction(.joinSite(siteID: id)))
+                case "add":
+                    guard let domain = dto.domain,
+                          TargetSite.userAdded(name: "", urlOrDomain: domain, category: .localGig) != nil
+                    else { continue }
+                    replies.append(await performChatAction(.addSite(domain: domain)))
+                default:
+                    continue
+                }
+            }
+            guard !replies.isEmpty else { return .unhandled }
+            return .handled(replies.joined(separator: " "))
+        }
+        guard let dto = dtos.first else { return .unhandled }
         switch dto.kind {
         case "scan":
             guard let id = dto.siteId, site(id: id) != nil else { return .unhandled }
