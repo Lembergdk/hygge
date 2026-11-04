@@ -1,24 +1,85 @@
 import SwiftUI
 
+/// Cards, history and notification taps open the AI summary first.
+/// Only Email details navigates to and fetches the original message.
 struct FiledEmailDetailView: View {
+    let mail: FiledEmailSummary
+    @Environment(AppStore.self) private var store
+    private var current: FiledEmailSummary {
+        store.filedEmailSummaries.first { $0.id == mail.id } ?? mail
+    }
+    var body: some View {
+        SettingsPage(title: "Email summary") {
+            HStack(spacing: 12) {
+                SiteLogoTile(domain: mail.senderDomain, name: mail.senderDomain, size: 40)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(current.senderAddress).font(.subheadline.weight(.semibold)).textSelection(
+                        .enabled)
+                    if let date = current.receivedAt {
+                        Text(date.formatted(date: .abbreviated, time: .shortened)).font(.caption)
+                            .foregroundStyle(HyggeTheme.secondary)
+                    }
+                }
+            }
+            Text(current.displayTitle).font(.title2.bold()).fixedSize(
+                horizontal: false, vertical: true)
+            if current.markedAsMe == true || current.relation == "owner" {
+                Label(
+                    current.markedAsMe == true ? "Marked as you" : "From you",
+                    systemImage: "person.crop.circle"
+                )
+                .font(.subheadline).foregroundStyle(HyggeTheme.sageDeep)
+            }
+            if store.ignoredSenderDomains.contains(mail.senderDomain) {
+                Label("Ignored · kept in your history", systemImage: "bell.slash").font(
+                    .subheadline
+                ).foregroundStyle(HyggeTheme.secondary)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Hygge summary", systemImage: "sparkles").font(.caption.weight(.semibold))
+                    .foregroundStyle(HyggeTheme.sageDeep)
+                Text(current.summary).textSelection(.enabled).fixedSize(
+                    horizontal: false, vertical: true)
+            }
+            if let jobs = current.jobs, !jobs.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Roles mentioned in this email").font(.subheadline.weight(.semibold))
+                    ForEach(jobs, id: \.self) { job in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(job.title).font(.subheadline.weight(.semibold))
+                            if !job.detail.isEmpty {
+                                Text(job.detail).font(.caption).foregroundStyle(
+                                    HyggeTheme.secondary)
+                            }
+                        }
+                        if job != jobs.last { Divider() }
+                    }
+                    Text("As stated in the email; details may still need checking.").font(.caption)
+                        .foregroundStyle(HyggeTheme.secondary)
+                }
+            }
+            NavigationLink {
+                OriginalEmailDetailView(mail: current)
+            } label: {
+                SettingsRow(
+                    title: "Email details", icon: "envelope.open",
+                    subtitle: "Read the original email")
+            }.buttonStyle(.plain)
+        }.modifier(EmailMessageActions(mail: mail))
+    }
+}
+
+struct OriginalEmailDetailView: View {
     let mail: FiledEmailSummary
     @Environment(AppStore.self) private var store
     @State private var original: OriginalEmail?
     @State private var loading = true
     @State private var loadError: String?
-    @State private var actionNotice: String?
-    @State private var actionError: String?
-    @State private var busy = false
-    @State private var confirmIgnore = false
-    @State private var showConversation = false
-    @State private var verification: OwnEmailAddress?
     private var current: FiledEmailSummary {
         store.filedEmailSummaries.first { $0.id == mail.id } ?? mail
     }
-    private var marked: Bool { current.markedAsMe == true }
-    private var ignored: Bool { store.ignoredSenderDomains.contains(mail.senderDomain) }
     var body: some View {
-        SettingsPage(title: "Email") {
+        SettingsPage(title: "Email details") {
             HStack(spacing: 12) {
                 SiteLogoTile(domain: mail.senderDomain, name: mail.senderDomain, size: 40)
                 VStack(alignment: .leading, spacing: 5) {
@@ -49,11 +110,14 @@ struct FiledEmailDetailView: View {
                     ).font(.footnote).foregroundStyle(HyggeTheme.secondary)
                 }
             }
-            if marked || current.relation == "owner" {
-                Label(marked ? "Marked as you" : "From you", systemImage: "person.crop.circle")
-                    .font(.subheadline).foregroundStyle(HyggeTheme.sageDeep)
+            if current.markedAsMe == true || current.relation == "owner" {
+                Label(
+                    current.markedAsMe == true ? "Marked as you" : "From you",
+                    systemImage: "person.crop.circle"
+                )
+                .font(.subheadline).foregroundStyle(HyggeTheme.sageDeep)
             }
-            if ignored {
+            if store.ignoredSenderDomains.contains(mail.senderDomain) {
                 Label("Ignored · kept in your history", systemImage: "bell.slash").font(
                     .subheadline
                 ).foregroundStyle(HyggeTheme.secondary)
@@ -92,66 +156,94 @@ struct FiledEmailDetailView: View {
                     HyggeTheme.sageDeep)
                 Text(mail.summary).textSelection(.enabled)
             }
-            if let actionNotice {
-                Label(actionNotice, systemImage: "info.circle").font(.subheadline).foregroundStyle(
-                    HyggeTheme.secondary)
-            }
-            if let actionError {
-                Label(actionError, systemImage: "exclamationmark.circle").font(.subheadline)
-                    .foregroundStyle(HyggeTheme.emberDeep)
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            Button("Discuss with Hygge") {
-                store.pendingChatContext = ChatContextRef(
-                    kind: "mail", id: mail.id, title: current.displayTitle,
-                    subtitle: current.senderAddress, siteID: mail.siteID,
-                    siteDomain: mail.senderDomain)
-                showConversation = true
-            }.buttonStyle(SettingsActionStyle()).padding(.horizontal, 22).padding(.vertical, 16)
-                .background(HyggeTheme.paper)
-        }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button(
-                        marked ? "Remove “This is me” label" : "This is me",
-                        systemImage: "person.crop.circle"
-                    ) { markAsMe(!marked) }
-                    if ignored {
-                        Button("Stop ignoring this domain") { setIgnored(false) }
-                    } else {
-                        Button("Ignore mail from \(mail.senderDomain)") { confirmIgnore = true }
-                    }
-                    NavigationLink("Email preferences") { EmailPreferencesView() }
-                } label: {
-                    Image(systemName: "ellipsis").frame(width: 44, height: 44)
-                }.accessibilityLabel("Email options").disabled(busy)
-            }
         }
         .task(id: mail.id) { await load() }
-        .alert("Ignore mail from \(mail.senderDomain)?", isPresented: $confirmIgnore) {
-            Button("Ignore this domain", role: .destructive) { setIgnored(true) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(
-                "Mail from this entire domain will stay in history, but Hygge will stop checking it for work and showing journal entries or suggestions."
-            )
-        }
-        .sheet(isPresented: $showConversation) {
-            ConversationView().presentationDragIndicator(.visible)
-        }
-        .sheet(item: $verification) {
-            EmailAddressVerificationView(address: $0).presentationDragIndicator(.visible)
-        }
+        .modifier(EmailMessageActions(mail: mail))
     }
     private func load() async {
         loading = true
         loadError = nil
-        do { original = try await store.originalEmail(id: mail.id) } catch {
+        original = nil
+        do {
+            let fetched = try await store.originalEmail(id: mail.id)
+            guard !Task.isCancelled else { return }
+            original = fetched
+        } catch {
+            guard !Task.isCancelled else { return }
             loadError = "Couldn’t load the original email. Please try again."
         }
         loading = false
+    }
+
+}
+
+private struct EmailMessageActions: ViewModifier {
+    let mail: FiledEmailSummary
+    @Environment(AppStore.self) private var store
+    @State private var actionNotice: String?
+    @State private var actionError: String?
+    @State private var busy = false
+    @State private var confirmIgnore = false
+    @State private var showConversation = false
+    @State private var verification: OwnEmailAddress?
+    private var current: FiledEmailSummary {
+        store.filedEmailSummaries.first { $0.id == mail.id } ?? mail
+    }
+    private var marked: Bool { current.markedAsMe == true }
+    private var ignored: Bool { store.ignoredSenderDomains.contains(mail.senderDomain) }
+    func body(content: Content) -> some View {
+        content
+            .safeAreaInset(edge: .bottom) {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let actionNotice {
+                        Label(actionNotice, systemImage: "info.circle").font(.footnote)
+                            .foregroundStyle(HyggeTheme.secondary)
+                    }
+                    if let actionError {
+                        Label(actionError, systemImage: "exclamationmark.circle").font(.footnote)
+                            .foregroundStyle(HyggeTheme.emberDeep)
+                    }
+                    Button("Discuss in chat") {
+                        store.pendingChatContext = ChatContextRef(
+                            kind: "mail", id: mail.id, title: current.displayTitle,
+                            subtitle: current.senderAddress, siteID: mail.siteID,
+                            siteDomain: mail.senderDomain)
+                        showConversation = true
+                    }.buttonStyle(SettingsActionStyle())
+                }.padding(.horizontal, 22).padding(.vertical, 16).background(HyggeTheme.paper)
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button(
+                            marked ? "Remove “This is me” label" : "This is me",
+                            systemImage: "person.crop.circle"
+                        ) { markAsMe(!marked) }
+                        if ignored {
+                            Button("Stop ignoring this domain") { setIgnored(false) }
+                        } else {
+                            Button("Ignore mail from \(mail.senderDomain)") { confirmIgnore = true }
+                        }
+                        NavigationLink("Email preferences") { EmailPreferencesView() }
+                    } label: {
+                        Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                    }.accessibilityLabel("Email options").disabled(busy)
+                }
+            }
+            .alert("Ignore mail from \(mail.senderDomain)?", isPresented: $confirmIgnore) {
+                Button("Ignore this domain", role: .destructive) { setIgnored(true) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(
+                    "Mail from this entire domain will stay in history, but Hygge will stop checking it for work and showing journal entries or suggestions."
+                )
+            }
+            .sheet(isPresented: $showConversation) {
+                ConversationView().presentationDragIndicator(.visible)
+            }
+            .sheet(item: $verification) {
+                EmailAddressVerificationView(address: $0).presentationDragIndicator(.visible)
+            }
     }
     private func markAsMe(_ value: Bool) {
         guard !busy else { return }

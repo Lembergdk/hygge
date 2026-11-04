@@ -60,6 +60,7 @@ struct SettingsPreviewHost: View {
         case "email-history": EmailHistoryView()
         case "email-preferences": EmailPreferencesView()
         case "email-original": EmailOriginalPreviewHost()
+        case "email-summary": EmailOriginalPreviewHost(showOriginal: false)
         case "permissions": SettingsPermissionsView()
         case "flamelab": FlameLabView()
         default: ProfileHubView()
@@ -90,10 +91,14 @@ struct SettingsPreviewHost: View {
 
 }
 private struct EmailOriginalPreviewHost: View {
+    var showOriginal = true
     @Environment(AppStore.self) private var store
     var body: some View {
         Group {
-            if let mail = store.filedEmailSummaries.first { FiledEmailDetailView(mail: mail) }
+            if let mail = store.filedEmailSummaries.first {
+                if showOriginal { OriginalEmailDetailView(mail: mail) }
+                else { FiledEmailDetailView(mail: mail) }
+            }
             else { ProgressView("Loading fixture…") }
         }.task { await store.refreshHyggeEmail() }
     }

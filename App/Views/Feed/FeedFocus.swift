@@ -27,7 +27,7 @@ enum FeedFocus: Identifiable {
     var hugsContent: Bool {
         switch self {
         case .browser: return false
-        case .event(let event): return event.kind != .filedEmail
+        case .event: return true
         default: return true
         }
     }
