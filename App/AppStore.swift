@@ -982,52 +982,6 @@ final class AppStore {
         save()
     }
 
-    func setApplicationStage(_ stage: ApplicationStage, applicationID: UUID) {
-        guard let index = applications.firstIndex(where: { $0.id == applicationID }) else { return }
-        let was = applications[index].stage
-        applications[index].stage = stage
-        if stage == .booked && was != .booked {
-            recordEvent(ActivityEvent(kind: .booked, sentence: "Booked: \(applications[index].title).",
-                                      detail: "Confirmed on \(siteName(id: applications[index].siteID)).",
-                                      siteID: applications[index].siteID, applicationID: applicationID))
-            recordFeedbackOnce(FeedbackEvent(
-                subjectType: .application, subjectId: applicationID.uuidString.lowercased(),
-                action: .booked,
-                category: opportunities.first { $0.id == applications[index].opportunityID }?.category))
-        }
-        if stage == .completed && was != .completed {
-            recordFeedbackOnce(FeedbackEvent(
-                subjectType: .application, subjectId: applicationID.uuidString.lowercased(),
-                action: .completed,
-                category: opportunities.first { $0.id == applications[index].opportunityID }?.category))
-        }
-        if stage == .completed && was != .completed && applications[index].agreedGross == nil {
-            // No witnessed amount: the journal records completion without money claims.
-            recordEvent(ActivityEvent(kind: .workCompleted, sentence: "Done: \(applications[index].title).",
-                                      detail: "Marked complete without a recorded amount, so it is not counted in earnings.",
-                                      siteID: applications[index].siteID, applicationID: applicationID))
-        }
-        save()
-    }
-
-    /// The money moment: completion with the actual amount the user confirms.
-    func completeWork(applicationID: UUID, grossAmount: Double) {
-        guard let index = applications.firstIndex(where: { $0.id == applicationID }) else { return }
-        applications[index].stage = .completed
-        applications[index].agreedGross = grossAmount
-        recordEvent(ActivityEvent(
-            kind: .workCompleted,
-            sentence: "Done: \(applications[index].title) — \(JournalBuilder.money(grossAmount, currencyCode: applications[index].currencyCode)).",
-            detail: "Amount confirmed by you at completion.",
-            siteID: applications[index].siteID, applicationID: applicationID,
-            grossAmount: grossAmount, currencyCode: applications[index].currencyCode))
-        recordFeedbackOnce(FeedbackEvent(
-            subjectType: .application, subjectId: applicationID.uuidString.lowercased(),
-            action: .completed,
-            category: opportunities.first { $0.id == applications[index].opportunityID }?.category))
-        save()
-    }
-
     private func recordTaskEvent(_ task: AgentTask) {
         if task.isSiteSetup && activityEvents.contains(where: { $0.id == task.id }) { return }
         let site = siteName(id: task.siteID)
@@ -1619,6 +1573,28 @@ final class AppStore {
         isBackendFirst = true
         hasRealServerFeedItem = hasReal
         UserDefaults.standard.set(true, forKey: Self.backendFirstKey)
+    }
+
+    /// Pull-to-refresh on Home: the same pull foregrounding performs
+    /// (plus the inbox, whose decisions appear as feed cards). Before
+    /// the first successful sync this runs the launch path instead,
+    /// so a pull can also complete the one-time migration. If a pull
+    /// is already in flight, wait for it rather than dismissing the
+    /// refresh instantly or starting a second one.
+    func refreshFeed() async {
+        guard !isCompletingSignIn else { return }
+        if isBackendFirst {
+            var waits = 0
+            while isSyncing, waits < 100 {
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(for: .milliseconds(100))
+                waits += 1
+            }
+            await pullFromServer()
+        } else {
+            await syncOnLaunch()
+        }
+        await refreshHyggeEmail()
     }
 
     /// Foreground/launch pull: reconcile durable tasks and chat requests;

@@ -19,11 +19,17 @@ struct HomeFeedView: View {
     /// draws him along the way. Driving .position itself through an
     /// optional override snapped him off-screen for a frame on close.
     @State private var hopOffset: CGSize = .zero
+    /// Downward drag on the chat bubble's grabber: the bubble follows
+    /// the finger, then either springs back or closes past the threshold.
+    @State private var bubbleDragOffset: CGFloat = 0
+    /// While the chat bubble is open he perches a little higher, fully
+    /// on screen under its tail, instead of clipped by the bottom edge.
+    @State private var chatLift: CGFloat = 0
+    private var chatLiftAmount: CGFloat { 28 }
     /// Where he was living before a tap sent him home for chat.
     @State private var returnPlacement: FlamePlacement?
 
     @State private var showProfile = false
-    @State private var showYourWork = false
     @State private var showNotifications = false
     @State private var emailOpenItem: FiledEmailSummary?
     @State private var earlierExpanded = false
@@ -56,7 +62,7 @@ struct HomeFeedView: View {
                 onDragBegan: { dragStartCenter = flameWindowCenter() }
                 onDragEnded: { translation in commitDrag(translation) }
                     .position(flameCenter(in: geo))
-                    .offset(hopOffset)
+                    .offset(x: hopOffset.width, y: hopOffset.height + chatLift)
                     // Above the chat bubble (zIndex 3): on close he hops
                     // back THROUGH the bubble's fading rectangle, and
                     // behind it he vanished until the fade finished.
@@ -105,12 +111,20 @@ struct HomeFeedView: View {
             }
         }
         .onChange(of: candidateIDs, initial: true) { _, _ in receiveFeedUpdates() }
-        .onChange(of: focus == nil && !showConversation && !showProfile && !showYourWork && !showNotifications) { _, available in
+        .onChange(of: focus == nil && !showConversation && !showProfile && !showNotifications) { _, available in
             if available { receiveFeedUpdates() }
+        }
+        // With nothing actionable in the feed, the journal IS the feed:
+        // its Earlier section starts expanded. Once the user collapses
+        // it, their choice stands until the feed next becomes busy
+        // and empties again.
+        .onChange(of: hasActionableFeedItems, initial: true) { _, hasItems in
+            if !hasItems {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) { earlierExpanded = true }
+            }
         }
         .sheet(isPresented: $showConversation, onDismiss: { store.conversationTaskID = nil }) { ConversationView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showProfile) { ProfileHubView().presentationDragIndicator(.visible) }
-        .sheet(isPresented: $showYourWork) { YourWorkView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showNotifications) { NavigationStack { SettingsPermissionsView() }.presentationDragIndicator(.visible) }
         .sheet(item: $emailOpenItem) { mail in
             NavigationStack { FiledEmailDetailView(mail: mail) }.presentationDragIndicator(.visible)
@@ -154,9 +168,6 @@ struct HomeFeedView: View {
                             .font(.system(.title3, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
                             .padding(.top, 32)
                     }
-                    Button("Your work") { showYourWork = true }
-                        .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
-                        .frame(minHeight: 44).padding(.top, 8)
                     Color.clear.frame(height: 175)
                 }
                 .scrollTargetLayout()
@@ -168,6 +179,7 @@ struct HomeFeedView: View {
                 }
                 .padding(.horizontal, 20).padding(.top, 12)
             }
+            .refreshable { await store.refreshFeed() }
             .scrollPosition(id: $scrollAnchor, anchor: .top)
             .onChange(of: updateGate.visibleIDs) { _, _ in
                 if isAtTop { proxy.scrollTo("feed-top", anchor: .top) }
@@ -261,10 +273,11 @@ struct HomeFeedView: View {
         windowCenter(for: playStore.settings.placement)
     }
 
-    /// Where he is actually drawn right now, hop offset included.
+    /// Where he is actually drawn right now, hop and chat offsets in.
     private func flameWindowCenter() -> CGPoint {
         let c = flameLayoutCenter()
-        return CGPoint(x: c.x + hopOffset.width, y: c.y + hopOffset.height)
+        return CGPoint(x: c.x + hopOffset.width,
+                       y: c.y + hopOffset.height + chatLift)
     }
 
     private func flameCenter(in geo: GeometryProxy) -> CGPoint {
@@ -289,24 +302,35 @@ struct HomeFeedView: View {
     /// Quick hop: his limbs crouch, launch and land (see FlameActor's
     /// travel hops) while the center animates from an EXPLICIT start —
     /// measuring the start after mutating placement would read the
-    /// target itself and teleport him.
+    /// target itself and teleport him. `prepare` (the placement/lift
+    /// writes that move layout to the target) runs INSIDE the pin's
+    /// no-animation transaction, so layout, offset and lift change in
+    /// one render: drawn = target + (start - target) = start, exactly
+    /// where he already is. Clearing the perch lift in a separate
+    /// transaction after the pin let an intermediate frame render
+    /// with mismatched layout/offset/lift — a visible shift before
+    /// the hop even started.
     private func hop(from start: CGPoint, to target: CGPoint,
+                     prepare: () -> Void = {},
                      then: @escaping () -> Void) {
         let distance = hypot(target.x - start.x, target.y - start.y)
+        var instant = Transaction()
+        instant.disablesAnimations = true
         if reduceMotion || distance < 8 {
-            hopOffset = .zero
+            withTransaction(instant) {
+                prepare()
+                hopOffset = .zero
+            }
             then()
             return
         }
         let duration = min(0.85, max(0.45, Double(distance) / 1400 + 0.35))
-        // Placement already holds the target at both call sites, so
-        // layout is there; pin him to the start with an offset in a
-        // no-animation transaction, let that frame land, then animate
-        // the offset home. Interpolating from exactly where he is
-        // drawn now is what keeps the first hop frame on screen.
-        var instant = Transaction()
-        instant.disablesAnimations = true
+        // Pin him to the start with an offset, let that frame land,
+        // then animate the offset home. Interpolating from exactly
+        // where he is drawn now is what keeps the first hop frame
+        // on screen.
         withTransaction(instant) {
+            prepare()
             hopOffset = CGSize(width: start.x - target.x,
                                height: start.y - target.y)
         }
@@ -326,24 +350,39 @@ struct HomeFeedView: View {
         if showBubbleChat { closeBubble(); return }
         returnPlacement = playStore.settings.placement
         let start = flameWindowCenter()
-        playStore.settings.placement = nil
-        hop(from: start, to: windowCenter(for: nil)) {
+        bubbleDragOffset = 0
+        hop(from: start, to: windowCenter(for: nil),
+            prepare: { playStore.settings.placement = nil }) {
             withAnimation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.82)) {
                 showBubbleChat = true
+                chatLift = -chatLiftAmount
             }
         }
     }
 
     /// Closing sends him hopping back to wherever he was living before.
     private func closeBubble() {
+        let start = flameWindowCenter()
         withAnimation(reduceMotion ? nil : .easeIn(duration: 0.2)) {
             showBubbleChat = false
         }
-        guard let back = returnPlacement else { return }
+        guard let back = returnPlacement else {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
+                chatLift = 0
+            }
+            return
+        }
         returnPlacement = nil
-        let start = flameWindowCenter()
-        playStore.settings.placement = back
-        hop(from: start, to: windowCenter(for: back)) {}
+        // Placement and the perch lift move inside hop's pin
+        // transaction (see hop): one render lands layout on the
+        // target with the offset holding him exactly at `start` —
+        // his perched spot under the bubble — so the hop begins
+        // there, with no shift first.
+        hop(from: start, to: windowCenter(for: back),
+            prepare: {
+                playStore.settings.placement = back
+                chatLift = 0
+            }) {}
     }
 
     private func bubbleChat(in geo: GeometryProxy) -> some View {
@@ -362,18 +401,41 @@ struct HomeFeedView: View {
             VStack(alignment: .trailing, spacing: 0) {
                 ZStack(alignment: .top) {
                     ConversationView(background: HyggeTheme.card, showsHeader: false)
-                    Capsule()
-                        .fill(HyggeTheme.secondary.opacity(0.55))
-                        .frame(width: 38, height: 5)
-                        .padding(.top, 8)
-                        .frame(width: 72, height: 24)
-                        .contentShape(Rectangle())
-                        .gesture(DragGesture(minimumDistance: 8).onEnded { value in
-                            if value.translation.height > 55 { closeBubble() }
-                        })
-                        .accessibilityElement()
-                        .accessibilityLabel("Drag down to close chat")
-                        .accessibilityIdentifier("chatBubbleGrabber")
+                    // Grabber: a wide hit strip across the top, not just
+                    // the visible pill. It must outrank the transcript
+                    // ScrollView directly underneath (plain .gesture
+                    // loses to its pan recognizer, which made the
+                    // handle feel dead), and the bubble follows the
+                    // finger so the drag reads as a drag.
+                    ZStack(alignment: .top) {
+                        Color.clear
+                        Capsule()
+                            .fill(HyggeTheme.secondary.opacity(0.55))
+                            .frame(width: 38, height: 5)
+                            .padding(.top, 8)
+                    }
+                    .frame(width: 160, height: 32)
+                    .contentShape(Rectangle())
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 4)
+                            .onChanged { value in
+                                bubbleDragOffset = max(0, value.translation.height)
+                            }
+                            .onEnded { value in
+                                if value.translation.height > 55
+                                    || value.predictedEndTranslation.height > 140 {
+                                    closeBubble()
+                                } else {
+                                    withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.85)) {
+                                        bubbleDragOffset = 0
+                                    }
+                                }
+                            }
+                    )
+                    .accessibilityElement()
+                    .accessibilityLabel("Drag down to close chat")
+                    .accessibilityIdentifier("chatBubbleGrabber")
+                    .accessibilityAction(named: "Close chat") { closeBubble() }
                 }
                 .frame(width: width, height: height)
                 .background(HyggeTheme.card, in: RoundedRectangle(cornerRadius: 26))
@@ -391,6 +453,7 @@ struct HomeFeedView: View {
             }
             .position(x: screenSize.width - width / 2 - 12 - origin.x,
                       y: bubbleBottomWindow - height / 2 - origin.y)
+            .offset(y: bubbleDragOffset)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Chat with Hygge")
             .accessibilityIdentifier("chatBubble")
@@ -444,7 +507,7 @@ struct HomeFeedView: View {
             .sorted { (positions[key($0)] ?? 0) < (positions[key($1)] ?? 0) }
     }
     private func receiveFeedUpdates() {
-        let canInsert = isAtTop && focus == nil && !showConversation && !showProfile && !showYourWork && !showNotifications
+        let canInsert = isAtTop && focus == nil && !showConversation && !showProfile && !showNotifications
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--feed-arrivals-preview") { print("FEED_RECEIVE top=\(isAtTop) insert=\(canInsert) visible=\(updateGate.visibleIDs.count) latest=\(candidateIDs.count)") }
         #endif
@@ -453,6 +516,14 @@ struct HomeFeedView: View {
         }
     }
     private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && emailDecisions.isEmpty && !store.isPaused }
+    /// Anything above the Journal heading. When this is false the
+    /// feed is journal-only, so Earlier expands by default.
+    private var hasActionableFeedItems: Bool {
+        !runningTasks.isEmpty || !pendingProposals.isEmpty || !listings.isEmpty
+            || !decisionTasks.filter { !isArchived(taskKey($0)) }.isEmpty
+            || !emailDecisions.isEmpty || store.isPaused
+            || (store.notificationPrimerVisible && updateGate.visibleIDs.contains("notifications"))
+    }
     private func taskKey(_ task: AgentTask) -> String { FeedFocus.taskKey(task) }
     private func eventKey(_ event: ActivityEvent) -> String { "event-\(event.id)" }
     private func isArchived(_ id: String) -> Bool { store.archivedFeedIDs.contains(id) }
@@ -584,7 +655,7 @@ struct HomeFeedView: View {
         case .event(let event): eventCard(event)
         case .paused:
             Button { openFocus(.paused) } label: {
-                FeedSummary(title: "Hygge is paused", subtitle: "Your work is here when you’re ready", icon: "pause")
+                FeedSummary(title: "Hygge is paused", subtitle: "Everything is here when you’re ready", icon: "pause")
             }.buttonStyle(.plain)
         case .morePlaces:
             Button(morePlaces ? "Fewer suggestions" : "\(pendingProposals.count - 1) more places") { withAnimation { morePlaces.toggle() } }
