@@ -18,7 +18,21 @@ const cfg = { baseUrl, gatewayToken, gatewayCollectPayload: false,
   modelFast: config("HYGGE_LLM_MODEL_FAST"), modelStrong: config("HYGGE_LLM_MODEL_STRONG") };
 const client = new LLMClient(cfg);
 let failures = 0;
+let activeCheck = "";
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async (...args: Parameters<typeof fetch>) => {
+  const response = await originalFetch(...args);
+  if (!response.ok) {
+    const body = await response.clone().json().catch(() => ({})) as any;
+    const error = body?.error ?? body;
+    const detail = JSON.stringify({ code: error?.code, type: error?.type, param: error?.param,
+      message: String(error?.message ?? "").slice(0, 350) }).replaceAll(gatewayToken, "[redacted]");
+    console.error(`GATEWAY ${activeCheck} DETAIL ${detail}`);
+  }
+  return response;
+};
 const check = async (name: string, run: () => Promise<void>) => {
+  activeCheck = name;
   try { await run(); console.log(`GATEWAY ${name} PASS`); }
   catch (error: any) {
     failures++;
@@ -26,8 +40,8 @@ const check = async (name: string, run: () => Promise<void>) => {
     console.error(`GATEWAY ${name} FAIL ${error?.status ? `HTTP ${error.status}` : error?.name ?? "Error"}`);
   }
 };
-// A valid one-pixel PNG, with no user content.
-const imageDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1cAAAAASUVORK5CYII=";
+// A valid 64x64 RGB PNG, with no user content.
+const imageDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAfklEQVR4nNXOQREAIAzAsK4K8W8GRPDYNQoynEuZxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmc24FfD2TIAc+I9emSAAAAAElFTkSuQmCC";
 for (const model of new Set([cfg.modelFast, cfg.modelStrong])) {
   await check(`text-${model}`, async () => {
     const text = await client.complete({ model, system: "Reply with exactly OK.", user: "Synthetic transport check." });
@@ -51,6 +65,7 @@ await check("native-tools-and-results", async () => {
     if (!res.ok) throw Object.assign(new Error("Gateway request failed"), { status: res.status });
     return res.json() as Promise<any>;
   };
+  activeCheck = "native-tools-call";
   const first = await post({ model: cfg.modelFast, store: false, include: ["reasoning.encrypted_content"],
     input: "Call record_test for synthetic site contra.com. This records no real data.",
     tool_choice: { type: "function", name: "record_test" },
@@ -60,6 +75,7 @@ await check("native-tools-and-results", async () => {
   const calls = first.output?.filter((i: any) => i.type === "function_call") ?? [];
   assert.ok(calls.length > 0);
   for (const call of calls) { assert.equal(call.name, "record_test"); assert.ok(call.call_id); }
+  activeCheck = "native-tools-result";
   const next = await post({ model: cfg.modelFast, store: false,
     instructions: "Report the supplied synthetic tool result in one short sentence. Do not call any tools.",
     input: [...first.output, ...calls.map((call: any) => ({ type: "function_call_output", call_id: call.call_id,
