@@ -196,7 +196,7 @@ After a mission, its trajectory is distilled into per-domain **site-memory hints
 
 On top of that sits a per-user **learning model**: every accept, decline (with reason), dismissal and outcome is recorded as a structured feedback event and folded into category/skill affinities and rate/distance sensitivities. One ranker (`rankItem` in [learning.ts](backend/cloudflare/src/learning.ts)) filters and scores both scanned listings and site proposals — below-threshold finds never surface. The ranker's threshold is live server-side, and its ordering is user-visible: every surfaced listing and site proposal carries its `rankScore` into the app, and the Home feed orders both by that score through the one consumer ordering (`FeedRankOrdering` in HyggeCore) — unscored items last, ties stable, and the item a push tap landed on first. See [docs/profile-learning.md](docs/profile-learning.md).
 
-A second, stricter generation of shared “skills” (typed, reviewed, evidence-gated site know-how that can be promoted across users without carrying personal data) exists as a tested foundation. It is **dormant**: gated behind `HYGGE_WORKSPACE_MODE=retained-v2`, with no production activation. See [backend/cloudflare/docs/workspace-skills.md](backend/cloudflare/docs/workspace-skills.md).
+A second, stricter generation of shared “skills” (typed, reviewed, evidence-gated site know-how that can be promoted across users without carrying personal data) runs on the retained-workspace V2 path (`HYGGE_WORKSPACE_MODE=retained-v2` in both deployed configs). Activation is fail-closed rather than universal: existing Browser Run profiles still block V2 starts until the adoption transition exists, skill sharing needs a reviewed registry (staging carries only the Wave 4 acceptance site), and production write completions hold until real-site postconditions are reviewed. See [backend/cloudflare/docs/workspace-skills.md](backend/cloudflare/docs/workspace-skills.md) and [docs/workspace-v2-activation.md](docs/workspace-v2-activation.md).
 
 ### Identity, email and notifications
 
@@ -246,7 +246,7 @@ LLM traffic runs through Cloudflare AI Gateway with a custom Meta provider: the 
 | `@usehygge.cc` receive-only email | **Pipeline built; DNS live** (MX records resolve to Cloudflare Email Routing). First live delivery checks are documented in [docs/email-usehygge-cc.md](docs/email-usehygge-cc.md). |
 | Push notifications | **Pipeline built.** Sends only when an APNs key is configured; otherwise each event is logged as an `unconfigured` no-op, never a fake success. |
 | Profile learning / ranking | **Live.** Threshold filters server-side; the Home feed orders listings and site proposals by the server `rankScore` they carry. |
-| Retained-workspace V2 + shared skills V2 | **Dormant foundation.** Tested code, no production activation (`HYGGE_WORKSPACE_MODE` stays unset). |
+| Retained-workspace V2 + shared skills V2 | **Activated; acceptance pending.** `retained-v2` is set for staging and production. Populated legacy browser users fail closed pending adoption; production has no reviewed registry/postconditions yet. |
 | Fresh-install sample content | **Labelled demo data** (`isDemo`), local only, never uploaded, hidden as soon as real work arrives. |
 
 ---
@@ -378,7 +378,7 @@ Plain vars live in the `vars` block of each wrangler config; everything sensitiv
 | `HYGGE_EMAIL_DOMAIN` | var | Receive-only address domain (`usehygge.cc`). |
 | `HYGGE_APNS_KEY_P8` / `HYGGE_APNS_KEY_ID` / `HYGGE_APNS_TEAM_ID` | secret | APNs signing material. Unset → push is a logged no-op. |
 | `HYGGE_APNS_ENVIRONMENT` | var | `sandbox` (Debug builds) or `production` (Release builds). |
-| `HYGGE_WORKSPACE_MODE` | var (unset) | Leave unset. `retained-v2` enables the dormant workspace/skills foundation — not production-activated. |
+| `HYGGE_WORKSPACE_MODE` | var (`retained-v2`) | Selects retained-workspace V2 in both deployed environments. Rollback to legacy is a deliberate config change; existing V2 registry/lineage state is not rewritten by flipping it. |
 
 iOS build settings that matter: `HYGGE_REQUIRE_CLOUD` (`NO` in Debug, `YES` in Release) and the bundle ID `app.usehygge`.
 
@@ -395,7 +395,7 @@ iOS build settings that matter: `HYGGE_REQUIRE_CLOUD` (`NO` in Debug, `YES` in R
 | [backend/cloudflare/src/](backend/cloudflare/src/) | Backend source. `index.ts` routes, `user-sandbox.ts` is the per-user system of record, `agent.ts` + `llm.ts` + `browser*.ts` run missions. |
 | [backend/cloudflare/migrations/](backend/cloudflare/migrations/) | D1 migrations `0001`–`0008` (init, auth, skills, email, web access, magic links, password confirmations, shared skills V2). |
 | [backend/cloudflare/test/](backend/cloudflare/test/) | Backend tests, including real-SQLite migration tests and isolated-Chrome browser tests. |
-| [backend/cloudflare/container/](backend/cloudflare/container/) | Retained-container image for the dormant workspace V2. Not needed for the live product. |
+| [backend/cloudflare/container/](backend/cloudflare/container/) | Retained-container image for workspace V2. Deploy only a deliberate immutable digest; see [docs/workspace-v2-activation.md](docs/workspace-v2-activation.md). |
 | [docs/](docs/) | Architecture and feature docs: [ARCHITECTURE.md](docs/ARCHITECTURE.md), [live-browser.md](docs/live-browser.md), [scheduled-scanning.md](docs/scheduled-scanning.md), [profile-learning.md](docs/profile-learning.md), [push-notifications.md](docs/push-notifications.md), [email-usehygge-cc.md](docs/email-usehygge-cc.md), [chat-first-setup.md](docs/chat-first-setup.md), [browser-capabilities.md](docs/browser-capabilities.md), and more. |
 | [docs/design/](docs/design/) | Design atoms (SVG component specs + tokens) and the approved flame character source. |
 | [docs/screenshots/](docs/screenshots/) | Product visuals used in this README, plus the flame mark. |
