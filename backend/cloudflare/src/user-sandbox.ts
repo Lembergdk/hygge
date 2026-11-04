@@ -48,6 +48,10 @@ import {
   apnsConfigFromEnv, d1PushDb, messageWaitingEvent, needsHumanEvent, notifyUser, planTickNotifications,
   shouldNotifyNeedsHuman, type PushEvent,
 } from "./push.ts";
+import {
+  claimMissionJob, enqueueMissionJob, finishMissionJob, getMissionJob,
+  isTerminalJobState, type MissionJobMessage,
+} from "./jobs.ts";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const CONTAINER_IMAGE = "cloudflare/debian-trixie";
@@ -138,6 +142,14 @@ export class UserSandbox extends DurableObject<Env> {
         id TEXT PRIMARY KEY, task TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+      CREATE TABLE IF NOT EXISTS mission_jobs (
+        job_id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'queued',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        last_error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS mission_jobs_task ON mission_jobs(task_id, state);
       CREATE TABLE IF NOT EXISTS skill_candidates (
         id TEXT PRIMARY KEY, site TEXT NOT NULL, outcome TEXT NOT NULL,
         body TEXT NOT NULL DEFAULT '{}', corroboration_count INTEGER NOT NULL DEFAULT 0,
@@ -922,7 +934,7 @@ export class UserSandbox extends DurableObject<Env> {
         task.help = null;
         task.status = "running";
         this.saveTask(task);
-        this.ctx.waitUntil(this.runInteractiveTask(task, this.browser()));
+        this.scheduleMission(task);
       }
     }
     // Other mail earns exactly ONE journal entry: a witnessed,
@@ -1154,6 +1166,121 @@ export class UserSandbox extends DurableObject<Env> {
     return run;
   }
 
+  // ---- durable mission jobs (jobs.ts) ------------------------------
+  // Submission paths record a job and hand it to the queue; the
+  // consumer calls back into this object to run it. Without the
+  // binding (local/unit environments) the previous inline
+  // request-driven behavior is preserved exactly.
+
+  /// Submit and (when queued) return the task at once; the mission
+  /// itself runs on queue delivery. Inline fallback awaits the run.
+  private async enqueueOrRunMission(task: any): Promise<any> {
+    const queue = this.env.MISSION_QUEUE;
+    if (!queue || !this.userId) return this.runInteractiveTask(task, this.browser());
+    const enqueuedAt = new Date().toISOString();
+    const { job } = enqueueMissionJob(this.ctx.storage, String(task.id), enqueuedAt, crypto.randomUUID());
+    if (job.state === "running" && this.activeMissions.has(task.id)) {
+      // Already in flight in this isolate: join it rather than
+      // queue a duplicate delivery behind it.
+      return this.runInteractiveTask(task, this.browser());
+    }
+    const message: MissionJobMessage = {
+      v: 1, jobId: job.jobId, userId: this.userId, taskId: String(task.id), enqueuedAt,
+    };
+    try {
+      await queue.send(message);
+    } catch (e) {
+      // The user's approved work must not stall on a queue outage:
+      // close the job visibly and run inline, exactly as before.
+      finishMissionJob(this.ctx.storage, job.jobId, "failed", new Date().toISOString(),
+        `queue send failed: ${String((e as Error)?.message ?? e)}`);
+      task.log?.push("Background queue unavailable; running now instead.");
+      this.saveTask(task);
+      return this.runInteractiveTask(task, this.browser());
+    }
+    return task;
+  }
+
+  /// Fire-and-forget submission for continuations nobody awaits
+  /// (inbox-code resume, browser handback). Inline fallback keeps
+  /// today's waitUntil behavior.
+  private scheduleMission(task: any) {
+    if (!this.env.MISSION_QUEUE || !this.userId) {
+      const run = this.runInteractiveTask(task, this.browser());
+      try { this.ctx.waitUntil(run); } catch { void run; }
+      return;
+    }
+    void this.enqueueOrRunMission(task).catch(() => {});
+  }
+
+  /// Consumer delivery: run one claimed job to its resting state.
+  /// Every non-retryable outcome answers 200 (ack); only a thrown
+  /// run answers 500 so the queue retries and this object resumes
+  /// the orphan through the existing checkpoint path.
+  private async runMissionJob(body: any): Promise<Response> {
+    const jobId = typeof body?.jobId === "string" ? body.jobId : "";
+    const taskId = typeof body?.taskId === "string" ? body.taskId : "";
+    if (!jobId || !taskId) return json({ error: "jobId and taskId required" }, 400);
+    const existing = getMissionJob(this.ctx.storage, jobId);
+    if (!existing || existing.taskId !== taskId) return json({ error: "unknown job" }, 404);
+    if (isTerminalJobState(existing.state)) {
+      return json({ ok: true, jobState: existing.state, duplicate: true });
+    }
+    const task = this.loadTask(taskId);
+    if (!task) {
+      finishMissionJob(this.ctx.storage, jobId, "failed", new Date().toISOString(), "task missing");
+      return json({ ok: true, jobState: "failed" });
+    }
+    if (["succeeded", "failed", "rejected"].includes(String(task.status))) {
+      finishMissionJob(this.ctx.storage, jobId, "done", new Date().toISOString());
+      return json({ ok: true, jobState: "done", taskStatus: task.status });
+    }
+    claimMissionJob(this.ctx.storage, jobId, new Date().toISOString());
+    let result: any;
+    try {
+      result = await this.runInteractiveTask(task, this.browser());
+    } catch (e) {
+      // Leave the job running: redelivery claims it again and the
+      // mission resumes from its durable state. (Legacy failures
+      // are already classified inside runInteractiveTaskInner and
+      // return normally; a throw here is V2 or infrastructure.)
+      return json({ error: String((e as Error)?.message ?? e).slice(0, 300) }, 500);
+    }
+    finishMissionJob(this.ctx.storage, jobId, "done", new Date().toISOString());
+    return json({ ok: true, jobState: "done", taskStatus: result?.status ?? task.status });
+  }
+
+  /// Dead-letter arrival: the queue gave up. Close the job and, if
+  /// the task is still stranded mid-run with nothing live, end it
+  /// the way an interrupted run ends — visibly, with recovery help.
+  private async deadMissionJob(body: any): Promise<Response> {
+    const jobId = typeof body?.jobId === "string" ? body.jobId : "";
+    const taskId = typeof body?.taskId === "string" ? body.taskId : "";
+    if (!jobId || !taskId) return json({ error: "jobId and taskId required" }, 400);
+    const existing = getMissionJob(this.ctx.storage, jobId);
+    if (!existing || existing.taskId !== taskId) return json({ error: "unknown job" }, 404);
+    if (!isTerminalJobState(existing.state)) {
+      finishMissionJob(this.ctx.storage, jobId, "failed", new Date().toISOString(), "delivery retries exhausted");
+    }
+    const task = this.loadTask(taskId);
+    if (task && workspaceMode(this.env.HYGGE_WORKSPACE_MODE) === "legacy"
+        && ["approved", "running"].includes(String(task.status))
+        && !this.activeMissions.has(task.id)) {
+      task.status = "failed";
+      task.failure = { code: "job_delivery_exhausted" };
+      task.help = help("recovery",
+        "I couldn't get this started again after several tries. I can check where we left off in a new session, or you can stop here.",
+        [], "Open new session");
+      const sessionID = task.session_id;
+      task.session_id = null;
+      task.pending_action = null;
+      task.authorized_action = null; // uncertainty must never replay one-shot approval
+      this.saveTask(task);
+      if (sessionID) await this.browser().closeSession(sessionID).catch(() => {});
+    }
+    return json({ ok: true, jobState: "failed" });
+  }
+
   private async resumeBrowser(sessionID: string) {
     const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks")] as Row[];
     const task = rows.map(r => JSON.parse(String(r.task))).find(t => t.session_id === sessionID);
@@ -1179,7 +1306,9 @@ export class UserSandbox extends DurableObject<Env> {
         current.status = "running";
         current.log.push("User handed back the browser; inspect the current page before continuing.");
         this.saveTask(current);
-        await this.runInteractiveTask(current, this.browser());
+        // Durable submission from here: one active job per task
+        // keeps a duplicate handback from double-dispatching.
+        this.scheduleMission(current);
       })().finally(() => this.browserResumes.delete(task.id)));
     };
   }
@@ -1859,6 +1988,25 @@ export class UserSandbox extends DurableObject<Env> {
         }
         return json(await this.handleEmailInbound(body as InboundEmailDelivery), 201);
       }
+
+      // Durable mission jobs: only the queue consumer may deliver
+      // work here (server-side marker, stripped from outside
+      // requests in index.ts — same trust pattern as mail delivery
+      // and the scan sweep). The ids in the body were minted by
+      // this object at submission time; nothing here trusts them
+      // beyond looking up its own ledger and task rows.
+      if (request.method === "POST" && parts.join("/") === "internal/jobs/run") {
+        if (request.headers.get("x-hygge-job-consumer") !== "1") {
+          return json({ error: "not found", path }, 404);
+        }
+        return this.runMissionJob(body);
+      }
+      if (request.method === "POST" && parts.join("/") === "internal/jobs/dead") {
+        if (request.headers.get("x-hygge-job-consumer") !== "1") {
+          return json({ error: "not found", path }, 404);
+        }
+        return this.deadMissionJob(body);
+      }
       if (request.method === "GET" && parts.join("/") === "email/messages") {
         const rows = [...this.ctx.storage.sql.exec(
           "SELECT id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, created_at FROM email_summaries ORDER BY created_at DESC LIMIT 100",
@@ -2170,7 +2318,7 @@ export class UserSandbox extends DurableObject<Env> {
           if (refs.length) task.credential_id = refs[0].id;
           task.status = "running";
           this.saveTask(task);
-          return json(await this.runInteractiveTask(task, browser));
+          return json(await this.enqueueOrRunMission(task));
         }
         if (parts[2] === "run" && task.requires_approval) {
           return json({ error: "approval required: POST /tasks/{id}/approve" }, 403);
@@ -2201,7 +2349,7 @@ export class UserSandbox extends DurableObject<Env> {
           task.status = task.interaction_version === 1 ? "running" : "approved";
           task.log.push(resuming ? "Resumed by user after completing the check" : "Approved by user");
           this.saveTask(task);
-          return json(await this.runInteractiveTask(task, browser));
+          return json(await this.enqueueOrRunMission(task));
         }
       }
 

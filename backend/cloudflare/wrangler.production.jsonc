@@ -57,6 +57,26 @@
     "HYGGE_APNS_KEY_ID": "P7AKJ8SZL4",
     "HYGGE_APNS_TEAM_ID": "3KA38L8A4F"
   },
+  // Durable mission queue (src/jobs.ts): approved work is
+  // submitted here and delivered back into the owner's object to
+  // run, so execution survives request/process termination. The
+  // queues themselves are ensured by CI before deploy.
+  "queues": {
+    "producers": [
+      { "binding": "MISSION_QUEUE", "queue": "hygge-missions-production" }
+    ],
+    "consumers": [
+      {
+        "queue": "hygge-missions-production",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "retry_delay": 60,
+        "dead_letter_queue": "hygge-missions-production-dlq"
+      },
+      { "queue": "hygge-missions-production-dlq", "max_batch_size": 1, "max_retries": 3 }
+    ]
+  },
   "d1_databases": [
     { "binding": "DB", "database_name": "hygge-production", "database_id": "d36ecef4-1b4c-4679-bc52-158b6f552775" }
   ],

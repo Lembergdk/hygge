@@ -17,6 +17,10 @@ export interface MagicEmailBinding {
 export interface Env {
   USER_SANDBOX: DurableObjectNamespace;
   DB: D1Database;
+  /// Durable mission queue (see jobs.ts). Optional only so local
+  /// and unit environments without the binding keep the inline
+  /// request-driven path; deployed configs always set it.
+  MISSION_QUEUE?: Queue;
   EMAIL?: MagicEmailBinding; // send_email binding (login@usehygge.app only)
   BROWSER_PROFILES?: R2Bucket; // browser-profile fallback; optional until production bucket exists
   BROWSER: Fetcher;

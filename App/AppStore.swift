@@ -1829,8 +1829,9 @@ final class AppStore {
         guard let export = try? await backend.exportState() else { return false }
         guard revisionBeforePull == profileEditRevision else { return false }
         applyServerExport(export)
-        if let remoteTasks = try? await backend.setupTasks() {
-            for task in remoteTasks where !runningTaskIDs.contains(task.id) {
+        if let remoteRows = try? await backend.setupTaskRows() {
+            for row in remoteRows where !runningTaskIDs.contains(row.task.id) {
+                let task = row.task
                 let previous = tasks.first(where: { $0.id == task.id })?.status
                 if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
                 else { tasks.append(task) }
@@ -1838,6 +1839,18 @@ final class AppStore {
                     if task.kind == .signup { accountStates[task.siteID] = task.connectsExistingAccount ? .watching : .hasAccount }
                     if task.kind == .buildProfile { accountStates[task.siteID] = .watching }
                     if !activityEvents.contains(where: { $0.id == task.id }) { recordTaskEvent(task) }
+                    // Queued work can finish while nobody awaits it:
+                    // the same completion effects approveAndRun
+                    // applies must land here too (both dedupe).
+                    if task.kind == .discover, !row.extractedItems.isEmpty {
+                        addDiscoveredOpportunities(items: row.extractedItems, task: task)
+                    }
+                    if task.kind == .apply, let oppID = task.opportunityID {
+                        if let appIndex = applications.firstIndex(where: { $0.opportunityID == oppID }) {
+                            applications[appIndex].stage = .submitted
+                        }
+                        setStatus(.applied, for: oppID)
+                    }
                 }
             }
         }
