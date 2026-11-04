@@ -6,6 +6,14 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      gateway_smoke:
+        description: "Run synthetic Responses checks through the staging gateway (no deploy)"
+        type: boolean
+        default: false
+      agent_evaluation:
+        description: "Run synthetic persistent conversations through staging gateway (no deploy)"
+        type: boolean
+        default: false
       deploy_production:
         description: "Also deploy production after tests pass"
         type: boolean
@@ -24,6 +32,11 @@ jobs:
         run: python3 scripts/check-flame-assets.py
       - name: Release app-link validation tests
         run: python3 scripts/test-release-app-links.py
+      - name: Ensure Metal compiler for flame stretch shader
+        run: |
+          if ! xcrun metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
       - name: iOS build (unsigned)
         run: >
           xcodebuild -project Hygge.xcodeproj -scheme Hygge
@@ -47,6 +60,11 @@ jobs:
         run: npx wrangler deploy --dry-run -c wrangler.staging.jsonc --outdir /tmp/hygge-browser-test-bundle
       - name: Install retained-container test dependencies
         run: npm --prefix container ci --ignore-scripts
+      - name: Retained-container artifact and RPC tests
+        timeout-minutes: 10
+        run: npm --prefix container test
+        env:
+          HYGGE_TEST_CHROME: /usr/bin/google-chrome
       - name: Browser capabilities in isolated Chrome
         run: npm run test:browser
         env:
@@ -57,6 +75,9 @@ jobs:
   deploy-staging:
     needs: [core-tests, backend-tests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: hygge-staging-deployment
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -70,20 +91,45 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
+      - name: Check this revision is still current main
+        id: current-main
+        run: |
+          current_main=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$current_main" = "$GITHUB_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipping stale main revision $GITHUB_SHA; current main is $current_main"
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Ensure password confirmation table
+        if: steps.current-main.outputs.current == 'true'
         run: npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --file migrations/0007_password_confirmations.sql
       - name: Ensure mission queues
+        if: steps.current-main.outputs.current == 'true'
         run: |
           for q in hygge-missions-staging hygge-missions-staging-dlq; do
             npx wrangler queues list | grep -qw "$q" || npx wrangler queues create "$q"
           done
       - name: Ensure workspace checkpoint bucket
+        if: steps.current-main.outputs.current == 'true'
         run: npx wrangler r2 bucket info hygge-workspace-checkpoints-staging >/dev/null 2>&1 || npx wrangler r2 bucket create hygge-workspace-checkpoints-staging
       - name: Ensure shared skills V2 tables
+        if: steps.current-main.outputs.current == 'true'
         run: npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --file migrations/0008_shared_skills_v2.sql
       - name: Deploy staging
-        run: npx wrangler deploy -c wrangler.staging.jsonc
+        if: steps.current-main.outputs.current == 'true'
+        id: deployment
+        run: |
+          # main may have advanced while the idempotent prerequisites ran.
+          current_main=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$current_main" != "$GITHUB_SHA" ]; then
+            echo "::notice::Skipping revision superseded during staging preparation"
+            exit 0
+          fi
+          npx wrangler deploy -c wrangler.staging.jsonc
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
       - name: Health check
+        if: steps.deployment.outputs.deployed == 'true'
         run: curl -fsS https://api-staging.usehygge.app/health
 
   deploy-production:
@@ -117,3 +163,41 @@ jobs:
         run: npx wrangler deploy -c wrangler.production.jsonc
       - name: Health check
         run: curl -fsS https://api.usehygge.app/health
+
+  responses-gateway-smoke:
+    if: github.event_name == 'workflow_dispatch' && inputs.gateway_smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend/cloudflare
+    env:
+      # Try the existing deployment token; no token or policy is created/changed.
+      # A 403 is a credential gap, never permission to bypass the gateway.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test text, vision, streaming and synthetic tools through staging gateway
+        run: node --experimental-strip-types scripts/responses-gateway-smoke.mts
+
+  persistent-agent-evaluation:
+    if: github.event_name == 'workflow_dispatch' && inputs.agent_evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Synthetic reasoning, continuity, memory and cleanup checks
+        working-directory: backend/cloudflare
+        run: node --experimental-strip-types scripts/persistent-agent-evaluation.mts

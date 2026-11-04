@@ -53,6 +53,8 @@ struct BackendClient {
     var baseURL: URL {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--settings-preview") {
+            if ProcessInfo.processInfo.arguments.contains("--email-ui-fixture") { return URL(string: "http://127.0.0.1:8769")! }
+            if ProcessInfo.processInfo.arguments.contains("--conversation-preview") { return URL(string: "http://127.0.0.1:18769")! }
             return URL(string: ProcessInfo.processInfo.arguments.contains("--browser-preview") ? "http://127.0.0.1:8768" : "http://127.0.0.1:9")!
         }
         #endif
@@ -287,9 +289,16 @@ struct BackendClient {
             var id: String; var senderDomain: String; var subject: String
             var summary: String; var highlights: [String]
         }
+        /// The feed card the latest message was sent about
+        /// ("Chat about this"): "this"/"it" mean this object.
+        struct FocusLine: Encodable {
+            var kind: String; var id: String; var title: String
+            var subtitle: String; var siteId: String?
+        }
         var sites: [SiteLine]
         var inbox: [MailLine]
         var paused: Bool
+        var focus: FocusLine?
     }
 
     struct ChatIntentActionDTO: Decodable, Equatable {
@@ -309,6 +318,7 @@ struct BackendClient {
 
     private struct ChatIntentResponse: Decodable {
         var action: ChatIntentActionDTO?
+        var actions: [ChatIntentActionDTO]?
         var simulated: Bool?
     }
 
@@ -317,10 +327,21 @@ struct BackendClient {
     /// in the store before anything runs.
     func chatIntent(transcript: [TranscriptLine], profile: EarningsProfile,
                     context: ChatIntentContext) async throws -> ChatIntentActionDTO? {
+        try await chatIntentActions(transcript: transcript, profile: profile, context: context).first
+    }
+
+    /// The model's tool calls for this message: several, one, or
+    /// none. The store validates each against live state and runs
+    /// what survives; consequential kinds still wait for the
+    /// confirmation card.
+    func chatIntentActions(transcript: [TranscriptLine], profile: EarningsProfile,
+                           context: ChatIntentContext) async throws -> [ChatIntentActionDTO] {
         let response: ChatIntentResponse = try await post(
             "onboarding/intent",
             body: ChatIntentBody(transcript: transcript, profile: profile, context: context))
-        return response.action
+        if let actions = response.actions, !actions.isEmpty { return Array(actions.prefix(5)) }
+        if let action = response.action { return [action] }
+        return []
     }
 
     /// The lifelong conversation thread (post-onboarding). Same SSE endpoint,
@@ -331,6 +352,57 @@ struct BackendClient {
                          body: OnboardingBody(step: "general", transcript: transcript,
                                               profile: profile, contextSummary: contextSummary),
                          onDelta: onDelta)
+    }
+
+    // New chat uses one persistent native-tool conversation; no intent preflight.
+    func conversationState() async throws -> PersistentConversationState {
+        try await get("chat/state")
+    }
+    func conversationDecision(generation: String, proposalID: String, approve: Bool) async throws -> PersistentConversationState {
+        try await post("chat/proposals/\(proposalID)", body: ["generation": generation,
+            "decision": approve ? "approve" : "reject", "id": UUID().uuidString.lowercased()])
+    }
+    private var conversationDeviceID: String {
+        let key = "hyggeConversationDeviceID"
+        if let saved = UserDefaults.standard.string(forKey: key) { return saved }
+        let value = UUID().uuidString.lowercased()
+        UserDefaults.standard.set(value, forKey: key)
+        return value
+    }
+    func claimConversationDeviceAction(generation: String, proposalID: String) async throws {
+        struct Receipt: Decodable { var claimed: Bool }
+        let result: Receipt = try await post("chat/device-claim", body: ["generation": generation, "proposalId": proposalID, "deviceID": conversationDeviceID])
+        guard result.claimed else { throw URLError(.cannotParseResponse) }
+    }
+    func conversationDeviceResult(generation: String, proposalID: String, success: Bool) async throws -> PersistentConversationState {
+        struct Body: Encodable { var generation: String; var proposalId: String; var id: String; var success: Bool; var deviceID: String }
+        return try await post("chat/device-result", body: Body(generation: generation, proposalId: proposalID,
+            id: UUID().uuidString.lowercased(), success: success, deviceID: conversationDeviceID))
+    }
+    func resetConversation(generation: String) async throws -> PersistentConversationState {
+        try await post("chat/reset", body: ["generation": generation])
+    }
+    func conversationTurn(id: String, generation: String, text: String?, focus: PersistentChatFocus? = nil,
+                          onDelta: @escaping @MainActor (String) -> Void) async throws -> PersistentConversationState {
+        struct Body: Encodable { var id: String; var generation: String; var text: String?; var focus: PersistentChatFocus? }
+        struct Event: Decodable { var type: String; var text: String?; var data: PersistentConversationState? }
+        var request = URLRequest(url: baseURL.appendingPathComponent("chat/turn"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 240
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        request.httpBody = try JSONEncoder().encode(Body(id: id, generation: generation, text: text, focus: focus))
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { throw URLError(.badServerResponse) }
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data:"), let data = line.dropFirst(5).data(using: .utf8),
+                  let event = try? JSONDecoder().decode(Event.self, from: data) else { continue }
+            if event.type == "reply-delta", let text = event.text { await onDelta(text) }
+            if event.type == "final", let state = event.data { return state }
+            if event.type == "error" { throw URLError(.networkConnectionLost) }
+        }
+        throw URLError(.cannotParseResponse)
     }
 
     /// Deletes a saved login. The trusted sign-in for the site is a
@@ -357,8 +429,8 @@ struct BackendClient {
     // MARK: - Hygge email address (Brief 04, receive only)
     //
     // The address endpoints only ever describe the signed-in user's
-    // own address. Filed mail is summary-level; codes never come
-    // to the device. There is no send call here by design.
+    // own address. Original ordinary messages use a separate on-demand
+    // route; protected codes never come to the device. No send call.
 
     func hyggeEmailAddress() async throws -> HyggeEmailAddress? {
         let response: HyggeEmailAddressResponse = try await get("email/address")
@@ -370,24 +442,57 @@ struct BackendClient {
         return response.hyggeEmail
     }
 
-    private struct FiledEmailResponse: Decodable { var messages: [FiledEmailSummary] }
+    struct SenderRule: Decodable, Equatable { var senderDomain: String; var choice: String }
+    private struct FiledEmailResponse: Decodable {
+        var messages: [FiledEmailSummary]
+        var senderRules: [SenderRule]?
+        var nextCursor: String?
+    }
 
     func filedEmail() async throws -> [FiledEmailSummary] {
         let response: FiledEmailResponse = try await get("email/messages")
         return response.messages
     }
 
+    /// Filed mail plus the remembered sender rules (the app only
+    /// acts on "ignore"; everything else is the evaluate default).
+    func filedEmailInbox(cursor: String? = nil) async throws -> (messages: [FiledEmailSummary], ignoredDomains: [String], nextCursor: String?) {
+        let response: FiledEmailResponse = try await get("email/messages", query: cursor.map { [URLQueryItem(name: "cursor", value: $0)] } ?? [])
+        return (response.messages, (response.senderRules ?? []).filter { $0.choice == "ignore" }.map(\.senderDomain), response.nextCursor)
+    }
+    private struct OriginalEmailResponse: Decodable { var original: OriginalEmail? }
+    func originalEmail(id: String) async throws -> OriginalEmail? {
+        let response: OriginalEmailResponse = try await get("email/messages/\(id)/original")
+        return response.original
+    }
+    private struct OwnEmailAddressesResponse: Decodable { var addresses: [OwnEmailAddress] }
+    func ownEmailAddresses() async throws -> [OwnEmailAddress] {
+        let response: OwnEmailAddressesResponse = try await get("email/addresses")
+        return response.addresses
+    }
+    private struct OwnEmailBody: Encodable { var address: String }
+    func addOwnEmailAddress(_ address: String) async throws -> OwnEmailAddress {
+        try await post("email/addresses", body: OwnEmailBody(address: address))
+    }
+    func removeOwnEmailAddress(_ address: String) async -> Bool {
+        await delete(path: "email/addresses", query: [URLQueryItem(name: "address", value: address)])
+    }
+    private struct MarkEmailBody: Encodable { var marked: Bool }
+    struct MarkEmailResponse: Decodable { var marked: Bool; var ownerAddress: OwnEmailAddress? }
+    func markEmailAsMe(id: String, marked: Bool) async throws -> MarkEmailResponse {
+        try await post("email/messages/\(id)/me", body: MarkEmailBody(marked: marked))
+    }
+
     private struct EmailDecisionBody: Encodable { var senderDomain: String; var choice: String }
     private struct EmailDecisionAck: Decodable { var remembered: Bool? }
 
-    /// Remembers how one sender's mail should be treated from now
-    /// on ("work", "file", or "ignore"). Returns the fresh inbox so
-    /// the caller can update in one step.
-    func decideEmailSender(domain: String, choice: String) async -> [FiledEmailSummary]? {
+    /// Remembers the one sender call: "ignore" opts the sender
+    /// out of evaluation; anything else restores the default.
+    /// Returns the acknowledgment; local preference changes follow only on success.
+    func decideEmailSender(domain: String, choice: String) async -> Bool {
         let ack: EmailDecisionAck? = try? await post(
             "email/decision", body: EmailDecisionBody(senderDomain: domain, choice: choice))
-        guard ack?.remembered == true else { return nil }
-        return try? await filedEmail()
+        return ack?.remembered == true
     }
 
     // MARK: - Plus subscription + custom email name
@@ -473,8 +578,10 @@ struct BackendClient {
         return (200...299).contains(http.statusCode)
     }
 
-    private func delete(path: String) async -> Bool {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+    private func delete(path: String, query: [URLQueryItem] = []) async -> Bool {
+        var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+        if !query.isEmpty { components.queryItems = query }
+        var request = URLRequest(url: components.url!)
         request.httpMethod = "DELETE"
         if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
         guard let (_, response) = try? await URLSession.shared.data(for: request),
@@ -882,8 +989,10 @@ struct BackendClient {
         return try JSONDecoder().decode(Response.self, from: data)
     }
 
-    private func get<Response: Decodable>(_ path: String) async throws -> Response {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+    private func get<Response: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> Response {
+        var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+        if !query.isEmpty { components.queryItems = query }
+        var request = URLRequest(url: components.url!)
         request.timeoutInterval = 8
         if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -898,7 +1007,7 @@ struct BackendClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
-        request.timeoutInterval = path.hasPrefix("tasks/") ? 180 : 20
+        request.timeoutInterval = (path.hasPrefix("tasks/") || path.hasPrefix("chat/")) ? 240 : 20
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {

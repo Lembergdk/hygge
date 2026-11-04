@@ -15,7 +15,7 @@ const OBJECTIVES: Record<string, string> = {
   enjoyWork: "Ask what kinds of work they actually enjoy. Suggest categories and skills tailored to anything they've mentioned. Taste first, taxonomy second.",
   lowestRate: "Lead with the question: ask their lowest rate ($/hr or per job). One clause of why: anything below it gets quietly dropped. Do not mention their chosen work kinds.",
   where: "Lead with the question: ask roughly where they are (town or city), one clause of why (keeps local work near). Do not mention work kinds or rate.",
-  when: "Ask for calendar permission in one short sentence: so you never double-book them and approved gigs land in their calendar. Do NOT ask about availability, and do not mention work kinds, rate, or place. Say continuing without it is fine.",
+  when: "Ask for two optional permissions in one message: calendar, so you never double-book them and approved gigs land in it, and notifications, so you can tap them when something needs them or new work turns up. Do NOT ask about availability, and do not mention work kinds, rate, or place. Say continuing without them is fine.",
   // Legacy step name from older app builds; treat as the where question.
   whereWhen: "Ask roughly where they are (town or city). Explain briefly: it keeps local work near them. Only this one question.",
   summary: "Summarize their profile in a warm sentence or two, propose a one-line headline, and end with: I'll look overnight and tell you in the morning - sooner if something needs you.",
@@ -28,7 +28,7 @@ const FALLBACK_REPLIES: Record<string, string> = {
   enjoyWork: "What kinds of work do you actually enjoy? Tap any that fit, or just tell me.",
   lowestRate: "What's your lowest rate? Anything below it, I'll quietly drop — you'll never see it.",
   where: "Roughly where are you? It keeps local work close to home.",
-  when: "One permission helps: your calendar, so I never double-book you and approved gigs land in it.",
+  when: "Two permissions help, both optional: your calendar, so I never double-book you and approved gigs land in it — and notifications, so I can tap you when something needs you or new work turns up. Continuing without them is fine.",
   whereWhen: "Roughly where are you? It keeps local work close to home.",
   summary: "That's all I need to start. I'll look overnight and tell you in the morning — sooner if something needs you.",
   general: "I'm here. Ask me anything, or tell me what to change.",
@@ -282,8 +282,44 @@ export type ChatIntentAction =
 
 const DOMAIN_SHAPE = /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/;
 
+export interface ChatSiteCandidate { name: string; domain: string; siteId: string | null }
+
+/// Open proposals win over catalog aliases. Merely appearing in the user's
+/// site inventory does not mean a site has been approved for tracking.
+export function chatSiteCandidates(
+  sites: Array<ChatSiteCandidate & { tracked: boolean }>,
+  proposals: ChatSiteCandidate[], catalog: ChatSiteCandidate[],
+): ChatSiteCandidate[] {
+  const normalize = (domain: string) => domain.trim().toLowerCase().replace(/^www\./, "");
+  const tracked = new Set(sites.filter((s) => s.tracked).map((s) => normalize(s.domain)));
+  const seen = new Set<string>();
+  const result: ChatSiteCandidate[] = [];
+  for (const entry of [...proposals, ...sites.filter((s) => !s.tracked), ...catalog]) {
+    const domain = normalize(entry.domain);
+    if (!DOMAIN_SHAPE.test(domain) || tracked.has(domain) || seen.has(domain)) continue;
+    seen.add(domain);
+    result.push({ name: entry.name, domain, siteId: entry.siteId });
+  }
+  return result;
+}
+
+/// Validate a list of actions (confirmations like "both" or
+/// "add all three"): each entry validated exactly like a single
+/// action, invalid entries dropped, null when nothing survives.
+export function validateChatIntentList(parsed: any, context: any): ChatIntentAction[] | null {
+  const raw = parsed?.actions;
+  if (!Array.isArray(raw)) return null;
+  const kept = raw
+    .map((entry) => validateOneAction(entry, context))
+    .filter((a): a is ChatIntentAction => a !== null).slice(0, 5);
+  return kept.length ? kept : null;
+}
+
 export function validateChatIntent(parsed: any, context: any): ChatIntentAction | null {
-  const action = parsed?.action;
+  return validateOneAction(parsed?.action, context);
+}
+
+function validateOneAction(action: any, context: any): ChatIntentAction | null {
   if (!action || typeof action !== "object") return null;
   const sites: any[] = Array.isArray(context?.sites) ? context.sites : [];
   const inbox: any[] = Array.isArray(context?.inbox) ? context.inbox : [];
@@ -328,24 +364,31 @@ export function validateChatIntent(parsed: any, context: any): ChatIntentAction 
 }
 
 const INTENT_SYSTEM = [
-  "You decide whether the user's latest Hygge chat message wants something DONE.",
+  "You are Hygge's action layer: you have tools, and you decide what to do with them.",
+  "context.focus, when present, is the exact feed card the latest message is about —",
+  "\"this\", \"it\", and \"that one\" refer to it; prefer its ids over any other referent.",
+  "Reason freely about what the user wants — phrasing is free, there are no magic words,",
+  "and there is no limit of one: do everything they asked for, in order, with at most five calls.",
   "Reason about referents from the conversation (\"it\", \"that forward\", \"the Rover one\")",
   "and about intent in your own judgment — phrasing is free, there are no magic words.",
-  "Reply ONLY with JSON: {\"action\": {...} } or {\"action\": null}.",
-  "Actions: {\"kind\":\"scan\"|\"join\"|\"stop\",\"siteId\":<id from sites>} (look for work on it /",
-  "add or re-add it / stop watching it), {\"kind\":\"add\",\"domain\":<site address they named>},",
+  "Reply ONLY with JSON: {\"actions\": [ ... ] } or {\"action\": {...} } for a single call, or null/empty when",
+  "nothing should be done (conversation, questions the context cannot act on, stated preferences,",
+  "anything negated like \"don't scan Rover\", anything you are genuinely unsure is an instruction).",
+  "Tools: {\"kind\":\"scan\"|\"join\"|\"stop\",\"siteId\":<id from context>} (look for work on a tracked site /",
+  "add or re-add it / stop watching it), {\"kind\":\"add\",\"domain\":<site address — from candidates",
+  "when named there, else the address as you know it>} (track a brand-new site),",
   "{\"kind\":\"email\",\"mailId\":<id from inbox or null for the inbox in general>,\"act\":<true when they",
   "want something DONE about it, false when asking what it says>}, {\"kind\":\"floor\",\"amount\":<number>},",
   "{\"kind\":\"pause\"|\"resume\"|\"approve\"|\"book\"|\"explainDropped\"} (approve/book = the waiting draft",
   "or booking; explainDropped = asking what was skipped in search).",
-  "Use ONLY ids present in the context. Return null for: conversation, questions the context",
-  "cannot act on, stated preferences, anything negated (\"don't scan Rover\"), and anything you are",
-  "genuinely unsure is an instruction. One action at most — the main one.",
+  "context.candidates lists sites you may offer or the user may confirm — prefer a candidate's domain",
+  "when they name it. A confirmation (\"both\", \"yes, add them\", \"all three\") becomes one tool call per site.",
+  "Use ONLY ids present in the context; for \"add\", any well-formed domain is fine.",
 ].join(" ");
 
-export async function chatIntent(args: any): Promise<{ action: ChatIntentAction | null; simulated: boolean }> {
+export async function chatIntent(args: any): Promise<{ action: ChatIntentAction | null; actions: ChatIntentAction[] | null; simulated: boolean }> {
   const { client, transcript = [], context = {}, profile = {} } = args ?? {};
-  if (!client?.configured) return { action: null, simulated: true };
+  if (!client?.configured) return { action: null, actions: null, simulated: true };
   try {
     const text = await client.complete({
       model: client.cfg.modelFast, system: INTENT_SYSTEM, conversationId: args.conversationId,
@@ -358,8 +401,11 @@ export async function chatIntent(args: any): Promise<{ action: ChatIntentAction 
         conversation: capTranscriptText(transcript),
       }),
     });
-    return { action: validateChatIntent(parseDecision(text), context), simulated: false };
+    const parsed = parseDecision(text);
+    const single = validateChatIntent(parsed, context);
+    const actions = validateChatIntentList(parsed, context) ?? (single ? [single] : null);
+    return { action: actions?.length === 1 ? actions[0] : null, actions, simulated: false };
   } catch {
-    return { action: null, simulated: false };
+    return { action: null, actions: null, simulated: false };
   }
 }

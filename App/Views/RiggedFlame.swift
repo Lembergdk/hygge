@@ -45,6 +45,7 @@ struct RiggedFlame: View {
     /// original clip. typingTap: -1 screen-left arm down, 1 right, 0 up.
     var laptop = false
     var typingTap: Int = 0
+    var touch = FlameTouchPhysics()
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -102,16 +103,20 @@ struct RiggedFlame: View {
             .offset(y: size * 0.40)
     }
 
-    private func rig(swing: Double, bob: CGFloat) -> some View {
-        ZStack {
-            layer("FlameRigLegScreenLeft")
-                .rotationEffect(.degrees(pose.legSL + swing * 26),
-                                anchor: UnitPoint(x: 0.396, y: 0.656))
-            layer("FlameRigLegScreenRight")
-                .rotationEffect(.degrees(pose.legSR - swing * 26),
-                                anchor: UnitPoint(x: 0.571, y: 0.656))
+    private func attachment(_ point: UnitPoint) -> CGSize {
+        let displacement = touch.displacement(at: FlamePoint(
+            x: point.x * 210, y: point.y * 262.5))
+        return CGSize(width: displacement.x * Double(size) / 210,
+                      height: displacement.y * Double(size) / 210)
+    }
+
+    private func angle(_ joint: Int) -> Double { touch.joints[joint].angle * 180 / .pi }
+
+    private var torso: some View {
+        let padding = size * 0.65
+        let stretch = touch.stretch
+        return ZStack {
             layer("FlameRigBody")
-                .shadow(color: .black.opacity(0.22), radius: 12, y: 6)
                 .overlay {
                     if pose.sickTint > 0 {
                         layer("FlameRigBody")
@@ -119,42 +124,66 @@ struct RiggedFlame: View {
                             .opacity(pose.sickTint)
                     }
                 }
-            // Conditional layers, not opacities: the actor's breathing
-            // animation is repeatForever over this subtree and would
-            // capture an opacity change into an endless fade in/out.
-            if laptop {
-                layer("FlameRigTypingArmScreenLeft")
-                    .rotationEffect(.degrees(pose.armSL + (typingTap < 0 ? -5 : 0)),
-                                    anchor: UnitPoint(x: 0.226, y: 0.538))
-                    .zIndex(2)
-                layer("FlameRigTypingArmScreenRight")
-                    .rotationEffect(.degrees(pose.armSR + (typingTap > 0 ? 5 : 0)),
-                                    anchor: UnitPoint(x: 0.771, y: 0.538))
-                    .zIndex(2)
-            } else {
-                layer("FlameRigArmScreenLeft")
-                    .rotationEffect(.degrees(pose.armSL - swing * 16),
-                                    anchor: UnitPoint(x: 0.254, y: 0.559))
-                    .zIndex(2)
-                layer("FlameRigArmScreenRight")
-                    .rotationEffect(.degrees(pose.armSR + swing * 16),
-                                    anchor: UnitPoint(x: 0.728, y: 0.559))
-                    .zIndex(2)
-            }
             if !pose.backTurned {
                 layer(pose.face.asset)
                     .offset(x: pose.faceDX, y: pose.faceDY)
-                    .transition(.opacity)
-                    // Under the lid when it's up, so his cheeks are cut
-                    // by its top edge like the original clip.
-                    .zIndex(laptop ? 3 : 5)
             }
+        }
+        .padding(padding)
+        .distortionEffect(
+            ShaderLibrary.flameStretch(
+                .float(Float(size)), .float(Float(padding)),
+                .float2(Float(touch.grab.x), Float(touch.grab.y)),
+                .float2(Float(stretch.x), Float(stretch.y)),
+                .float(Float(touch.carryBlend))),
+            maxSampleOffset: CGSize(width: size * 0.65, height: size * 0.65),
+            isEnabled: touch.isActive && stretch.length > 0.01)
+        .frame(width: size, height: size * 1.25)
+        .shadow(color: .black.opacity(0.22), radius: 12, y: 6)
+    }
+
+    private func rig(swing: Double, bob: CGFloat) -> some View {
+        ZStack {
+            layer("FlameRigLegScreenLeft")
+                .rotationEffect(.degrees(pose.legSL + swing * 26 + angle(0)),
+                                anchor: UnitPoint(x: 0.396, y: 0.656))
+                .offset(attachment(UnitPoint(x: 0.396, y: 0.656)))
+            layer("FlameRigLegScreenRight")
+                .rotationEffect(.degrees(pose.legSR - swing * 26 + angle(1)),
+                                anchor: UnitPoint(x: 0.571, y: 0.656))
+                .offset(attachment(UnitPoint(x: 0.571, y: 0.656)))
+            torso
             if laptop {
-                layer("FlameRigLaptop").zIndex(4)
+                layer("FlameRigTypingArmScreenLeft")
+                    .rotationEffect(.degrees(pose.armSL + angle(4) + (typingTap < 0 ? -5 : 0)),
+                                    anchor: UnitPoint(x: 0.226, y: 0.538))
+                    .offset(attachment(UnitPoint(x: 0.226, y: 0.538)))
+                    .zIndex(2)
+                layer("FlameRigTypingArmScreenRight")
+                    .rotationEffect(.degrees(pose.armSR + angle(5) + (typingTap > 0 ? 5 : 0)),
+                                    anchor: UnitPoint(x: 0.771, y: 0.538))
+                    .offset(attachment(UnitPoint(x: 0.771, y: 0.538)))
+                    .zIndex(2)
+                layer("FlameRigLaptop")
+                    .rotationEffect(.radians(touch.joints[6].angle),
+                                    anchor: UnitPoint(x: 0.5, y: 0.672))
+                    .offset(attachment(UnitPoint(x: 0.5, y: 0.672)))
+                    .zIndex(4)
+            } else {
+                layer("FlameRigArmScreenLeft")
+                    .rotationEffect(.degrees(pose.armSL - swing * 16 + angle(2)),
+                                    anchor: UnitPoint(x: 0.254, y: 0.559))
+                    .offset(attachment(UnitPoint(x: 0.254, y: 0.559)))
+                    .zIndex(2)
+                layer("FlameRigArmScreenRight")
+                    .rotationEffect(.degrees(pose.armSR + swing * 16 + angle(3)),
+                                    anchor: UnitPoint(x: 0.728, y: 0.559))
+                    .offset(attachment(UnitPoint(x: 0.728, y: 0.559)))
+                    .zIndex(2)
             }
         }
         .offset(x: pose.dx, y: pose.dy + bob)
         .scaleEffect(x: pose.sx * pose.flipX, y: pose.sy, anchor: .bottom)
-        .rotationEffect(.degrees(pose.rot), anchor: .bottom)
+        .rotationEffect(.degrees(pose.rot + touch.lean * 180 / .pi), anchor: .bottom)
     }
 }

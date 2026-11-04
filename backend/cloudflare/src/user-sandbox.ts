@@ -1,3 +1,10 @@
+import { readEmailHistory } from "./email-history.ts";
+import { EmailOwnerAddresses, normalizeOwnEmail } from "./email-owner-addresses.ts";
+import { recordWorkspaceTaskOutcome } from './chat-task-outcomes.ts';
+import { ChatAgent } from './chat-agent.ts';
+import { ChatStore, sqlChatStorage, type ChatDocument } from './chat-store.ts';
+import { chatServices } from './chat-services.ts';
+import { latestMissionJob } from './jobs.ts';
 import { classifyBrowserFailure } from "./browser-failure.ts";
 import { help, applyHelpReply, mobileTask, canResumeWithInboxCode, reconcileEndedSession, rejectTaskHelp } from "./task-help.ts";
 import { bindWorkspaceOwner, workspaceMode } from './workspace-owner.ts';
@@ -10,7 +17,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { json } from "./env.ts";
 import { LLMClient, type LLMConfig } from "./llm.ts";
-import { chatIntent, onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
+import { chatSiteCandidates, chatIntent, onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { BrowserRunBrowser } from "./browser.ts";
 import { handleProfilePhoto, profilePhotoAllowedForTask, type ProfilePhoto, type ProfilePhotoStore } from "./profile-photo.ts";
 import { makeDecider, runMission, distillHints, emailCodeAllowedForTask } from "./agent.ts";
@@ -22,7 +29,7 @@ import {
   type SharedSkill, type SkillCandidate, type SkillOutcome,
 } from "./skills.ts";
 import {
-  attachEmailToTasks, parseOwnerEmailCommand, takeFreshCode,
+  attachEmailToTasks, parseOwnerEmailCommand, takeFreshCode, accountEmailAddresses, senderEmailOf, addressForUser, d1EmailAddressDb,
   type InboundEmailDelivery,
 } from "./email.ts";
 import {
@@ -169,7 +176,8 @@ export class UserSandbox extends DurableObject<Env> {
       -- never touches this table, and vice versa.
       -- Brief 04 receive-only email. Codes are sealed with this
       -- user's DEK, expire in 30 minutes, and are deleted on first
-      -- consumption; summaries hold no code and no full body.
+      -- consumption; summaries hold no code. Ordinary original bodies
+      -- are sealed separately and fetched only by the authenticated user.
       CREATE TABLE IF NOT EXISTS email_codes (
         id TEXT PRIMARY KEY, sender_domain TEXT NOT NULL,
         iv TEXT NOT NULL, ciphertext TEXT NOT NULL,
@@ -188,6 +196,9 @@ export class UserSandbox extends DurableObject<Env> {
       );
       -- The user's remembered answer per sender domain, so unknown
       -- senders are only ever asked about once.
+      CREATE TABLE IF NOT EXISTS email_originals (
+        message_id TEXT PRIMARY KEY, iv TEXT NOT NULL, ciphertext TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS email_sender_rules (
         sender_domain TEXT PRIMARY KEY, choice TEXT NOT NULL,
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -211,9 +222,13 @@ export class UserSandbox extends DurableObject<Env> {
       ["highlights", "TEXT NOT NULL DEFAULT '[]'"],
       ["site_id", "TEXT"],
       ["content_hash", "TEXT"],
+      ["jobs", "TEXT NOT NULL DEFAULT '[]'"],
+      ["title", "TEXT"], ["sender_email", "TEXT"], ["marked_me", "INTEGER NOT NULL DEFAULT 0"],
     ] as const) {
       if (!summaryColumns.has(name)) ctx.storage.sql.exec(`ALTER TABLE email_summaries ADD COLUMN ${name} ${def}`);
     }
+    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS idx_email_history ON email_summaries(created_at DESC, id DESC)");
+    new EmailOwnerAddresses(ctx.storage.sql).ensure();
     // Brief 01: per-user state tables (feed items, messages, profile,
     // sites, opportunities, applications, proposals, account states,
     // journal events, beliefs, search evidence). tasks/credentials/
@@ -226,7 +241,7 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   private stateStore(): StateStore {
-    return new StateStore(createSqliteStateDb(this.ctx.storage.sql));
+    return new StateStore(createSqliteStateDb(this.ctx.storage.sql),id=>!this.chatStore().db.get(`deleted-message:${id}`));
   }
 
   private scanStore(): ScanStore {
@@ -394,7 +409,7 @@ export class UserSandbox extends DurableObject<Env> {
       await this.ctx.storage.put('wrappedDek', backup.wrapped);
       return recovered;
     }
-    const encrypted = ['credentials', 'email_codes'].some(table => Number(([...this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`)] as Row[])[0]?.n) > 0)
+    const encrypted = ['credentials', 'email_codes', 'email_originals'].some(table => Number(([...this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`)] as Row[])[0]?.n) > 0)
       || Number(([...this.ctx.storage.sql.exec('SELECT COUNT(*) AS n FROM session_profiles WHERE has_profile=1')] as Row[])[0]?.n) > 0;
     if (encrypted) throw new Error('MISSING_ORIGINAL_ENCRYPTION_KEY');
     const dek = await vault.generateDEK();
@@ -422,7 +437,7 @@ export class UserSandbox extends DurableObject<Env> {
     return this.workspaceExecution ??= createWorkspaceExecution({
       owner:bindWorkspaceOwner(this.ctx.storage,this.userId,this.env.HYGGE_ENV,this.ctx.id.toString()),
       env:this.env,storage:this.ctx.storage,container:this.ctx.container!,
-      loadTask:id=>this.loadTask(id),projectTask:task=>this.saveTask(task),
+      loadTask:id=>this.loadTask(id),projectTask:task=>{this.saveTask(task);recordWorkspaceTaskOutcome(this.chatStore(),task);},
       denyFetcher:(this.ctx as any).exports?.OutboundDeny?.({props:{}}) as Fetcher,
     });
   }
@@ -510,6 +525,13 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   // ---- tasks ----------------------------------------------------
+
+  private executionView(task:any) {
+    const job=latestMissionJob(this.ctx.storage,task.id);
+    const progress=workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2'?this.workspace().runner.progress(task.id):null;
+    return {...task,execution:{jobId:job?.jobId??null,jobState:job?.state??null,attempts:job?.attempts??0,
+      ...(progress??{}),...(job?.state==='queued'?{phase:'queued',updatedAt:job.updatedAt}:{})}};
+  }
 
   private loadTask(id: string): any | null {
     const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks WHERE id = ?", id)] as Row[];
@@ -627,12 +649,14 @@ export class UserSandbox extends DurableObject<Env> {
     const rule = ruleRows.length ? String(ruleRows[0].choice) : null;
 
     const relation = delivery.triage?.ownerVerified ? "owner" : tracked ? "site" : "unknown";
+    // Every tracked sender's mail is evaluated for action by
+    // default (highlights, site proposals, chat asks, message
+    // pushes) — there is no work/file question anymore. The one
+    // remembered opt-out is "ignore"; legacy work/file rules
+    // simply mean the default.
     let decision = "none";
     if (delivery.kind === "other") {
-      if (relation === "owner") decision = "work";
-      else if (rule) decision = rule;
-      else if (relation === "site") decision = "work";
-      else decision = "pending";
+      decision = rule === "ignore" ? "ignore" : "work";
     }
     return { relation, decision, site, sites, accountStates };
   }
@@ -816,19 +840,30 @@ export class UserSandbox extends DurableObject<Env> {
     delivery: InboundEmailDelivery,
     triage: ReturnType<UserSandbox["triageEmail"]>,
   ): { domain: string; name: string } | null {
-    if (delivery.triage?.senderAuthenticated !== true) return null;
+    // A proposal is a consent surface (nothing joins or scans
+    // without the user's OK), so it needs no sender-authentication
+    // gate — forwards, which routinely fail alignment, are
+    // exactly the mail this exists for. Authentication still
+    // gates pushes, owner commands, and code use elsewhere.
     const mentionsWork = (delivery.triage?.reading?.mentions ?? []).some((m) => m.kind === "job_alert")
-      || (delivery.triage?.highlights ?? []).some((h) => h.kind === "job_alert");
+      || (delivery.triage?.highlights ?? []).some((h) => h.kind === "job_alert")
+      || (delivery.triage?.reading?.jobs ?? []).length > 0;
     if (!mentionsWork) return null;
     const genericMailboxes = new Set([
       "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
       "yahoo.com", "yahoo.co.uk", "icloud.com", "me.com", "proton.me", "protonmail.com", "aol.com",
+      "usehygge.cc", "usehygge.app",
     ]);
+    // The site the mail points at (its own links) outranks who
+    // sent it — a forwarded LinkedIn alert is about LinkedIn,
+    // not the forwarder's domain, so the sender domain is only
+    // a fallback for unforwarded mail.
+    const forwarded = /^\s*(fwd?|fw)\s*:/i.test(delivery.summary.subject);
     const hosts = [
       ...delivery.summary.actionableItems
         .filter((item) => item.startsWith("Link to "))
         .map((item) => item.slice("Link to ".length).trim().toLowerCase().replace(/^www\./, "")),
-      delivery.summary.senderDomain.toLowerCase(),
+      ...(forwarded ? [] : [delivery.summary.senderDomain.toLowerCase()]),
     ];
     for (const domain of hosts) {
       if (!domain || genericMailboxes.has(domain)) continue;
@@ -862,15 +897,23 @@ export class UserSandbox extends DurableObject<Env> {
       goalTemplate: "Find current opportunities on this site that match my earnings profile and extract their title, pay, location and link.",
     });
     const id = crypto.randomUUID();
+    const jobs = delivery.triage?.reading?.jobs ?? [];
+    const forwarded = /^\s*(fwd?|fw)\s*:/i.test(delivery.summary.subject);
+    const rationale = jobs.length > 1
+      ? `${forwarded ? "Your forwarded job alert" : `A job alert from ${delivery.summary.senderDomain}`} mentioned ${jobs.length} roles there, including ${jobs[0].title}.`
+      : jobs.length === 1
+        ? `${forwarded ? "Your forwarded job alert" : `A job alert from ${delivery.summary.senderDomain}`} mentioned a role there: ${jobs[0].title}.`
+        : `Mail from ${delivery.summary.senderDomain} mentioned work there.`;
     store.upsert("proposals", id, {
       id, siteID: candidate.domain,
-      rationale: `Mail from ${delivery.summary.senderDomain} mentioned work there.`,
+      rationale,
       payPattern: "Paid per job, rates vary by listing",
       dataShared: "Your name, photo and profile text",
       verification: "Email confirmation; a bot check may need you",
       status: "proposed",
       sourceMailDomain: delivery.summary.senderDomain.toLowerCase(),
       sourceMailId: summaryId,
+      sourceMailJobs: jobs,
     });
     store.upsert("accountStates", candidate.domain, { siteID: candidate.domain, state: "proposed" });
   }
@@ -878,6 +921,9 @@ export class UserSandbox extends DurableObject<Env> {
   private async handleEmailInbound(delivery: InboundEmailDelivery) {
     this.pruneExpiredEmailCodes();
     const s = delivery.summary;
+    const verifiedAddress = await new EmailOwnerAddresses(this.ctx.storage.sql).verify(
+      delivery.triage?.senderEmail ?? "", delivery.triage?.senderAuthenticated === true, s.subject);
+    if (verifiedAddress) return { filed: false, kind: delivery.kind, outcome: "address_verified" };
     // One mail, one event: a re-forward (or any re-delivery) of
     // content already filed changes nothing — no second summary,
     // journal entry, proposal, or push.
@@ -901,22 +947,33 @@ export class UserSandbox extends DurableObject<Env> {
     // evidences becomes a feed proposal; work-relevant mail with
     // no job site to attach becomes a chat question; the rest keeps
     // the triage decision. The journal only ever records facts.
-    const siteCandidate = delivery.kind === "other" && triage.relation === "unknown"
+    const readingJobs = delivery.triage?.reading?.jobs ?? [];
+    const evaluated = triage.decision !== "ignore";
+    const siteCandidate = evaluated && delivery.kind === "other" && triage.relation === "unknown"
       ? this.candidateSiteFromMail(delivery, triage) : null;
     const mentionsWorkOrMessage = readingMentions.some((m) => m.kind === "job_alert" || m.kind === "client_message");
-    const chatAsk = !siteCandidate && triage.relation === "unknown" && delivery.kind === "other"
-      && triage.decision === "pending" && mentionsWorkOrMessage
-      && delivery.triage?.senderAuthenticated === true;
+    // Asking is a consent surface like the proposal card, so it
+    // carries no authentication gate either; nothing acts on
+    // the mail's say-so without the user's answer.
+    const chatAsk = evaluated && !siteCandidate && triage.relation === "unknown" && delivery.kind === "other"
+      && (mentionsWorkOrMessage || readingJobs.length > 0);
     const finalDecision = siteCandidate ? "proposed" : chatAsk ? "chat" : triage.decision;
+    const original = delivery.kind === "other" && delivery.original
+      ? await vault.seal(await this.dek(), JSON.stringify(delivery.original), `email-original:${summaryId}`) : null;
+    this.ctx.storage.transactionSync(() => {
     this.ctx.storage.sql.exec(
-      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, content_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, content_hash, jobs, title, sender_email)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       summaryId, s.sender, s.senderDomain, s.subject, s.date, s.kind,
       s.summary, JSON.stringify(s.actionableItems), JSON.stringify(s.attachments),
       triage.relation, finalDecision, JSON.stringify(highlightLabels),
       triage.relation === "site" ? (triage.site?.siteID ?? null) : null,
       delivery.contentHash ?? null,
+      JSON.stringify(readingJobs), s.title ?? null, delivery.triage?.senderEmail ?? null,
     );
+      if (original) this.ctx.storage.sql.exec(
+        "INSERT INTO email_originals (message_id, iv, ciphertext) VALUES (?, ?, ?)", summaryId, original.iv, original.ciphertext);
+    });
     if (delivery.code) {
       const blob = await vault.seal(await this.dek(), delivery.code, this.emailCodeAAD(s.senderDomain));
       this.ctx.storage.sql.exec(
@@ -979,8 +1036,14 @@ export class UserSandbox extends DurableObject<Env> {
           `Filed mail from ${s.senderDomain || "a new sender"}: ${s.subject || "(no subject)"}. Suggested ${siteCandidate.name} as a new job site.`,
           detail, null, hash);
       } else if (chatAsk && delivery.contentHash) {
+        const titles = readingJobs.map((j) => j.title);
+        const listed = titles.length > 1
+          ? `${titles.slice(0, -1).join(", ")}, and ${titles[titles.length - 1]}`
+          : titles[0] ?? "";
         this.appendAgentChat(
-          `Mail from ${s.senderDomain} — “${s.subject || "(no subject)"}”. ${s.summary} It looks work-related, but I couldn't tell which job site it belongs to. What would you like me to do with mail like this?`,
+          titles.length
+            ? `That email from ${s.senderDomain} — “${s.subject || "(no subject)"}” — lists ${titles.length === 1 ? "a role" : `${titles.length} roles`}: ${listed}. I couldn't tell which job site they belong to. Want me to look into any of these?`
+            : `Mail from ${s.senderDomain} — “${s.subject || "(no subject)"}”. ${s.summary} It looks work-related, but I couldn't tell which job site it belongs to. What would you like me to do with mail like this?`,
           delivery.receivedAt, delivery.contentHash);
         outcome = "chat_asked";
         this.journalEmail(delivery.receivedAt,
@@ -1260,10 +1323,20 @@ export class UserSandbox extends DurableObject<Env> {
     if (!jobId || !taskId) return json({ error: "jobId and taskId required" }, 400);
     const existing = getMissionJob(this.ctx.storage, jobId);
     if (!existing || existing.taskId !== taskId) return json({ error: "unknown job" }, 404);
+    if (existing.state === "done") return json({ ok:true,jobState:"done",duplicate:true });
+    const latest=latestMissionJob(this.ctx.storage,taskId);
+    if(latest&&latest.jobId!==jobId){
+      finishMissionJob(this.ctx.storage,jobId,"failed",new Date().toISOString(),"superseded delivery exhausted");
+      return json({ok:true,jobState:"failed",superseded:true});
+    }
+    const task = this.loadTask(taskId);
+    if (task && workspaceMode(this.env.HYGGE_WORKSPACE_MODE) === "retained-v2") {
+      // Canonical recovery is durable before the terminal queue acknowledgement.
+      this.workspace().runner.deliveryFailed(task,jobId);
+    }
     if (!isTerminalJobState(existing.state)) {
       finishMissionJob(this.ctx.storage, jobId, "failed", new Date().toISOString(), "delivery retries exhausted");
     }
-    const task = this.loadTask(taskId);
     if (task && workspaceMode(this.env.HYGGE_WORKSPACE_MODE) === "legacy"
         && ["approved", "running"].includes(String(task.status))
         && !this.activeMissions.has(task.id)) {
@@ -1910,6 +1983,48 @@ export class UserSandbox extends DurableObject<Env> {
 
   // ---- routes ---------------------------------------------------
 
+  private chatQueue: Promise<unknown> = Promise.resolve();
+  private conversationStore?:ChatStore;
+  private chatStore() { return this.conversationStore ??= new ChatStore(sqlChatStorage(this.ctx.storage)); }
+  private chatAgent() {
+    const store=this.chatStore(), state=this.stateStore();
+    const services=chatServices({
+      rows:entity=>state.list(entity), get:(entity,id)=>state.get(entity,id),
+      put:(entity,id,data)=>{const before=entity==='profile'||entity==='sites'?this.reopenSnapshot(state):null;state.upsert(entity,id,data);if(before)this.applyCategoryReopen(before,state);},remove:(entity,id)=>{state.remove(entity,id);},
+      tasks:()=>[...this.ctx.storage.sql.exec('SELECT task FROM tasks ORDER BY created_at')].map(r=>this.executionView(JSON.parse(String(r.task)))),
+      saveTask:task=>this.saveTask(task),enqueue:task=>this.enqueueOrRunMission(task),
+      hints:domain=>[...this.ctx.storage.sql.exec('SELECT kind,hints,success_count,failure_count FROM memories WHERE domain=?',domain)].map(r=>({...r,hints:JSON.parse(String(r.hints))})),
+      inbox:()=>[...this.ctx.storage.sql.exec("SELECT id,sender_domain,subject,summary,kind,created_at FROM email_summaries WHERE kind='other' ORDER BY created_at DESC LIMIT 30")],
+      signupContact:async()=>{const address=this.userId?await addressForUser(d1EmailAddressDb(this.env.DB),this.userId,this.env.HYGGE_EMAIL_DOMAIN):null;return address?{email:address.address,choice:'hygge'}:{email:String((state.get('profile','profile')?.data as any)?.profile?.email??''),choice:'own'};},
+      credentialForDomain:domain=>{const r=[...this.ctx.storage.sql.exec('SELECT id FROM credentials WHERE domain=? LIMIT 1',domain)][0];return r?String(r.id):undefined;},
+      plus:async()=>!!this.userId && (await activeTier(d1SubscriptionDb(this.env.DB),this.userId,new Date()))==='plus',
+      mirror:async(doc:ChatDocument)=>{await this.workspace().saveDocument(`${doc.generation}/${doc.path}`,doc.revision,new TextEncoder().encode(doc.content));},
+      erase:async(doc:ChatDocument)=>{await this.workspace().eraseDocument(`${doc.generation}/${doc.path}`,doc.revision);},
+      deletedMessage:id=>Boolean(store.db.get(`deleted-message:${id}`)),
+    });
+    return new ChatAgent(store,new LLMClient(this.llmConfig('hygge-conversation')),services);
+  }
+  private cleanupTask?:Promise<void>;
+  private scheduleChatCleanup() {
+    if(this.cleanupTask)return;
+    this.cleanupTask=(async()=>{
+      const agent=this.chatAgent();await agent.cleanup();
+      if(agent.store.state().cleanupPending)await this.ctx.storage.setAlarm(Date.now()+300_000);
+    })().finally(()=>{this.cleanupTask=undefined;});
+    this.ctx.waitUntil(this.cleanupTask);
+  }
+  async alarm() {
+    const row=[...this.ctx.storage.sql.exec('SELECT user_id FROM workspace_owner WHERE id=1')][0];
+    if(!row)return;this.userId=String(row.user_id);
+    if(this.cleanupTask)await this.cleanupTask;
+    else await this.chatAgent().cleanup();
+    if(this.chatStore().state().cleanupPending)await this.ctx.storage.setAlarm(Date.now()+3600_000);
+  }
+  private async chatExclusive<T>(work:()=>Promise<T>):Promise<T> {
+    const before=this.chatQueue;let release!:()=>void;this.chatQueue=new Promise<void>(r=>{release=r;});
+    await before;try{return await work();}finally{release();}
+  }
+
   private profilePhotoStore(): ProfilePhotoStore {
     const sql = this.ctx.storage.sql;
     return {
@@ -1942,11 +2057,48 @@ export class UserSandbox extends DurableObject<Env> {
     const parts = path.split("/").filter(Boolean);
     // Handle the bounded binary body before the generic JSON parser.
     if (path === "/profile/photo") return handleProfilePhoto(request, this.profilePhotoStore());
-    const body = request.method === "GET" || request.method === "DELETE"
-      ? {}
-      : ((await request.json().catch(() => ({}))) as any);
+    let body:any={};
+    if(request.method!=='GET'&&request.method!=='DELETE'){
+      if(parts[0]==='chat'){
+        const raw=await request.text();if(raw.length>128000)return json({error:'Conversation request too large'},413);
+        try{body=JSON.parse(raw);}catch{return json({error:'Invalid conversation request'},400);}
+        if(!body||typeof body!=='object'||Array.isArray(body))return json({error:'Invalid conversation request'},400);
+      }else body=await request.json().catch(()=>({}));
+    }
 
     try {
+      // New clients use one reasoning/tool loop. Legacy intent/onboarding routes remain isolated.
+      if(parts[0]==='chat') {
+        const agent=this.chatAgent();
+        if(request.method==='GET'&&parts[1]==='state') {
+          return json(await this.chatExclusive(async()=>{agent.importMessages();this.scheduleChatCleanup();return agent.store.state();}));
+        }
+        if(request.method==='POST'&&parts[1]==='reset'){const result=await this.chatExclusive(()=>agent.reset(String(body.generation??'')));this.scheduleChatCleanup();return json(result);}
+        if(request.method==='POST'&&parts[1]==='device-claim')return json(await this.chatExclusive(async()=>agent.claimDevice({generation:String(body.generation??''),proposalId:String(body.proposalId??''),deviceID:String(body.deviceID??'')})));
+        if(request.method==='POST'&&parts[1]==='device-result'){
+          if(typeof body.success!=='boolean'||typeof body.id!=='string'||!/^[0-9a-f-]{36}$/i.test(body.id))return json({error:'Invalid device result'},400);
+          return json(await this.chatExclusive(()=>agent.deviceResult({id:body.id,generation:String(body.generation??''),proposalId:String(body.proposalId??''),success:body.success,deviceID:String(body.deviceID??'')})));
+        }
+        if(request.method==='POST'&&parts[1]==='proposals'&&parts[2]){
+          if(!['approve','reject'].includes(body.decision)||typeof body.id!=='string'||!/^[0-9a-f-]{36}$/i.test(body.id))return json({error:'Invalid decision'},400);
+          return json(await this.chatExclusive(()=>agent.decide({id:body.id,generation:String(body.generation??''),proposalId:parts[2],decision:body.decision})));
+        }
+        if(request.method==='POST'&&parts[1]==='turn'){
+          if(request.headers.get('Accept')?.includes('text/event-stream')){
+            const {readable,writable}=new TransformStream();const writer=writable.getWriter(),encoder=new TextEncoder();
+            let detached=false;const emit=(event:any)=>{if(!detached)void writer.write(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)).catch(()=>{detached=true;});};
+            this.ctx.waitUntil(this.chatExclusive(async()=>{
+              try{const result=await agent.turn(body,emit);emit({type:'final',data:result});}
+              catch{emit({type:'error',message:'The turn was interrupted. Its progress is saved; retry the same message.'});}
+              finally{await writer.close().catch(()=>{});this.scheduleChatCleanup();}
+            }));
+            return new Response(readable,{headers:{'content-type':'text/event-stream','cache-control':'no-cache'}});
+          }
+          return json(await this.chatExclusive(()=>agent.turn(body)));
+        }
+        return json({error:'Unknown conversation operation'},404);
+      }
+
       // Sandbox diagnostics
       if (path.endsWith("/sandbox/verify")) {
         if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2') {
@@ -2011,12 +2163,67 @@ export class UserSandbox extends DurableObject<Env> {
         }
         return this.deadMissionJob(body);
       }
+      if (parts[0] === "email" && parts[1] === "addresses") {
+        const addresses = new EmailOwnerAddresses(this.ctx.storage.sql);
+        const account = await accountEmailAddresses(this.env.DB, this.userId!);
+        if (request.method === "GET") {
+          return json({ addresses: [...account.map(address => ({ address, verified: true, source: "account" })),
+            ...addresses.list().filter(r => !account.includes(r.address))] });
+        }
+        if (request.method === "POST" && parts.length === 2) {
+          const address = normalizeOwnEmail(body?.address);
+          if (!address) return json({ error: "Enter a valid email address." }, 400);
+          if (account.includes(address)) return json({ address, verified: true, source: "account" });
+          try { return json(await addresses.add(address), 201); }
+          catch (e) { return json({ error: (e as Error).message }, 400); }
+        }
+        if (request.method === "DELETE" && parts.length === 2) {
+          const address = normalizeOwnEmail(url.searchParams.get("address"));
+          if (!address || account.includes(address)) return json({ error: "Account addresses are managed in your login settings." }, 400);
+          addresses.remove(address);
+          return json({ removed: true });
+        }
+      }
+      if (parts[0] === "email" && parts[1] === "messages" && parts.length === 4) {
+        const id = decodeURIComponent(parts[2]);
+        const mail = [...this.ctx.storage.sql.exec("SELECT id, sender, sender_email, kind FROM email_summaries WHERE id = ?", id)][0] as Row | undefined;
+        if (!mail) return json({ error: "Email not found." }, 404);
+        if (request.method === "GET" && parts[3] === "original") {
+          const sealed = [...this.ctx.storage.sql.exec("SELECT iv, ciphertext FROM email_originals WHERE message_id = ?", id)][0] as { iv: string; ciphertext: string } | undefined;
+          const response = json({ original: sealed ? JSON.parse(await vault.open(await this.dek(), sealed, `email-original:${id}`)) : null });
+          response.headers.set("Cache-Control", "no-store");
+          return response;
+        }
+        if (request.method === "POST" && parts[3] === "me") {
+          const historical = String(mail.sender ?? "").includes("[code]") ? "" : senderEmailOf(String(mail.sender ?? ""));
+          const address = normalizeOwnEmail(mail.sender_email ?? historical);
+          if (body?.marked === false) {
+            this.ctx.storage.sql.exec("UPDATE email_summaries SET marked_me = 0 WHERE id = ?", id);
+            return json({ marked: false });
+          }
+          if (!address) {
+            this.ctx.storage.sql.exec("UPDATE email_summaries SET marked_me = 1 WHERE id = ?", id);
+            return json({ marked: true, ownerAddress: null });
+          }
+          const account = await accountEmailAddresses(this.env.DB, this.userId!);
+          let ownerAddress;
+          try { ownerAddress = account.includes(address) ? { address, verified: true, source: "account" } : await new EmailOwnerAddresses(this.ctx.storage.sql).add(address); }
+          catch (e) { return json({ error: (e as Error).message }, 400); }
+          this.ctx.storage.sql.exec("UPDATE email_summaries SET marked_me = 1 WHERE id = ?", id);
+          return json({ marked: true, ownerAddress });
+        }
+      }
       if (request.method === "GET" && parts.join("/") === "email/messages") {
-        const rows = [...this.ctx.storage.sql.exec(
-          "SELECT id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, created_at FROM email_summaries ORDER BY created_at DESC LIMIT 100",
-        )] as Row[];
+        let history;
+        try { history = readEmailHistory(this.ctx.storage.sql, url.searchParams.get("cursor")); }
+        catch { return json({ error: "Invalid history cursor." }, 400); }
+        const ruleRows = [...this.ctx.storage.sql.exec(
+          "SELECT sender_domain, choice FROM email_sender_rules")] as Row[];
         return json({
-          messages: rows.map((r) => ({
+          senderRules: ruleRows.map((r) => ({ senderDomain: r.sender_domain, choice: r.choice })),
+          nextCursor: history.nextCursor,
+          messages: history.page.map((r) => ({
+            title: r.title ?? null, senderEmail: r.sender_email ?? null, markedAsMe: !!r.marked_me, hasOriginal: !!r.has_original,
             id: r.id, sender: r.sender, senderDomain: r.sender_domain,
             subject: r.subject, date: r.mail_date, kind: r.kind,
             summary: r.summary,
@@ -2026,15 +2233,15 @@ export class UserSandbox extends DurableObject<Env> {
             relation: r.relation ?? "unknown",
             decision: r.decision ?? "none",
             highlights: JSON.parse(String(r.highlights ?? "[]")),
+            jobs: JSON.parse(String(r.jobs ?? "[]")),
             siteID: r.site_id ?? null,
           })),
         });
       }
-      // The user's call on one sender, remembered where mail
-      // arrives so the same sender is never asked about twice.
-      // Choices: "work" (read for anything relevant), "file"
-      // (journal only), "ignore" (silent). Waiting mail from that
-      // sender takes the choice immediately.
+      // The one remembered sender call: "ignore" opts a sender
+      // out of evaluation (silent filing); "work"/"file" remain
+      // accepted for older clients and simply mean the default
+      // (evaluate). Filed mail from that sender takes it now.
       if (request.method === "POST" && parts.join("/") === "email/decision") {
         const senderDomain = String(body?.senderDomain ?? "").trim().toLowerCase();
         const choice = String(body?.choice ?? "");
@@ -2172,9 +2379,33 @@ export class UserSandbox extends DurableObject<Env> {
       // Model-led understanding, app-validated: what does this
       // message want done? See onboarding.ts chatIntent.
       if (request.method === "POST" && parts.join("/") === "onboarding/intent") {
+        const intentBody = (body ?? {}) as Record<string, any>;
+        // Candidates the model may offer or the user may confirm:
+        // open proposals first, then the catalog — minus anything
+        // already tracked. The model still reasons freely; this
+        // only grounds names to addresses.
+        const store = this.stateStore();
+        const inventory = store.list("sites").flatMap((row) => {
+          const site = scanSiteFromRow(String(row.id), row.data);
+          if (!site) return [];
+          const state = store.get("accountStates", site.siteID)?.data as any;
+          return [{ name: site.name, domain: site.domain, siteId: site.siteID,
+            tracked: ["watching", "profileLive", "hasAccount", "joining", "needsVerification"].includes(state?.state ?? "") }];
+        });
+        const proposals = store.list("proposals").flatMap((row) => {
+          const data = row.data as any;
+          if (data?.status !== "proposed") return [];
+          const siteId = String(data.siteID ?? "");
+          const site = inventory.find((s) => s.siteId === siteId);
+          return site ? [{ name: site.name, domain: site.domain, siteId }] : [];
+        });
+        const catalog = Object.values(STATIC_PROPOSALS).flat().map((entry) =>
+          ({ name: entry.name, domain: domainOf(entry.url), siteId: null }));
+        const candidates = chatSiteCandidates(inventory, proposals, catalog);
         return json(await chatIntent({
           client: new LLMClient(this.llmConfig("hygge-onboarding")),
-          ...(body as object),
+          ...intentBody,
+          context: { ...(intentBody.context ?? {}), candidates },
           conversationId: this.ctx.id.toString(),
         }));
       }
@@ -2295,7 +2526,7 @@ export class UserSandbox extends DurableObject<Env> {
           if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='legacy'
               && reconcileEndedSession(t, Boolean(t.session_id && browser.hasSession(t.session_id)),
               this.activeMissions.has(t.id) || this.browserResumes.has(t.id))) this.saveTask(t);
-          return { ...t, mobile_task: mobileTask(t) };
+          return { ...this.executionView(t), mobile_task: mobileTask(t) };
         }) });
       }
       if (request.method === "POST" && parts.join("/") === "skills/quarantine") {

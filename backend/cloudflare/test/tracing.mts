@@ -101,12 +101,17 @@ test("clip truncates long payloads", () => {
   assert.ok(clip("x".repeat(9000)).endsWith("…[clipped]"));
 });
 
-test("LLMClient.complete parses text and tolerates a usage block", async () => {
+test("LLMClient.complete posts a Responses call and parses its text and usage", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(JSON.stringify({
-    choices: [{ message: { content: "{\"action\":\"done\"}" } }],
-    usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
-  }), { status: 200, headers: { "Content-Type": "application/json" } })) as any;
+  const seen: Array<{ url: string; body: any }> = [];
+  globalThis.fetch = (async (url: any, init: any) => {
+    seen.push({ url: String(url), body: JSON.parse(String(init.body)) });
+    return new Response(JSON.stringify({
+      id: "resp-1", model: "m-fast", status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: "{\"action\":\"done\"}" }] }],
+      usage: { input_tokens: 11, output_tokens: 7, total_tokens: 18 },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as any;
   try {
     const client = new LLMClient({
       apiKey: "test-key", baseUrl: "https://example.invalid/v1",
@@ -115,6 +120,9 @@ test("LLMClient.complete parses text and tolerates a usage block", async () => {
     });
     const text = await client.complete({ model: "m-fast", system: "s", user: "u", conversationId: "c1" });
     assert.equal(text, "{\"action\":\"done\"}");
+    assert.ok(seen[0].url.endsWith("/responses"));
+    assert.equal(seen[0].body.instructions, "s");
+    assert.equal(seen[0].body.input, "u");
   } finally {
     globalThis.fetch = originalFetch;
   }

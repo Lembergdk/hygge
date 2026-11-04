@@ -523,12 +523,9 @@ struct HomeFeedView: View {
     private var runningTasks: [AgentTask] { admitted(availableActiveTasks, key: taskKey) }
     private var availableEvents: [ActivityEvent] { store.activityEvents.sorted { $0.occurredAt > $1.occurredAt } }
     private var events: [ActivityEvent] { admitted(availableEvents, key: eventKey) }
-    private var availableEmailDecisions: [FiledEmailSummary] { store.pendingEmailDecisions }
-    private var emailDecisions: [FiledEmailSummary] { admitted(availableEmailDecisions) { "email-decision-\($0.senderDomain)" } }
     private var candidateIDs: [String] {
         var ids = availableActiveTasks.map(taskKey)
         ids += proposedSites.map { "proposal-\($0.id)" }
-        ids += availableEmailDecisions.map { "email-decision-\($0.senderDomain)" }
         ids += availableListings.map { "opportunity-\($0.id)" }
         ids += availableDecisions.map(taskKey)
         if store.notificationPrimerVisible { ids.append("notifications") }
@@ -549,13 +546,13 @@ struct HomeFeedView: View {
             updateGate.receive(candidateIDs, atTop: canInsert)
         }
     }
-    private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && emailDecisions.isEmpty && !store.isPaused && !store.plan.rested }
+    private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && !store.isPaused && !store.plan.rested }
     /// Anything above the Journal heading. When this is false the
     /// feed is journal-only, so Earlier expands by default.
     private var hasActionableFeedItems: Bool {
         !runningTasks.isEmpty || !pendingProposals.isEmpty || !listings.isEmpty
             || !decisionTasks.filter { !isArchived(taskKey($0)) }.isEmpty
-            || !emailDecisions.isEmpty || store.isPaused || store.plan.rested
+            || store.isPaused || store.plan.rested
             || (store.notificationPrimerVisible && updateGate.visibleIDs.contains("notifications"))
     }
     private func taskKey(_ task: AgentTask) -> String { FeedFocus.taskKey(task) }
@@ -566,9 +563,10 @@ struct HomeFeedView: View {
         card(id: "proposal-\(proposal.id)", title: store.siteName(id: proposal.siteID), subtitle: proposal.rationale,
              icon: "link", style: .invitation,
              siteDomain: store.siteDomain(id: proposal.siteID), siteName: store.siteName(id: proposal.siteID),
-             primaryTitle: "Start scanning", primaryIcon: "magnifyingglass",
+             chatContext: ChatContextRef(kind: "site", id: proposal.siteID,
+                                         title: store.siteName(id: proposal.siteID), subtitle: proposal.rationale,
+                                         siteID: proposal.siteID, siteDomain: store.siteDomain(id: proposal.siteID)),
              open: { openFocus(.proposal(proposal)) },
-             primary: { store.approveProposal(proposalID: proposal.id, alreadyHasAccount: false) },
              dismiss: {
                 store.dismissProposal(proposalID: proposal.id)
                 showUndo("Suggestion dismissed", restoring: "proposal-\(proposal.id)") { store.undoSiteDismissal(proposalID: proposal.id) }
@@ -584,13 +582,11 @@ struct HomeFeedView: View {
              icon: blocked ? (opportunity.needsYouKind == "login" ? "key" : "hand.raised") : "sparkle",
              style: .opportunity,
              siteDomain: store.siteDomain(id: opportunity.siteID), siteName: store.siteName(id: opportunity.siteID),
-             primaryTitle: blocked ? (opportunity.needsYouKind == "login" ? "Save login again" : "Open the site") : "Prepare draft",
-             primaryIcon: blocked ? "arrow.right" : "square.and.pencil",
+             chatContext: ChatContextRef(kind: "opportunity", id: opportunity.id.uuidString,
+                                         title: opportunity.title,
+                                         subtitle: "\(store.siteName(id: opportunity.siteID)) · \(opportunity.payLabel)",
+                                         siteID: opportunity.siteID, siteDomain: store.siteDomain(id: opportunity.siteID)),
              open: { openFocus(.opportunity(opportunity)) },
-             primary: {
-                if blocked { openFocus(.opportunity(opportunity)) }
-                else { store.draftApplication(for: opportunity) }
-             },
              dismiss: {
                 store.setStatus(.dismissed, for: opportunity.id)
                 showUndo("Opportunity dismissed", restoring: "opportunity-\(opportunity.id)") { store.setStatus(opportunity.status, for: opportunity.id) }
@@ -598,7 +594,7 @@ struct HomeFeedView: View {
     }
     @ViewBuilder private func activeTaskCard(_ task: AgentTask) -> some View {
         if task.browserSessionID != nil {
-            SwipeFeedCard(id: taskKey(task), primaryTitle: task.needsChatHelp ? "Open chat" : "Watch", primaryIcon: task.needsChatHelp ? "bubble.left" : "arrow.up.left.and.arrow.down.right", openCardID: $openCardID, open: { openActiveTask(task) }, primary: { openActiveTask(task) }, dismiss: {}, allowsDismissal: false) {
+            SwipeFeedCard(id: taskKey(task), openCardID: $openCardID, open: { openActiveTask(task) }, chat: { chatAboutTask(task) }, dismiss: {}, allowsDismissal: false) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(task.needsChatHelp ? taskTitle(task) : task.connectsExistingAccount ? "Connecting your account" : task.kind == .buildProfile ? "Building your profile" : task.isSiteSetup ? "Setting up your account" : task.title)
                     .font(.system(.subheadline, design: .rounded, weight: .semibold)).foregroundStyle(HyggeTheme.ink)
@@ -609,7 +605,9 @@ struct HomeFeedView: View {
             .opacity(focus?.id == taskKey(task) ? 0 : 1)
         } else {
             card(id: taskKey(task), title: "\(store.siteName(id: task.siteID)) · Working", subtitle: task.title,
-                 icon: "sparkles", primaryTitle: "Details", open: { openFocus(.task(task)) }, primary: { openFocus(.task(task)) }, allowsDismissal: false)
+                 icon: "sparkles",
+                 chatContext: taskChatContext(task),
+                 open: { openFocus(.task(task)) }, allowsDismissal: false)
         }
     }
     private func taskCard(_ task: AgentTask) -> some View {
@@ -618,9 +616,9 @@ struct HomeFeedView: View {
         return card(id: taskKey(task), title: taskTitle(task),
                     subtitle: store.siteName(id: task.siteID), icon: taskIcon(task), usesProfilePhoto: task.kind == .buildProfile, style: chat && !approval ? .question : .review,
                     siteDomain: chat && !approval ? nil : store.siteDomain(id: task.siteID), siteName: store.siteName(id: task.siteID),
-                    primaryTitle: chat && !approval ? "Open chat" : "Review", primaryIcon: chat ? "bubble.left" : "doc.text.magnifyingglass",
+                    chatContext: taskChatContext(task),
                     open: { if chat { openChat(task) } else { openFocus(.task(task)) } },
-                    primary: { if chat { openChat(task) } else { openFocus(.task(task)) } })
+                    chatOverride: chat ? { openChat(task) } : nil)
     }
     private func taskIcon(_ task: AgentTask) -> String {
         if task.needsChatHelp {
@@ -660,17 +658,14 @@ struct HomeFeedView: View {
         var rows = runningTasks.map(FeedRow.active)
         if store.isPaused {
             rows.append(.paused)
-            rows += emailDecisions.map(FeedRow.emailDecision)
         } else if store.plan.rested {
             // Free is resting: say so where the paused card sits.
             // What is already under way still shows below.
             rows.append(.planRested)
-            rows += emailDecisions.map(FeedRow.emailDecision)
             rows += decisionTasks.filter { !isArchived(taskKey($0)) }.map(FeedRow.decision)
         } else {
             rows += pendingProposals.prefix(moreSites ? pendingProposals.count : 1).map(FeedRow.proposal)
             if pendingProposals.count > 1 { rows.append(.moreSites) }
-            rows += emailDecisions.map(FeedRow.emailDecision)
             rows += listings.map(FeedRow.opportunity)
             rows += decisionTasks.filter { !isArchived(taskKey($0)) }.map(FeedRow.decision)
         }
@@ -691,7 +686,6 @@ struct HomeFeedView: View {
     @ViewBuilder private func feedRow(_ row: FeedRow) -> some View {
         switch row {
         case .active(let task): activeTaskCard(task)
-        case .emailDecision(let mail): emailDecisionCard(mail)
         case .proposal(let proposal): proposalCard(proposal)
         case .opportunity(let opportunity): opportunityCard(opportunity)
         case .decision(let task): taskCard(task)
@@ -707,7 +701,9 @@ struct HomeFeedView: View {
             Button(moreSites ? "Fewer suggestions" : "\(pendingProposals.count - 1) more job sites") { withAnimation { moreSites.toggle() } }
                 .font(.caption.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
         case .notifications:
-            card(id: "notifications", title: "A heads-up when you need it", subtitle: "New work and things that need your OK", icon: "bell", primaryTitle: "Permissions", open: { showNotifications = true }, primary: { showNotifications = true }, dismiss: {
+            card(id: "notifications", title: "A heads-up when you need it", subtitle: "New work and things that need your OK", icon: "bell",
+                 chatContext: ChatContextRef(kind: "notifications", id: "notifications", title: "A heads-up when you need it", subtitle: "New work and things that need your OK"),
+                 open: { showNotifications = true }, dismiss: {
                 store.dismissNotificationPrimer()
                 showUndo("Reminder dismissed", restoring: "notifications") { store.undoNotificationDismissal() }
             })
@@ -724,71 +720,33 @@ struct HomeFeedView: View {
             }.padding(.top, 8)
         }
     }
-    private func emailDecisionCard(_ mail: FiledEmailSummary) -> some View {
-        // Domain leads: it is the decision key, so it must be the
-        // last thing large type could ever squeeze out.
-        card(id: "email-decision-\(mail.senderDomain)", title: "Mail from a new sender",
-             subtitle: "\(mail.senderDomain) · \(mail.subject.isEmpty ? "(no subject)" : mail.subject)",
-             icon: "envelope", siteDomain: mail.senderDomain, siteName: mail.senderDomain,
-             primaryTitle: "Decide", primaryIcon: "envelope.open",
-             open: { openFocus(.emailDecision(mail)) },
-             primary: { openFocus(.emailDecision(mail)) },
-             dismiss: {}, allowsDismissal: false)
-    }
-    /// One call per new sender, remembered: treat it as work
-    /// mail, ignore the sender quietly, or just close the card —
-    /// filing is the default.
-    private func emailDecisionDetail(_ mail: FiledEmailSummary) -> some View {
-        FeedDetailContent {
-            HStack(alignment: .center, spacing: 14) {
-                SiteLogoTile(domain: mail.senderDomain, name: mail.senderDomain, size: 52)
-                Text("Mail from \(mail.senderDomain)").font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .feedCardDismissRegion()
-            Text("I filed this for now, and I'll keep filing this sender's mail. If it's work mail, tell me — I'll remember.")
-                .foregroundStyle(HyggeTheme.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 8) {
-                Text(mail.subject.isEmpty ? "(no subject)" : mail.subject)
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                if !mail.summary.isEmpty {
-                    Text(mail.summary).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                ForEach(mail.highlights ?? [], id: \.self) { label in
-                    Label(label, systemImage: "sparkles").font(.subheadline).foregroundStyle(HyggeTheme.sageDeep)
-                }
-            }
-        } footer: {
-            // Two explicit calls; closing the card is the third —
-            // filing is the default, so it needs no button (see
-            // closeFocus). Pinned so a long summary can never push
-            // a choice off the card.
-            FeedPrimaryButton(title: "Treat as work mail") { decideEmail(mail, choice: "work") }
-            Button("Ignore this sender") { decideEmail(mail, choice: "ignore") }
-                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
-                .frame(maxWidth: .infinity, minHeight: 44)
-        }
-    }
-    private func decideEmail(_ mail: FiledEmailSummary, choice: String) {
-        let domain = mail.senderDomain
-        Task { await store.decideEmailSender(domain: domain, choice: choice) }
-        closeFocus()
-    }
-    private func eventCard(_ event: ActivityEvent) -> some View {
+    @ViewBuilder private func eventCard(_ event: ActivityEvent) -> some View {
+        if event.kind == .filedEmail, let mail = store.filedEmailSummaries.first(where: { $0.id.lowercased() == event.id.uuidString.lowercased() }) {
+            SwipeFeedCard(id: eventKey(event), openCardID: $openCardID,
+                          open: { openCardID = nil; openFocus(.event(event)) },
+                          chat: { chatAbout(ChatContextRef(kind: "mail", id: mail.id, title: mail.displayTitle, subtitle: mail.senderAddress, siteID: mail.siteID, siteDomain: mail.senderDomain)) },
+                          dismiss: { archive(eventKey(event)) }) { EmailFeedCard(mail: mail) }
+                .matchedGeometryEffect(id: eventKey(event), in: focusAnimation, isSource: focus?.id != eventKey(event))
+                .opacity(focus?.id == eventKey(event) ? 0 : 1)
+        } else {
         card(id: eventKey(event), title: FeedEventPresentation.title(event),
              subtitle: event.siteID.map { store.siteName(id: $0) } ?? JournalBuilder.dayLabel(for: event.occurredAt),
              icon: FeedEventPresentation.icon(event), asset: event.kind == .workCompleted ? "SettingsEarnings" : nil, style: event.kind == .workCompleted ? eventStyle(event) : .update,
-             primaryTitle: "Details", open: { openFocus(.event(event)) }, primary: { openFocus(.event(event)) })
+             chatContext: ChatContextRef(kind: "event", id: "\(event.id)",
+                                         title: FeedEventPresentation.title(event),
+                                         subtitle: event.siteID.map { store.siteName(id: $0) } ?? JournalBuilder.dayLabel(for: event.occurredAt),
+                                         siteID: event.siteID, siteDomain: event.siteID.flatMap { store.siteDomain(id: $0) }),
+             open: { openFocus(.event(event)) })
+        }
     }
     private func card(id: String, title: String, subtitle: String, icon: String, asset: String? = nil, usesProfilePhoto: Bool = false, style: FeedCardStyle = .update,
                       siteDomain: String? = nil, siteName: String? = nil,
-                      primaryTitle: String, primaryIcon: String = "arrow.right", open: @escaping () -> Void,
-                      primary: @escaping () -> Void, dismiss: (() -> Void)? = nil, allowsDismissal: Bool = true) -> some View {
-        SwipeFeedCard(id: id, primaryTitle: primaryTitle, primaryIcon: primaryIcon, openCardID: $openCardID,
-                      open: { openCardID = nil; open() }, primary: primary, dismiss: dismiss ?? { archive(id) }, allowsDismissal: allowsDismissal) {
+                      chatContext: ChatContextRef, open: @escaping () -> Void,
+                      chatOverride: (() -> Void)? = nil, dismiss: (() -> Void)? = nil, allowsDismissal: Bool = true) -> some View {
+        SwipeFeedCard(id: id, openCardID: $openCardID,
+                      open: { openCardID = nil; open() },
+                      chat: { openCardID = nil; if let chatOverride { chatOverride() } else { chatAbout(chatContext) } },
+                      dismiss: dismiss ?? { archive(id) }, allowsDismissal: allowsDismissal) {
             FeedVisualCard(style: style, title: title, subtitle: subtitle, icon: icon, asset: asset, usesProfilePhoto: usesProfilePhoto,
                            siteDomain: siteDomain, siteName: siteName)
         }
@@ -822,6 +780,23 @@ struct HomeFeedView: View {
         if showBubbleChat { closeBubble() }
         if focus != nil { closeFocus() }
     }
+    /// Right swipe on any card: open the chat with that card
+    /// attached, so the next message is understood to be about it.
+    private func chatAbout(_ context: ChatContextRef) {
+        store.pendingChatContext = context
+        if !showBubbleChat { flameTapped() }
+    }
+    private func taskChatContext(_ task: AgentTask) -> ChatContextRef {
+        ChatContextRef(kind: "task", id: task.id.uuidString,
+                       title: taskTitle(task), subtitle: store.siteName(id: task.siteID),
+                       siteID: task.siteID, siteDomain: store.siteDomain(id: task.siteID))
+    }
+    private func chatAboutTask(_ task: AgentTask) {
+        // A task already waiting on a chat answer keeps its
+        // dedicated reply flow; anything else is a normal
+        // conversation about the task.
+        if task.needsChatHelp { openChat(task) } else { chatAbout(taskChatContext(task)) }
+    }
     private func openChat(_ task: AgentTask?) {
         if let task { store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id }
         showConversation = true
@@ -831,17 +806,6 @@ struct HomeFeedView: View {
         withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.42, dampingFraction: 0.86)) { focus = value }
     }
     private func closeFocus(openChat: Bool = false) {
-        // Leaving a new-sender card without choosing IS the
-        // choice: filing is the default, remembered so the same
-        // sender isn't asked about twice. A button tap already
-        // recorded its choice optimistically, so "still pending"
-        // is exactly the no-button case.
-        if case .emailDecision(let mail) = focus,
-           store.filedEmailSummaries.contains(where: {
-               $0.senderDomain == mail.senderDomain && $0.decision == "pending"
-           }) {
-            Task { await store.decideEmailSender(domain: mail.senderDomain, choice: "file") }
-        }
         withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.42, dampingFraction: 0.86)) { focus = nil }
         if openChat || store.conversationTaskID != nil { showConversation = true }
     }
@@ -854,10 +818,12 @@ struct HomeFeedView: View {
         switch value {
         case .proposal(let proposal): FeedProposalDetail(close: { closeFocus() }, proposalID: proposal.id)
         case .opportunity(let opportunity): FeedOpportunityDetail(close: { closeFocus() }, opportunityID: opportunity.id)
-        case .event(let event): FeedEventDetail(event: event)
+        case .event(let event):
+            if event.kind == .filedEmail, let mail = store.filedEmailSummaries.first(where: { $0.id.lowercased() == event.id.uuidString.lowercased() }) {
+                FiledEmailDetailView(mail: mail, isFeedCard: true)
+            } else { FeedEventDetail(event: event) }
         case .task(let task): FeedTaskReview(close: { closeFocus() }, taskID: task.id)
         case .browser(let task): CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id, onClose: { closeFocus() })
-        case .emailDecision(let mail): emailDecisionDetail(mail)
         case .paused:
             FeedDetailContent {
                 Text("Hygge is paused").font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
@@ -918,12 +884,11 @@ private struct FeedScrollTracking: ViewModifier {
 }
 
 private enum FeedRow: Identifiable {
-    case active(AgentTask), proposal(ProposedSite), opportunity(Opportunity), decision(AgentTask), event(ActivityEvent), emailDecision(FiledEmailSummary)
+    case active(AgentTask), proposal(ProposedSite), opportunity(Opportunity), decision(AgentTask), event(ActivityEvent)
     case paused, planRested, moreSites, notifications, journal, earlier
     var id: String {
         switch self {
         case .active(let task), .decision(let task): return FeedFocus.taskKey(task)
-        case .emailDecision(let value): return "email-decision-\(value.senderDomain)"
         case .proposal(let value): return "proposal-\(value.id)"
         case .opportunity(let value): return "opportunity-\(value.id)"
         case .event(let value): return "event-\(value.id)"

@@ -16,6 +16,11 @@ final class LiveBrowserSession {
     var ended = false
     var retryStopped = false
     var requiresSignIn = false
+    /// The run handed control to the person (a check it couldn't
+    /// pass, a question only they can answer). The session is
+    /// waiting — never "lost", even if the stream itself drops
+    /// while they take their time.
+    var waitingForUser = false
     var busy = false
     var keyboardVisible = false
     var precisionPointer = false
@@ -49,6 +54,7 @@ final class LiveBrowserSession {
     var status: String {
         if ended { return "Session ended" }
         if requiresSignIn { return "Sign in required" }
+        if waitingForUser { return "Waiting for you" }
         if retryStopped { return "Connection lost" }
         return connected ? "Live" : image == nil ? "Connecting…" : "Reconnecting…"
     }

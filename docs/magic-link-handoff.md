@@ -20,6 +20,10 @@ URL-encoded/JSON-quoted; malformed tokens cannot execute a handoff. Responses ar
 no-store/no-referrer, prevent framing, and restrict scripts/resources with CSP.
 The mobile handoff also replaces the browser history URL to remove the token.
 
+## In-app arrival
+
+Links are consumed by the store in place, under the purpose that sent them (signup, sign-in, settings) — a tapped link no longer discards an in-progress onboarding conversation: sign-up hands its answers to the store at send time, so finishing lands on Home. The post-send wait UI is one shared Check-your-email page for every emailed link (envelope, the typed address, Open mail + mail-app menu, 30s-cooldown Resend, Use a different email; settings scenarios add a Done), with waiting, working, and problem states. Password confirmation renders through the same page and keeps its real server cancel.
+
 ## Signed release
 
 Both app entitlement files and the origin/Apple-CDN AASA files declare
@@ -52,9 +56,7 @@ background preview safety, blocked navigation, return-without-loop, malformed
 input, GET not consuming tokens, and release entitlement checks. The guard was
 also run against the older IPA and correctly rejected the missing entitlement.
 
-Production acceptance requires the backend change to be deployed, a signed build
-that passes the new guard to be distributed/installed, and a real inbox-to-app
-round trip. Ordinary PR CI does not perform signing or TestFlight distribution.
+Production acceptance has since been met: the guard runs on every TestFlight dispatch, and magic-link sign-in is a live production path. The Nov 2 profile incident below is history; a real inbox-to-app round trip remains the thing to re-verify if the handoff path ever changes. Ordinary PR CI does not perform signing or TestFlight distribution.
 A mail client can rewrite or suppress links, and iOS can honor a prior choice to
 open the website. No app can guarantee zero prompts or taps in every client.
 Keep the recovery button for those cases; do not replace the email's verified

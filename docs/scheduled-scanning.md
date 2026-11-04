@@ -45,9 +45,7 @@ A listing appears only when all of these hold:
   rate. Below that, the listing is dropped and never shown.
 - It is not a listing the person already saw, turned down, or
   applied to.
-- It is not known to be unreachable on the web. Until Brief 06
-  lands, "not yet checked" counts as reachable; this is marked in
-  code as temporary.
+- It is not known to be unreachable on the web. Brief 06's web-accessibility gate now probes reachability at the site level (see profile-learning.md): an unknown site is allowed exactly one proposal/scan cycle, then blocks until a probe resolves it; there is no permissive default left.
 
 Unknown facts (no rate listed, no place listed) do not block a
 listing. Only known-bad facts do, apart from the lowest rate, which
@@ -83,6 +81,7 @@ problem, never one per look.
 - At most three looks per signed-in site and one per public site
   per person per day. Extra ticks stop at the cap and say so.
 - The same slot can never run twice for the same site.
+- Free accounts stop scanning once the monthly earnings limit is reached.
 - Every look is written down: site, time, how many listings were
   read, how many were new, and whether shared site know-how was
   used or the stronger helper had to work it out fresh.
@@ -101,20 +100,15 @@ gets too long, the follow-up is splitting the day's work or giving
 each person their own alarm; that trade-off is noted where the
 sweeper lives.
 
-## Not in this brief
+## Since this brief
 
-- Phone alerts for new finds (Brief 07). Finds wait in the feed.
-- Smarter ordering of finds and the reachability check tightening
-  (Brief 06).
-- Anything that writes on a site. A find becomes an application
-  only through the person's own approval, exactly as before.
+- Brief 07 shipped: finds now also push, descriptively and transactionally (see push-notifications.md).
+- Brief 06 shipped: finds order by rankScore (see profile-learning.md), and reachability is probe-verified as above.
+- Anything that writes on a site still requires the person's own approval, exactly as before.
 
 ## Operator notes
 
-- Trigger config is committed for staging and production but was
-  not switched on by this change. Before switching on, confirm the
-  account plan allows three daily triggers and the expected run
-  time across all users.
+- Trigger config is committed and switched on for staging and production (07:00 / 13:00 / 19:00 UTC).
 - A single person's tick can be run by hand through the same route
   the clock uses, which is how the tests here prove the behavior
   without a live browser or a deployed clock.

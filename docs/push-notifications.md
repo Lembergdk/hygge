@@ -74,11 +74,14 @@ The only shape `buildPushPayload` (backend `src/push.ts`) can emit:
 
 ## Token lifecycle
 
-1. **Ask once, at the right moment.** After the first notifiable
-   thing exists (a needs-you card or real found work), Home shows
-   a one-time primer card ("Want a word when something needs
-   you?"). Never at first launch, never during onboarding.
-   Either answer retires the card forever (`NotificationPrimerPolicy`,
+1. **Ask once, with the reason stated first.** Onboarding asks
+   for notifications alongside calendar, in the same message,
+   each with its own optional Allow and the reason explained
+   before the system prompt. Answering there (either way) retires
+   the question: the Home primer card ("Want a word when
+   something needs you?") exists only for people who skipped it
+   undecided, shown after the first notifiable thing exists, and
+   either answer retires it forever (`NotificationPrimerPolicy`,
    HyggeCore). After a no, the only way back is the Notifications
    section in the profile hub, which deep-links to Settings.
 2. **Grant → register.** iOS delivers the token to

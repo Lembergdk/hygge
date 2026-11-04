@@ -49,6 +49,29 @@ test("validateEmailReading keeps only bounded, kind-checked output", () => {
   assert.deepEqual(reading?.instruction, { kind: "scan", site: "Rover" });
 });
 
+test("validateEmailReading keeps concrete listed jobs, bounded", () => {
+  const reading = validateEmailReading({
+    summary: "Forwarded LinkedIn job alerts.",
+    mentions: [{ kind: "job_alert", detail: "3 product roles" }],
+    jobs: [
+      { title: "VP of Product at Alura", detail: "$200k+, remote" },
+      { title: "  Head of Product at Nordea  ", detail: "" },
+      { title: "", detail: "no title, dropped" },
+      { title: "T".repeat(300), detail: "D".repeat(400) },
+      { title: "PM 4" }, { title: "PM 5" }, { title: "PM 6 (over cap)" },
+    ],
+    instruction: null,
+  }, { ownerVerified: false });
+  assert.equal(reading?.jobs.length, 5);
+  assert.deepEqual(reading?.jobs[0], { title: "VP of Product at Alura", detail: "$200k+, remote" });
+  assert.equal(reading?.jobs[1].title, "Head of Product at Nordea");
+  assert.ok((reading?.jobs[2].title.length ?? 0) <= 120);
+  assert.ok((reading?.jobs[2].detail.length ?? 0) <= 160);
+  // No jobs field at all (older model output) reads as empty.
+  assert.deepEqual(
+    validateEmailReading({ summary: "Hi", mentions: [] }, { ownerVerified: false })?.jobs, []);
+});
+
 test("an instruction from anyone but the verified owner is dropped", () => {
   const raw = {
     summary: "Jobs digest.",

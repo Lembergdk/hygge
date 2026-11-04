@@ -174,6 +174,32 @@ public enum TimeSaved {
 
 // MARK: - The one continuous conversation thread
 
+/// The feed card a chat message is about ("Chat about this"):
+/// enough to render the mini-card and to resolve "this" against
+/// real state — a stable kind/id pair plus display text. The id
+/// is interpreted per kind (site id, task id, opportunity id,
+/// mail id, proposal-site id) and always re-validated before
+/// anything acts on it.
+public struct ChatContextRef: Codable, Equatable, Sendable, Hashable {
+    public var kind: String
+    public var id: String
+    public var title: String
+    public var subtitle: String
+    /// The job site this object belongs to, when there is one —
+    /// drives the site mark in chat and site-level intents.
+    public var siteID: String?
+    public var siteDomain: String?
+    public init(kind: String, id: String, title: String, subtitle: String = "",
+                siteID: String? = nil, siteDomain: String? = nil) {
+        self.kind = kind
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.siteID = siteID
+        self.siteDomain = siteDomain
+    }
+}
+
 public struct ChatEntry: Codable, Identifiable, Equatable, Sendable {
     public var id: UUID
     public var taskID: UUID?
@@ -181,13 +207,16 @@ public struct ChatEntry: Codable, Identifiable, Equatable, Sendable {
     public var fromAgent: Bool
     public var text: String
     public var createdAt: Date
-    public init(id: UUID = UUID(), fromAgent: Bool, text: String, createdAt: Date = Date(), taskID: UUID? = nil, helpID: UUID? = nil) {
+    /// Set when this message was sent about a specific feed card.
+    public var context: ChatContextRef?
+    public init(id: UUID = UUID(), fromAgent: Bool, text: String, createdAt: Date = Date(), taskID: UUID? = nil, helpID: UUID? = nil, context: ChatContextRef? = nil) {
         self.id = id
         self.taskID = taskID
         self.helpID = helpID
         self.fromAgent = fromAgent
         self.text = text
         self.createdAt = createdAt
+        self.context = context
     }
 }
 
@@ -207,7 +236,7 @@ public enum OnboardingStep: String, Codable, CaseIterable, Sendable {
         case .enjoyWork: return "What kinds of work do you actually enjoy? Tap any that fit, or just tell me."
         case .lowestRate: return "What's your lowest rate? Anything below it, I'll quietly drop — you'll never see it."
         case .where: return "Roughly where are you? It keeps local work close to home."
-        case .when: return "One permission helps: your calendar, so I never double-book you and approved gigs land in it."
+        case .when: return "Two permissions help, both optional: your calendar, so I never double-book you and approved gigs land in it — and notifications, so I can tap you when something needs you or new work turns up. Continuing without them is fine."
         case .summary: return "That's all I need to start. I'll look overnight and tell you in the morning — sooner if something needs you."
         // Sign-in is the final question, in the same conversation.
         // This exact wording is the one fixed local line.
@@ -219,6 +248,19 @@ public enum OnboardingStep: String, Codable, CaseIterable, Sendable {
     /// The backend script has no signIn objective (the question is
     /// fixed and local), so generated turns use `summary` wording.
     public var backendStep: OnboardingStep { self == .signIn ? .summary : self }
+
+    /// The user's own reply bubble after the .when permission card:
+    /// names exactly what was granted (nil = never asked/tapped,
+    /// false = declined). Anything short of a grant is the same
+    /// quiet "Not now" — never a guilt-trip list of what is off.
+    public static func permissionReply(calendar: Bool?, notifications: Bool?) -> String {
+        switch (calendar == true, notifications == true) {
+        case (true, true): return "Calendar and notifications allowed"
+        case (true, false): return "Calendar allowed"
+        case (false, true): return "Notifications allowed"
+        case (false, false): return "Not now"
+        }
+    }
 }
 
 /// Facts the onboarding LLM extracted from free text (any step, any order).
@@ -287,8 +329,9 @@ public struct OnboardingConversation: Equatable, Sendable {
         switch step {
         case .enjoyWork: return false // taste always confirms with the user
         case .where: return !profile.locationLabel.isEmpty
-        // .when asks for calendar access now; it always runs, even
-        // when availability was volunteered earlier in the chat.
+        // .when asks for calendar and notification access now; it
+        // always runs, even when availability was volunteered
+        // earlier in the chat.
         default: return false
         }
     }

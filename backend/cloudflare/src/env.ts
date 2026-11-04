@@ -68,6 +68,7 @@ export interface Env {
 /// way once. Lives beside Env so tests can hold it to the
 /// D1-side endpoints without importing the worker entry.
 export const USER_ROUTES = [
+  "/chat",
   "/credentials",
   "/session-profiles",
   "/memory",

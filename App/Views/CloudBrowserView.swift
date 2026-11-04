@@ -5,6 +5,12 @@ struct BrowserLiveViewport: View {
     var session: LiveBrowserSession
     var interactive = false
     var showsRecoveryActions = false
+    /// The run is holding for the person: the overlay says so —
+    /// a dropped stream while they take their time is a wait,
+    /// not a loss. Defaults to the session's own flag for hosts
+    /// that already synced it (CloudBrowserView below).
+    var waitingForUser: Bool?
+    private var waiting: Bool { waitingForUser ?? session.waitingForUser }
     var revealControls: (() -> Void)?
     var body: some View {
         ZStack {
@@ -20,12 +26,20 @@ struct BrowserLiveViewport: View {
             }
             if !session.connected {
                 VStack(spacing: 12) {
-                    if session.isRecovering { ProgressView().tint(HyggeTheme.sageDeep) }
-                    Text(session.status).font(.subheadline.weight(.medium))
+                    if session.isRecovering && !waiting { ProgressView().tint(HyggeTheme.sageDeep) }
+                    Text(waiting ? "Waiting for you" : session.status).font(.subheadline.weight(.medium))
                     if session.ended { Text("This session is no longer available.").font(.caption) }
                     else if session.requiresSignIn { Text("Sign in to Hygge again.").font(.caption) }
                     else if session.retryStopped {
-                        if showsRecoveryActions {
+                        if waiting {
+                            // The stream dropped while the run holds
+                            // for the person: say so, and let them
+                            // in — reconnecting can wait until they act.
+                            Text(interactive ? "Take your time — the session is holding." : "Tap to open.").font(.caption)
+                            if showsRecoveryActions {
+                                Button("Reconnect") { session.reconnect() }.font(.subheadline.weight(.semibold))
+                            }
+                        } else if showsRecoveryActions {
                             Button("Reconnect") { session.reconnect() }.font(.subheadline.weight(.semibold))
                         } else { Text(interactive ? "Try reconnecting below." : "Tap to reconnect.").font(.caption) }
                     }
@@ -43,17 +57,23 @@ struct BrowserLiveAttachment: View {
     @Environment(AppStore.self) private var store
     let task: AgentTask
     var open: () -> Void
+    /// The run is holding for the person, not working: label the
+    /// wait honestly instead of reporting the stream state.
+    private func waitingForUser(_ task: AgentTask, _ session: LiveBrowserSession) -> Bool {
+        task.status == .needsHuman || task.needsChatHelp || session.humanControlled
+    }
     var body: some View {
         if let id = task.browserSessionID {
             let session = store.browserSession(id)
+            let waiting = waitingForUser(task, session)
             Button(action: open) {
                 VStack(spacing: 0) {
-                    BrowserLiveViewport(session: session)
+                    BrowserLiveViewport(session: session, waitingForUser: waiting)
                         .aspectRatio(1.6, contentMode: .fit)
                         .allowsHitTesting(false)
                     HStack(spacing: 6) {
                         Circle().fill(session.connected ? HyggeTheme.sageDeep : HyggeTheme.secondary).frame(width: 7, height: 7)
-                        Text("\(store.siteName(id: task.siteID)) · \(session.status)").font(.caption)
+                        Text("\(store.siteName(id: task.siteID)) · \(waiting ? "Waiting for you" : session.status)").font(.caption)
                         Spacer()
                         Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption)
                     }.foregroundStyle(HyggeTheme.ink).padding(12)
@@ -79,12 +99,14 @@ struct CloudBrowserView: View {
     private var sessionID: String? { if let task { return task.browserSessionID }; return existingSessionID }
     private var title: String { task.map { store.siteName(id: $0.siteID) } ?? URL(string: urlString)?.host ?? "Browser" }
     private func statusText(_ session: LiveBrowserSession) -> String {
+        // A hold for the person outranks a dead stream: "waiting",
+        // never "unavailable", while the session is being kept.
         session.ended ? "Browser session ended"
             : session.requiresSignIn ? "Sign in to continue"
-            : session.retryStopped ? "Browser unavailable"
             : session.ownsControl ? "You’re in control"
             : session.humanControlled ? "Waiting for you"
-            : task?.needsChatHelp == true ? "Hygge needs you" : "Hygge is working"
+            : task?.needsChatHelp == true ? "Hygge needs you"
+            : session.retryStopped ? "Browser unavailable" : "Hygge is working"
     }
 
     var body: some View {
@@ -107,90 +129,96 @@ struct CloudBrowserView: View {
         .task { await store.observeBrowserTasks() }
     }
     @ViewBuilder private var browserContent: some View {
-        if let id = sessionID {
-            let session = store.browserSession(id)
-            VStack(spacing: 12) {
-                // One merged bar replaces the old site row + status
-                // row (+ host caption): the site is named once, the
-                // status said once, and the ~110 pt reclaimed goes
-                // to the viewport. At accessibility sizes the
-                // title/status stack instead of truncating.
-                HStack(alignment: .center, spacing: 10) {
-                    AnimatedFlame(animation: session.ended || session.retryStopped || session.requiresSignIn || session.humanControlled || task?.needsChatHelp == true ? .notify : .laptop, size: 24)
-                        .accessibilityHidden(true)
-                    Group {
-                        if dynamicTypeSize.isAccessibilitySize {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(title).font(.headline).lineLimit(1)
-                                Text(statusText(session)).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
+            if let id = sessionID {
+                let session = store.browserSession(id)
+                // Keep the session's own flag in step with the run:
+                // a hold for the person beats a dead stream.
+                let hold = task?.status == .needsHuman || task?.needsChatHelp == true || session.humanControlled
+                VStack(spacing: 12) {
+                    // One merged bar replaces the old site row + status
+                    // row (+ host caption): the site is named once, the
+                    // status said once, and the ~110 pt reclaimed goes
+                    // to the viewport. At accessibility sizes the
+                    // title/status stack instead of truncating.
+                    HStack(alignment: .center, spacing: 10) {
+                        AnimatedFlame(animation: session.ended || session.retryStopped || session.requiresSignIn || session.humanControlled || task?.needsChatHelp == true ? .notify : .laptop, size: 24)
+                            .accessibilityHidden(true)
+                        Group {
+                            if dynamicTypeSize.isAccessibilitySize {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(title).font(.headline).lineLimit(1)
+                                    Text(statusText(session)).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            } else {
+                                (Text(title).font(.headline)
+                                 + Text(" · ").font(.subheadline).foregroundColor(HyggeTheme.secondary)
+                                 + Text(statusText(session)).font(.subheadline).foregroundColor(HyggeTheme.secondary))
+                                    .lineLimit(1)
                             }
-                        } else {
-                            (Text(title).font(.headline)
-                             + Text(" · ").font(.subheadline).foregroundColor(HyggeTheme.secondary)
-                             + Text(statusText(session)).font(.subheadline).foregroundColor(HyggeTheme.secondary))
-                                .lineLimit(1)
                         }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityElement(children: .combine)
-                    .feedCardDismissRegion()
-                    Circle().fill(session.connected ? HyggeTheme.sageDeep : HyggeTheme.secondary).frame(width: 7, height: 7)
-                        .accessibilityLabel(session.connected ? "Connected" : "Not connected")
-                    // The word only earns its space when unhealthy;
-                    // dot + status sentence already say "live".
-                    if !session.connected || session.isRecovering {
-                        Text(session.status).font(.caption).foregroundStyle(HyggeTheme.secondary)
-                    }
-                    Button { fullscreen = true } label: { Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 44, height: 44) }
-                        .accessibilityLabel("Fullscreen browser")
-                }
-                feedViewport(session)
-                    .clipShape(RoundedRectangle(cornerRadius: 20))
-                    .overlay { GeometryReader { geometry in
-                        Color.clear.task(id: "\(geometry.size)-\(session.connected)-\(session.ownsControl)-\(fullscreen)") { if !fullscreen { session.resize(geometry.size) } }
-                    }.allowsHitTesting(false) }
-                if let problem = session.problem {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text(problem).font(.footnote)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        if session.canReconnect {
-                            Button("Reconnect") { session.reconnect() }.font(.footnote.weight(.semibold))
-                        } else {
-                            Button("Back to chat") { openChat() }.font(.footnote.weight(.semibold))
-                        }
-                    }.foregroundStyle(HyggeTheme.secondary)
-                }
-                if !session.keyboardVisible && (session.connected || session.isRecovering) { controls(session) }
-            }.padding(.horizontal, 18).padding(.top, 10).padding(.bottom, 12)
-                .task(id: session.connected) {
-                    if session.connected && takeControlOnOpen && !autoControlAttempted {
-                        autoControlAttempted = true
-                        _ = await session.takeControl()
-                    }
-                }
-                .fullScreenCover(isPresented: $fullscreen) {
-                    BrowserFullscreen(session: session, resume: { await resume(session) })
-                }
-        } else {
-            VStack(spacing: 16) {
-                AnimatedFlame(animation: task?.needsChatHelp == true ? .notify : .laptop, size: 68)
-                if let task, task.needsChatHelp, let help = task.help, help.kind == .recovery {
-                    Text(help.message).multilineTextAlignment(.center).feedCardDismissRegion()
-                    Button(help.actionLabel) {
-                        Task { await store.replyToTask(taskID: task.id, helpID: help.id, choiceLabel: help.actionLabel) }
-                    }.buttonStyle(SettingsActionStyle())
-                    Button("Stop this task") {
-                        Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id, choiceLabel: "Stop this task"); openChat() }
-                    }.buttonStyle(SettingsActionStyle(filled: false))
-                } else {
-                    Text(task?.status == .succeeded || task?.status == .rejected ? "This session has finished." : "Connecting to \(title)…")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .combine)
                         .feedCardDismissRegion()
-                }
-                Button("Back to chat") { openChat() }.buttonStyle(SettingsActionStyle(filled: false))
-            }.padding(24)
-        }
+                        Circle().fill(session.connected ? HyggeTheme.sageDeep : HyggeTheme.secondary).frame(width: 7, height: 7)
+                            .accessibilityLabel(session.connected ? "Connected" : "Not connected")
+                        // The word only earns its space when unhealthy;
+                        // dot + status sentence already say "live".
+                        if !session.connected || session.isRecovering {
+                            Text(session.status).font(.caption).foregroundStyle(HyggeTheme.secondary)
+                        }
+                        Button { fullscreen = true } label: { Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 44, height: 44) }
+                            .accessibilityLabel("Fullscreen browser")
+                    }
+                    feedViewport(session)
+                        .clipShape(RoundedRectangle(cornerRadius: 20))
+                        .overlay { GeometryReader { geometry in
+                            Color.clear.task(id: "\(geometry.size)-\(session.connected)-\(session.ownsControl)-\(fullscreen)") { if !fullscreen { session.resize(geometry.size) } }
+                        }.allowsHitTesting(false) }
+                    if let problem = session.problem {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(problem).font(.footnote)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if session.canReconnect {
+                                Button("Reconnect") { session.reconnect() }.font(.footnote.weight(.semibold))
+                            } else {
+                                Button("Back to chat") { openChat() }.font(.footnote.weight(.semibold))
+                            }
+                        }.foregroundStyle(HyggeTheme.secondary)
+                    }
+                    if !session.keyboardVisible && (session.connected || session.isRecovering) { controls(session) }
+                }.padding(.horizontal, 18).padding(.top, 10).padding(.bottom, 12)
+                    .task(id: "\(session.connected)-\(hold)") {
+                        // A hold for the person outlives a dead
+                        // stream: keep the label honest while the
+                        // session is being kept server-side.
+                        if session.waitingForUser != hold { session.waitingForUser = hold }
+                        if session.connected && takeControlOnOpen && !autoControlAttempted {
+                            autoControlAttempted = true
+                            _ = await session.takeControl()
+                        }
+                    }
+                    .fullScreenCover(isPresented: $fullscreen) {
+                        BrowserFullscreen(session: session, resume: { await resume(session) })
+                    }
+            } else {
+                VStack(spacing: 16) {
+                    AnimatedFlame(animation: task?.needsChatHelp == true ? .notify : .laptop, size: 68)
+                    if let task, task.needsChatHelp, let help = task.help, help.kind == .recovery {
+                        Text(help.message).multilineTextAlignment(.center)
+                        Button(help.actionLabel) {
+                            Task { await store.replyToTask(taskID: task.id, helpID: help.id, choiceLabel: help.actionLabel) }
+                        }.buttonStyle(SettingsActionStyle())
+                        Button("Stop this task") {
+                            Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id, choiceLabel: "Stop this task"); openChat() }
+                        }.buttonStyle(SettingsActionStyle(filled: false))
+                    } else {
+                        Text(task?.status == .succeeded || task?.status == .rejected ? "This session has finished." : "Connecting to \(title)…")
+                    }
+                    Button("Back to chat") { openChat() }.buttonStyle(SettingsActionStyle(filled: false))
+                }.padding(24)
+            }
     }
     @ViewBuilder private func feedViewport(_ session: LiveBrowserSession) -> some View {
         if cardDismissal != nil {

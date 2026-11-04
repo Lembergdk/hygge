@@ -265,16 +265,12 @@ struct OnboardingView: View {
                 .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty)
                 .opacity(input.trimmingCharacters(in: .whitespaces).isEmpty && conversation.profile.locationLabel.isEmpty ? 0.45 : 1)
             case .when:
-                // Calendar permission only. Availability itself is
-                // honed later in the ongoing conversation, not here.
-                permissionRow(icon: "calendar", title: "Calendar",
-                              why: "So I never double-book you, and approved gigs land in your calendar.",
-                              granted: calendarGranted) {
-                    Task { calendarGranted = await PermissionService.requestCalendar() }
-                }
-                primaryButton("Continue") {
-                    submitUser(calendarGranted == true ? "Calendar allowed" : "Not now", value: "")
-                }
+                // Two optional permissions, one card, separate
+                // consent each — iOS prompts are per-permission,
+                // and bundling them behind one Allow would blur
+                // what the user said yes to. Availability itself
+                // is honed later in the ongoing conversation.
+                permissionsCard
             case .summary:
                 summaryCard
             case .signIn:
@@ -336,6 +332,57 @@ struct OnboardingView: View {
         }
     }
 
+    /// The .when card: calendar and notifications asked together,
+    /// each in its own panel with its own Allow — agreeing to one
+    /// never implies the other, and skipping both is one quiet
+    /// Continue. Panels stack full-width so copy never squeezes at
+    /// large text sizes; the outer card and one primary action
+    /// keep the step a single decision, as everywhere in onboarding.
+    private var permissionsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            permissionRow(icon: "calendar", title: "Calendar",
+                          why: "So I never double-book you, and approved gigs land in your calendar.",
+                          granted: calendarGranted) {
+                Task { calendarGranted = await PermissionService.requestCalendar() }
+            }
+            permissionRow(icon: "bell", title: "Notifications",
+                          why: "So I can let you know when something needs your OK, or new work turns up.",
+                          granted: notificationsGranted) {
+                Task {
+                    notificationsGranted = await PermissionService.requestNotifications()
+                    // Answered once, here — the feed primer must not
+                    // ask again later, whichever way this went.
+                    store.dismissNotificationPrimer()
+                    if notificationsGranted == true { await store.refreshPushState() }
+                }
+            }
+            Text("Both are optional. You can change either any time under Profile, in Permissions.")
+                .font(.caption).foregroundStyle(GPTheme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            primaryButton("Continue") {
+                submitUser(OnboardingStep.permissionReply(calendar: calendarGranted,
+                                                          notifications: notificationsGranted), value: "")
+            }
+        }
+        .task { await loadPermissionStates() }
+    }
+
+    /// Show answers the system already holds (a reinstalled app,
+    /// an earlier answer) instead of asking again. Only fills in
+    /// states this visit has not decided yet.
+    private func loadPermissionStates() async {
+        if calendarGranted == nil {
+            calendarGranted = PermissionService.calendarAuthorization()
+        }
+        if notificationsGranted == nil {
+            switch await PermissionService.notificationAuthorization() {
+            case .authorized: notificationsGranted = true
+            case .denied: notificationsGranted = false
+            case .notDetermined: break
+            }
+        }
+    }
+
     /// One soft panel, stacked so the words always get the full
     /// width: badge + title on top, the one-line reason under it,
     /// then a filled Allow pill. Side-by-side squeezed the text
@@ -347,11 +394,11 @@ struct OnboardingView: View {
                 permissionBadge(icon)
                 Text(title).font(.body.weight(.semibold)).foregroundStyle(GPTheme.ink)
                 Spacer()
-                permissionState(granted)
+                permissionState(title, granted)
             }
             Text(why).font(.subheadline).foregroundStyle(GPTheme.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if granted == nil { allowPill(action) }
+            if granted == nil { allowPill(title, action) }
         }
         .padding(16)
         .background(GPTheme.paper, in: RoundedRectangle(cornerRadius: 18))
@@ -363,25 +410,32 @@ struct OnboardingView: View {
             Circle().fill(GPTheme.teal.opacity(0.14)).frame(width: 44, height: 44)
             Image(systemName: icon).font(.system(size: 18)).foregroundStyle(GPTheme.teal)
         }
+        .accessibilityHidden(true)
     }
 
     @ViewBuilder
-    private func permissionState(_ granted: Bool?) -> some View {
+    private func permissionState(_ title: String, _ granted: Bool?) -> some View {
         if let granted {
             Label(granted ? "On" : "Off", systemImage: granted ? "checkmark.circle.fill" : "circle")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(granted ? GPTheme.teal : GPTheme.secondary)
                 .labelStyle(.iconOnly)
+                .accessibilityLabel("\(title) \(granted ? "allowed" : "off")")
         }
     }
 
-    private func allowPill(_ action: @escaping () -> Void) -> some View {
+    private func allowPill(_ title: String, _ action: @escaping () -> Void) -> some View {
         Button("Allow") { action() }
             .font(.subheadline.weight(.semibold))
             .padding(.horizontal, 22).padding(.vertical, 10)
+            // 44pt minimum touch target without growing the pill.
+            .frame(minHeight: 44)
             .background(GPTheme.teal, in: Capsule())
             .foregroundStyle(.white)
             .buttonStyle(.plain)
+            // Two Allow buttons share this card; VoiceOver must be
+            // able to tell them apart without reading the rows.
+            .accessibilityLabel("Allow \(title.lowercased()) access")
     }
 
     /// Town/city field with the locate action as an icon at its

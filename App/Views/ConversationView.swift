@@ -14,7 +14,10 @@ struct ConversationView: View {
     @State private var input = ""
     @State private var streamingText: String?
     @State private var isThinking = false
-    @State private var pendingAction: ChatAction?
+    @State private var agentState: PersistentConversationState?
+    @State private var agentError: String?
+    @State private var retryMessage: ChatEntry?
+    @State private var showReset = false
     @State private var replyTarget: TaskReplyTarget?
     @State private var credentialRequest: AppStore.CredentialSaveRequest?
     @State private var takeBrowserControl = false
@@ -46,6 +49,9 @@ struct ConversationView: View {
                             VStack(alignment: .leading, spacing: 13) {
                                 ForEach(store.chatTranscript) { entry in
                                     VStack(alignment: .leading, spacing: 8) {
+                                        if !entry.fromAgent, let context = entry.context {
+                                            HStack { Spacer(minLength: 44); chatContextCard(context) }
+                                        }
                                         bubble(entry)
                                         if let taskID = entry.taskID,
                                            let task = store.tasks.first(where: { $0.id == taskID }),
@@ -75,8 +81,16 @@ struct ConversationView: View {
                                 if let streamingText {
                                     agentBubble(streamingText)
                                 }
-                                if let pendingAction {
-                                    confirmationCard(pendingAction)
+                                if let agentError { Text(agentError).font(.footnote).foregroundStyle(HyggeTheme.secondary) }
+                                if let pending = agentState?.activeTurn {
+                                    Button("Continue saved turn") { Task { await retryTurn(id: pending.id) } }
+                                        .disabled(isThinking)
+                                } else if let retryMessage {
+                                    Button("Try again") { Task { await retryTurn(id: retryMessage.id.uuidString.lowercased(), text: retryMessage.text) } }
+                                        .disabled(isThinking)
+                                }
+                                ForEach(agentState?.proposals ?? []) { proposal in
+                                    agentConfirmationCard(proposal)
                                 }
                                 Color.clear.frame(height: 10).id("bottom")
                             }
@@ -89,7 +103,6 @@ struct ConversationView: View {
                             if let id = store.conversationTaskID,
                                let entry = store.chatTranscript.last(where: { $0.taskID == id }) {
                                 proxy.scrollTo(entry.id, anchor: .top)
-                                prepareReply(to: id)
                             } else { proxy.scrollTo("bottom", anchor: .bottom) }
                         }
                         .onChange(of: store.conversationTaskID) { _, id in
@@ -100,7 +113,6 @@ struct ConversationView: View {
                         .onChange(of: store.chatTranscript.count) { _, _ in
                             store.markChatRead()
                             withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
-                            if let id = store.chatTranscript.last?.taskID { prepareReply(to: id) }
                         }
                         .onDisappear { store.markChatRead() }
                         .onChange(of: streamingText?.count ?? 0) { _, _ in
@@ -113,6 +125,19 @@ struct ConversationView: View {
                             Spacer()
                             Button("Cancel") { replyTarget = nil }
                         }.foregroundStyle(HyggeTheme.secondary).padding(.horizontal, 18)
+                    }
+                    if replyTarget == nil, let pending = store.pendingChatContext {
+                        HStack(spacing: 10) {
+                            chatContextCard(pending)
+                            Spacer(minLength: 0)
+                            Button { store.pendingChatContext = nil } label: {
+                                Image(systemName: "xmark").font(.caption.weight(.semibold))
+                                    .frame(width: 44, height: 44).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain).foregroundStyle(HyggeTheme.secondary)
+                            .accessibilityLabel("Detach card")
+                        }
+                        .padding(.horizontal, 14).padding(.top, 8)
                     }
                     composer
                 }
@@ -128,6 +153,29 @@ struct ConversationView: View {
                              taskID: task.id, takeControlOnOpen: takeBrowserControl)
         }
         .task { await store.observeBrowserTasks() }
+        .task {
+            await refreshConversation()
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(12)) } catch { break }
+                await refreshConversation()
+            }
+        }
+        .confirmationDialog("Clear this conversation, saved notes and working files?", isPresented: $showReset, titleVisibility: .visible) {
+            Button("Clear chat, notes and files", role: .destructive) {
+                Task {
+                    guard let generation = agentState?.generation else { return }
+                    isThinking = true
+                    defer { isThinking = false }
+                    do {
+                        await store.beginConversationRequest()
+                        agentState = try await store.backend.resetConversation(generation: generation)
+                        store.chatTranscript = []; retryMessage = nil
+                        store.saveConversationOutbox(messageID: nil)
+                        _ = await store.pullFromServer(reconcilingConversation: true)
+                    } catch { agentError = "I couldn't clear the saved conversation. Nothing is reported as deleted yet." }
+                }
+            }
+        }
     }
 
     private var avatarAnimation: FlameAnimation {
@@ -135,14 +183,49 @@ struct ConversationView: View {
         return store.isAgentWorking || isThinking ? .laptop : .walk
     }
 
+    /// The mini-card a message is about — attached above the
+    /// composer before sending, stamped above its bubble after.
+    private func chatContextCard(_ context: ChatContextRef) -> some View {
+        HStack(spacing: 10) {
+            if let domain = context.siteDomain {
+                SiteLogoTile(domain: domain, name: context.title, size: 34)
+            } else {
+                Image(systemName: context.kind == "mail" ? "envelope" : context.kind == "event" ? "doc.text" : "bubble.left")
+                    .font(.subheadline).foregroundStyle(HyggeTheme.sageDeep)
+                    .frame(width: 34, height: 34)
+                    .background(HyggeTheme.sageTint, in: RoundedRectangle(cornerRadius: 9))
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(context.title).font(.subheadline.weight(.semibold))
+                    .foregroundStyle(HyggeTheme.ink).lineLimit(2)
+                if !context.subtitle.isEmpty {
+                    Text(context.subtitle).font(.caption).foregroundStyle(HyggeTheme.secondary).lineLimit(2)
+                }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(HyggeTheme.card, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(HyggeTheme.hairline, lineWidth: 1))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("About: \(context.title)")
+    }
+
     private var composer: some View {
         HStack(spacing: 9) {
+            Menu {
+                Button("Refresh saved conversation") { Task { await refreshConversation() } }
+                Button("Clear chat, notes and files", role: .destructive) { showReset = true }
+                    .disabled(isThinking)
+            } label: {
+                Image(systemName: "ellipsis.circle").frame(width: 32, height: 44)
+            }.accessibilityLabel("Conversation options")
             TextField(replyTarget == nil ? "Message Hygge…" : "Your reply…", text: $input, axis: .vertical)
                 .focused($composerFocused)
                 .lineLimit(1...4)
                 .padding(.horizontal, 16).padding(.vertical, 12)
                 .background(HyggeTheme.card, in: Capsule())
-                .overlay(Capsule().stroke(HyggeTheme.hairline, lineWidth: 1))
+                .overlay(Capsule().stroke(HyggeTheme.hairline, lineWidth: 1).allowsHitTesting(false))
                 .onSubmit { Task { await send() } }
             Button { Task { await send() } } label: {
                 Image(systemName: "paperplane.fill")
@@ -150,7 +233,8 @@ struct ConversationView: View {
                     .frame(width: 44, height: 44)
                     .background(HyggeTheme.sageDeep, in: Circle())
             }
-            .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty || isThinking)
+            .accessibilityLabel("Send message")
+            .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty || isThinking || agentState?.activeTurn != nil || retryMessage != nil)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
     }
@@ -206,6 +290,7 @@ struct ConversationView: View {
     }
 
     private func send() async {
+        guard !isThinking, agentState?.activeTurn == nil, retryMessage == nil else { return }
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isThinking else { return }
         input = ""
@@ -221,74 +306,95 @@ struct ConversationView: View {
             isThinking = false
             return
         }
-        store.appendChat(fromAgent: false, text: text)
-        // Understanding is model-led: one short intent call decides
-        // whether this message wants something done (referents and
-        // all), and the store validates whatever it proposes before
-        // anything runs. The strict grammar and the deterministic
-        // email resolver remain as offline fallbacks underneath.
-        isThinking = true
-        switch await store.modelIntent(for: text) {
-        case .handled(let replyText):
-            isThinking = false
-            store.appendChat(fromAgent: true, text: replyText)
-            return
-        case .needsConfirmation(let action):
-            isThinking = false
-            pendingAction = action
-            return
-        case .unhandled:
-            isThinking = false
-        }
-        let parsedAction = ChatActionParser.parse(text, sites: store.sites)
-        if parsedAction == nil || parsedAction == .checkEmail {
-            isThinking = true
-            let emailReply = await store.handleEmailAsk(text: text)
-            isThinking = false
-            if let emailReply {
-                store.appendChat(fromAgent: true, text: emailReply)
-                return
-            }
-        }
-        if let action = parsedAction {
-            if action.requiresConfirmation {
-                pendingAction = action
-                return
-            }
-            isThinking = true
-            let replyText = await store.performChatAction(action)
-            isThinking = false
-            store.appendChat(fromAgent: true, text: replyText)
-            return
-        }
-        isThinking = true
-        streamingText = nil
-        defer { isThinking = false; streamingText = nil }
-        let transcript = store.chatTranscript.map {
-            BackendClient.TranscriptLine(fromAgent: $0.fromAgent, text: $0.text)
-        }
+        // The attached card (if any) is stamped on this message
+        // and consumed: the next message starts unattached.
+        let attached = store.pendingChatContext
+        store.pendingChatContext = nil
+        store.appendConversationMessage(fromAgent: false, text: text, context: attached)
+        let message = store.chatTranscript.last!
+        retryMessage = message
+        store.saveConversationOutbox(messageID: message.id, generation: agentState?.generation)
+        await retryTurn(id: message.id.uuidString.lowercased(), text: text)
+    }
+
+    private func refreshConversation() async {
+        guard !isThinking else { return }
         do {
-            let reply = try await store.backend.chatStream(
-                transcript: transcript, profile: store.profile,
-                contextSummary: store.conversationContextSummary
-            ) { delta in
-                if streamingText == nil { streamingText = "" }
-                streamingText! += delta
+            let state = try await store.backend.conversationState()
+            agentState = state; agentError = nil
+            _ = await store.pullFromServer(reconcilingConversation: state.activeTurn == nil && store.pendingConversationMessageID == nil)
+            if let id = store.pendingConversationMessageID,
+               let message = store.chatTranscript.first(where: { $0.id == id }) {
+                if let old = store.pendingConversationGeneration, old != state.generation {
+                    input = message.text; retryMessage = nil
+                    store.chatTranscript.removeAll { $0.id == message.id }
+                    store.saveConversationOutbox(messageID: nil)
+                    _ = await store.pullFromServer(reconcilingConversation: true)
+                    agentError = "The conversation was cleared on another device. Your unsent message is in the composer."
+                } else { retryMessage = message }
             }
-            store.appendChat(fromAgent: true, text: reply.reply)
-            // Nothing the model infers is applied silently. Inferred facts
-            // become quoted belief proposals the user confirms in profile.
-            proposeBeliefs(from: reply.extracted)
+        }
+        catch { agentError = "I couldn't load your saved conversation. Try again when you're connected." }
+    }
+
+    private func applyConversation(_ state: PersistentConversationState) async {
+        agentState = state
+        if let reply = state.reply, !reply.isEmpty {
+            store.appendConversationMessage(fromAgent: true, text: reply, id: state.replyMessageId ?? UUID())
+        }
+        retryMessage = nil
+        if await store.pullFromServer(reconcilingConversation: true) { store.saveConversationOutbox(messageID: nil) }
+    }
+
+    private func retryTurn(id: String, text: String? = nil) async {
+        guard !isThinking else { return }
+        isThinking = true; agentError = nil; streamingText = ""
+        defer { isThinking = false; streamingText = nil }
+        do {
+            if agentState == nil { agentState = try await store.backend.conversationState() }
+            guard let generation = agentState?.generation else { return }
+            if let saved = store.pendingConversationGeneration, saved != generation {
+                agentError = "The conversation was cleared. Refresh it to recover your unsent message."
+                return
+            }
+            if let id = UUID(uuidString: id), retryMessage != nil { store.saveConversationOutbox(messageID: id, generation: generation) }
+            await store.beginConversationRequest()
+            let result = try await store.backend.conversationTurn(id: id, generation: generation, text: text,
+                focus: retryMessage?.context.map { PersistentChatFocus(kind: $0.kind, id: $0.id) }) { delta in
+                streamingText = (streamingText ?? "") + delta
+            }
+            await applyConversation(result)
         } catch {
-            store.appendChat(fromAgent: true,
-                             text: "I'm offline right now, so I can't think that through. Your message is saved here — ask me again when you're back online.")
+            agentError = "That turn was interrupted. Its progress is saved; use Try again or Continue saved turn to resume."
+            agentState = try? await store.backend.conversationState()
         }
     }
 
-    private func prepareReply(to taskID: UUID) {
-        guard let task = store.tasks.first(where: { $0.id == taskID }), task.needsChatHelp,
-              let help = task.help, help.kind == .information, let question = help.questions.first else { return }
-        replyTarget = TaskReplyTarget(taskID: taskID, helpID: help.id, question: question.text)
+    private func decide(_ proposal: PersistentChatProposal, approve: Bool) async {
+        guard !isThinking, let state = agentState else { return }
+        isThinking = true; agentError = nil
+        defer { isThinking = false }
+        do {
+            await store.beginConversationRequest()
+            let result = try await store.backend.conversationDecision(generation: state.generation, proposalID: proposal.id, approve: approve)
+            await applyConversation(result)
+            if approve, let device = result.proposals.first(where: { $0.id == proposal.id && $0.result?.status == "device_required" }) {
+                await finishDeviceAction(device, generation: state.generation)
+            }
+        } catch {
+            agentError = "I couldn't finish that decision. Check its saved status before trying again."
+            agentState = try? await store.backend.conversationState()
+        }
+    }
+
+    private func finishDeviceAction(_ proposal: PersistentChatProposal, generation: String) async {
+        guard let payload = proposal.result?.payload else { return }
+        await store.beginConversationRequest()
+        do { try await store.backend.claimConversationDeviceAction(generation: generation, proposalID: proposal.id) }
+        catch { agentError = "This calendar action may be in progress on another device. Check its outcome before continuing."; return }
+        let success = await CalendarService.book(payload: payload, operationID: proposal.id)
+        do { await applyConversation(try await store.backend.conversationDeviceResult(generation: generation, proposalID: proposal.id, success: success)) }
+        catch { agentError = "I couldn't report the calendar result. Retrying this saved action will check for an existing event first." }
     }
 
     @ViewBuilder
@@ -351,115 +457,37 @@ struct ConversationView: View {
         .padding(16).hyggeCard(radius: 20).padding(.leading, 33)
     }
 
-    private func proposeBeliefs(from patch: EarningsProfilePatch) {
-        func normalized(_ value: String) -> String {
-            value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        }
-        func existingItems(withPrefix prefix: String) -> Set<String> {
-            Set((store.beliefs.beliefs + store.beliefs.pending)
-                .filter { $0.sentence.hasPrefix(prefix) }
-                .flatMap { $0.sentence.dropFirst(prefix.count).split(separator: ",").map { normalized(String($0)) } })
-        }
-
-        // Proposals are reviewed in Profile, never announced in chat.
-        if let skills = patch.skills {
-            let knownSkills = Set(store.profile.skills.map(normalized))
-                .union(existingItems(withPrefix: "Also good at:"))
-            var seenSkills = Set<String>()
-            let newSkills = skills.compactMap { skill -> String? in
-                let trimmed = skill.trimmingCharacters(in: .whitespacesAndNewlines)
-                let key = normalized(trimmed)
-                guard !trimmed.isEmpty, !knownSkills.contains(key),
-                      seenSkills.insert(key).inserted else { return nil }
-                return trimmed
-            }
-            if !newSkills.isEmpty {
-                store.proposeBelief(sentence: "Also good at: \(newSkills.joined(separator: ", "))",
-                                    source: .guessedFromChat, confidence: 0.7)
-            }
-        }
-        if let availability = patch.availabilityNotes {
-            let trimmedAvailability = availability.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedAvailability.isEmpty,
-               normalized(trimmedAvailability) != normalized(store.profile.availabilityNotes) {
-                store.proposeBelief(sentence: "Usually free: \(trimmedAvailability)",
-                                    source: .youSaidIt, confidence: 0.85)
-            }
-        }
-        if let location = patch.locationLabel {
-            let trimmedLocation = location.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedLocation.isEmpty,
-               normalized(trimmedLocation) != normalized(store.profile.locationLabel) {
-                store.proposeBelief(sentence: "Now based in \(trimmedLocation)",
-                                    source: .youSaidIt, confidence: 0.85)
-            }
-        }
-        if let interests = patch.interests {
-            let knownLabels = existingItems(withPrefix: "Also enjoys:")
-            var seenInterests: [OpportunityCategory] = []
-            let newInterests = interests.filter { interest in
-                guard !store.profile.interests.contains(interest),
-                      !knownLabels.contains(normalized(interest.activityLabel)),
-                      !seenInterests.contains(interest) else { return false }
-                seenInterests.append(interest)
-                return true
-            }
-            if !newInterests.isEmpty {
-                store.proposeBelief(sentence: "Also enjoys: \(newInterests.map(\.activityLabel).joined(separator: ", ").lowercased())",
-                                    source: .guessedFromChat, confidence: 0.65)
-            }
-        }
-    }
-
-    private func actionQuestion(_ action: ChatAction) -> String {
-        switch action {
-        case .stopSite(let siteID):
-            return "Stop watching \(store.siteName(id: siteID)) completely?"
-        case .changeFloor(let floor):
-            return "Set your lowest rate to $\(Int(floor))/hr?"
-        case .approveFirst:
-            if let task = store.tasks.first(where: { $0.status == .awaitingApproval }) {
-                return "Approve and send “\(task.title)”?"
-            }
-            return "Approve the first waiting draft?"
-        case .bookFirst:
-            return "Go ahead with the waiting booking?"
-        case .pause, .resume, .explainDropped, .scanSite, .joinSite, .addSite, .checkEmail:
-            return "Do that now?"
-        }
-    }
-
-    /// Consequential chat actions render as an inline confirm card in the
-    /// thread — the words alone never execute them.
-    private func confirmationCard(_ action: ChatAction) -> some View {
+    private func agentConfirmationCard(_ proposal: PersistentChatProposal) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Just to be sure")
-                .font(.caption.weight(.bold)).foregroundStyle(HyggeTheme.ember)
-            Text(actionQuestion(action))
-                .font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
-            HStack(spacing: 9) {
-                Button("Yes, do it") {
-                    pendingAction = nil
-                    store.appendChat(fromAgent: false, text: "Yes, do it")
+            Text(proposal.title).font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
+            ForEach((proposal.details ?? [:]).keys.sorted(), id: \.self) { key in
+                Text("\(key): \(proposal.details?[key] ?? "")").font(.footnote).foregroundStyle(HyggeTheme.secondary)
+            }
+            if proposal.status == "pending" {
+                HStack {
+                    Button("Yes, do it") { Task { await decide(proposal, approve: true) } }
+                        .buttonStyle(SettingsActionStyle())
+                    Button("Not now") { Task { await decide(proposal, approve: false) } }
+                        .buttonStyle(SettingsActionStyle(filled: false))
+                }
+            } else if proposal.result?.status == "device_required", let generation = agentState?.generation {
+                Button("Add to calendar") {
                     Task {
-                        let replyText = await store.performChatAction(action)
-                        store.appendChat(fromAgent: true, text: replyText)
+                        isThinking = true
+                        await finishDeviceAction(proposal, generation: generation)
+                        isThinking = false
                     }
-                }
-                .font(.subheadline.weight(.semibold))
-                .padding(.horizontal, 15).padding(.vertical, 9)
-                .background(HyggeTheme.ember, in: Capsule()).foregroundStyle(.white)
-                Button("Not now") {
-                    pendingAction = nil
-                    store.appendChat(fromAgent: false, text: "Not now")
-                    store.appendChat(fromAgent: true, text: "Okay — nothing changed.")
-                }
-                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
+                }.buttonStyle(SettingsActionStyle())
+            } else {
+                Text("This action needs its outcome checked before it can continue.")
+                    .font(.footnote).foregroundStyle(HyggeTheme.secondary)
             }
         }
+        .disabled(isThinking)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(15).hyggeCard(radius: 18)
     }
+
 }
 
 /// Shared thinking dots (also usable outside onboarding).

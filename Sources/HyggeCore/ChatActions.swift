@@ -21,11 +21,13 @@ public enum ChatAction: Codable, Equatable, Sendable {
     case addSite(domain: String)
     /// Report what is in the user's Hygge inbox.
     case checkEmail
+    /// A model-resolved mail request, revalidated against the live inbox.
+    case readMail(mailID: String?, act: Bool)
 
     public var requiresConfirmation: Bool {
         switch self {
         case .stopSite, .changeFloor, .approveFirst, .bookFirst: return true
-        case .pause, .resume, .explainDropped, .scanSite, .joinSite, .addSite, .checkEmail: return false
+        case .pause, .resume, .explainDropped, .scanSite, .joinSite, .addSite, .checkEmail, .readMail: return false
         }
     }
 }

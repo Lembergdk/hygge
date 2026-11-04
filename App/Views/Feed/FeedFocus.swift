@@ -2,7 +2,7 @@ import SwiftUI
 import Observation
 
 enum FeedFocus: Identifiable {
-    case proposal(ProposedSite), opportunity(Opportunity), event(ActivityEvent), task(AgentTask), browser(AgentTask), paused, emailDecision(FiledEmailSummary)
+    case proposal(ProposedSite), opportunity(Opportunity), event(ActivityEvent), task(AgentTask), browser(AgentTask), paused
     var id: String {
         switch self {
         case .proposal(let value): return "proposal-\(value.id)"
@@ -10,13 +10,12 @@ enum FeedFocus: Identifiable {
         case .event(let value): return "event-\(value.id)"
         case .task(let value), .browser(let value): return Self.taskKey(value)
         case .paused: return "paused"
-        case .emailDecision(let value): return "email-decision-\(value.senderDomain)"
         }
     }
     var maximumHeight: CGFloat {
         switch self {
         case .paused: return 320
-        case .event, .emailDecision: return 560
+        case .event(let event): return event.kind == .filedEmail ? 720 : 560
         case .proposal: return 600
         case .opportunity, .task: return 680
         case .browser: return 780
@@ -48,7 +47,7 @@ struct FeedFocusCard<Content: View>: View {
                     .frame(width: 38, height: 5)
                     .padding(.top, 8)
             }
-            .frame(width: 160, height: 32)
+            .frame(width: 160, height: 44)
             .contentShape(Rectangle())
             .feedCardDismissRegion()
             .onTapGesture { close() }

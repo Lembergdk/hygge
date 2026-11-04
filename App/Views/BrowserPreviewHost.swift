@@ -11,11 +11,12 @@ struct BrowserPreviewHost: View {
         Group {
             if !ready { Color.clear.task { seed(); ready = true } }
             else if screen == "browser" { CloudBrowserView(urlString: "https://workroom.example", existingSessionID: "preview", taskID: taskID) }
-            else if screen == "chat" { ConversationView() }
+            else if screen == "chat" || screen == "conversation" { ConversationView() }
             else { HomeFeedView() }
         }.preferredColorScheme(.dark)
     }
     private func seed() {
+        if screen == "conversation" { store.tasks = []; store.hasOnboarded = true; store.notificationPrimerVisible = false; return }
         store.profile = EarningsProfile(displayName: "Mikael", interests: [.creative], locationLabel: "Austin, TX")
         let site = TargetSite(id: "workroom", name: "Workroom", startURLString: "https://workroom.example", category: .creative, goalTemplate: "")
         store.sites = [site]; store.proposals = []; store.opportunities = []; store.applications = []; store.activityEvents = []; store.chatTranscript = []

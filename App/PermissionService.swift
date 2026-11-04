@@ -13,6 +13,17 @@ enum PermissionService {
         (try? await EKEventStore().requestFullAccessToEvents()) ?? false
     }
 
+    /// The current calendar answer without prompting: true for full
+    /// access, false once refused, nil while undecided (write-only
+    /// counts as undecided — reading availability needs full access).
+    static func calendarAuthorization() -> Bool? {
+        switch EKEventStore.authorizationStatus(for: .event) {
+        case .fullAccess: return true
+        case .denied, .restricted: return false
+        default: return nil
+        }
+    }
+
     static func requestNotifications() async -> Bool {
         let center = UNUserNotificationCenter.current()
         let granted = (try? await center.requestAuthorization(options: [.alert, .badge, .sound])) ?? false

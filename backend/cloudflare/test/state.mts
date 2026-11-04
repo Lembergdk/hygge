@@ -139,3 +139,10 @@ test("secrets are stripped and demo flag cannot be faked on the server", () => {
   assert.equal(row.is_demo, false);
   assert.equal("secret" in row, false);
 });
+
+test('cleared chat tombstones reject direct writes and stale snapshot resurrection',()=>{
+ const s=new StateStore(new MemoryStateDb(),id=>id!=='deleted');
+ assert.throws(()=>s.upsert('messages','DELETED',{id:'DELETED',text:'old'}),/MESSAGE_DELETED/);
+ s.importSnapshot({chatTranscript:[{id:'deleted',text:'old'},{id:'kept',text:'new'}]});
+ assert.equal(s.get('messages','deleted'),null);assert.ok(s.get('messages','kept'));
+});

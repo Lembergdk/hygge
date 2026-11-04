@@ -34,6 +34,9 @@ struct StoreSnapshot: Codable {
     var proposals: [ProposedSite]
     var accountStates: [String: SiteAccountState]
     var chatTranscript: [ChatEntry]
+    var pendingConversationMessageID: UUID? = nil
+    var pendingConversationGeneration: String? = nil
+    var conversationNeedsReconciliation: Bool = false
     var activityEvents: [ActivityEvent]
     var isPaused: Bool
     var lastVisitAt: Date?
@@ -62,6 +65,9 @@ struct StoreSnapshot: Codable {
         proposals = try c.decodeIfPresent([ProposedSite].self, forKey: .proposals) ?? []
         accountStates = try c.decodeIfPresent([String: SiteAccountState].self, forKey: .accountStates) ?? [:]
         chatTranscript = try c.decodeIfPresent([ChatEntry].self, forKey: .chatTranscript) ?? []
+        pendingConversationMessageID = try c.decodeIfPresent(UUID.self, forKey: .pendingConversationMessageID)
+        pendingConversationGeneration = try c.decodeIfPresent(String.self, forKey: .pendingConversationGeneration)
+        conversationNeedsReconciliation = try c.decodeIfPresent(Bool.self, forKey: .conversationNeedsReconciliation) ?? false
         activityEvents = try c.decodeIfPresent([ActivityEvent].self, forKey: .activityEvents) ?? []
         isPaused = try c.decodeIfPresent(Bool.self, forKey: .isPaused) ?? false
         lastVisitAt = try c.decodeIfPresent(Date.self, forKey: .lastVisitAt)
@@ -96,11 +102,18 @@ final class AppStore {
     var tasks: [AgentTask] = []
     private var runningTaskIDs: Set<UUID> = []
     var conversationTaskID: UUID?
+    /// The feed card attached to the next chat message
+    /// ("Chat about this"). Session-only; stamped onto the
+    /// entry when sent, then cleared.
+    var pendingChatContext: ChatContextRef?
     var dismissedProposalID: UUID?
     var applications: [ApplicationRecord] = []
     var proposals: [ProposedSite] = []
     var accountStates: [String: SiteAccountState] = [:]
     var chatTranscript: [ChatEntry] = []
+    private(set) var pendingConversationMessageID: UUID?
+    private(set) var conversationNeedsReconciliation = false
+    private(set) var pendingConversationGeneration: String?
     /// When the user last actually read the thread, on this
     /// device. Drives the flame badge — which must only promise
     /// what opening the chat can resolve.
@@ -158,6 +171,15 @@ final class AppStore {
     /// own inbox; codes never come to the device.
     var hyggeEmailAddress: HyggeEmailAddress?
     var filedEmailSummaries: [FiledEmailSummary] = []
+    var emailNextCursor: String?
+    var emailRefreshError: String?
+    var emailHasLoaded = false
+    var refreshingEmail = false
+    var loadingOlderEmail = false
+    var ownEmailAddresses: [OwnEmailAddress] = []
+    /// Senders the user opted out of evaluation (silent filing).
+    /// The only remembered sender rule the app surfaces.
+    var ignoredSenderDomains: [String] = []
 
     /// Brief 07 push: the one-time Home primer (shown only after the
     /// first thing worth telling the user about exists), plus where
@@ -554,6 +576,7 @@ final class AppStore {
         }
         UserDefaults.standard.removeObject(forKey: Self.pushPrimerResolvedKey)
         PushInbox.pendingTokenHex = nil
+        PushInbox.lastDeliveredTokenHex = nil
         PushInbox.pendingRoute = nil
         notificationPrimerVisible = false
         pendingTaskOpenID = nil
@@ -565,6 +588,7 @@ final class AppStore {
         isExistingAccount = false
         passwordFlow = nil
         magicLinkFlow = nil
+        pendingChatContext = nil
         pendingOnboardingProfile = nil
         magicLinkError = nil
         wantsOnboarding = false
@@ -684,11 +708,9 @@ final class AppStore {
     func dismissProposal(proposalID: UUID) {
         guard let index = proposals.firstIndex(where: { $0.id == proposalID }) else { return }
         proposals[index].status = .dismissed
-        // A mail-born suggestion dismissed = also the answer for
-        // that sender: just file their mail, never re-suggest.
-        if let domain = proposals[index].sourceMailDomain, !domain.isEmpty {
-            Task { await decideEmailSender(domain: domain, choice: "file") }
-        }
+        // The dismissed site stays in the site list, which is
+        // what keeps mail from ever re-suggesting it — the mail's
+        // sender (often just a forwarder) is not punished for it.
         dismissedProposalID = proposalID
         recordFeedback(FeedbackEvent(subjectType: .siteProposal,
                                      subjectId: proposalID.uuidString.lowercased(),
@@ -881,7 +903,7 @@ final class AppStore {
     }
 
     /// The secret is sent once to the server vault; only the reference is kept.
-    /// Returns false (with nothing stored anywhere) if saving failed.
+    /// Returns false when the save could not be confirmed.
     @discardableResult
     func addCredential(domain: String, username: String, secret: String) async -> Bool {
         let cleanDomain = domain.replacingOccurrences(of: "www.", with: "")
@@ -899,7 +921,7 @@ final class AppStore {
             save()
             return true
         } catch {
-            lastMessage = "That login could not be saved just now. Nothing was stored — please try again in a moment."
+            lastMessage = "We couldn’t confirm that your login was saved. Enter your password again to retry."
             save()
             return false
         }
@@ -907,12 +929,19 @@ final class AppStore {
 
     /// Deletes one saved login. The site's trusted sign-in is separate
     /// and stays (forget it on its own if you want both gone).
-    func deleteCredential(id: UUID) async {
-        guard let ref = credentialRefs.first(where: { $0.id == id }) else { return }
-        await backend.deleteCredential(id: ref.id)
+    @discardableResult
+    func deleteCredential(id: UUID) async -> Bool {
+        guard let ref = credentialRefs.first(where: { $0.id == id }) else { return true }
+        guard await backend.deleteCredential(id: ref.id) else {
+            lastMessage = "We couldn’t confirm removal of your saved login. Please try again."
+            return false
+        }
         credentialRefs.removeAll { $0.id == ref.id }
-        lastMessage = "Saved login for \(ref.domain) deleted. Hygge can no longer sign in there for you."
+        lastMessage = sessionProfile(forDomain: ref.domain)?.hasProfile == true
+            ? "Saved login removed. The remembered sign-in for \(ref.domain) remains."
+            : "Saved login for \(ref.domain) removed."
         save()
+        return true
     }
 
     func sessionProfile(forDomain domain: String) -> SessionProfileRef? {
@@ -926,45 +955,75 @@ final class AppStore {
     }
 
     func refreshHyggeEmail() async {
-        if let address = try? await backend.hyggeEmailAddress() {
-            hyggeEmailAddress = address
-        }
-        if let filed = try? await backend.filedEmail() {
-            filedEmailSummaries = filed
-        }
-    }
-
-    /// Unknown senders whose mail is waiting for the user's call,
-    /// newest example per sender. Drives the Home screen cards.
-    var pendingEmailDecisions: [FiledEmailSummary] {
-        var seen: Set<String> = []
-        return filedEmailSummaries.filter { mail in
-            guard mail.decision == "pending", !mail.senderDomain.isEmpty,
-                  !seen.contains(mail.senderDomain) else { return false }
-            seen.insert(mail.senderDomain)
-            return true
+        guard !refreshingEmail else { return }
+        refreshingEmail = true
+        defer { refreshingEmail = false }
+        if let address = try? await backend.hyggeEmailAddress() { hyggeEmailAddress = address }
+        do {
+            let inbox = try await backend.filedEmailInbox()
+            filedEmailSummaries = inbox.messages
+            ignoredSenderDomains = inbox.ignoredDomains
+            emailNextCursor = inbox.nextCursor
+            emailHasLoaded = true
+            emailRefreshError = nil
+        } catch {
+            emailRefreshError = "Couldn’t refresh email. Previously loaded summaries are still here."
         }
     }
 
-    var pendingEmailSenderDomains: [String] { pendingEmailDecisions.map(\.senderDomain) }
+    func loadOlderEmail() async {
+        guard let cursor = emailNextCursor, !loadingOlderEmail, !refreshingEmail else { return }
+        loadingOlderEmail = true
+        defer { loadingOlderEmail = false }
+        do {
+            let page = try await backend.filedEmailInbox(cursor: cursor)
+            guard emailNextCursor == cursor else { return }
+            let known = Set(filedEmailSummaries.map(\.id))
+            filedEmailSummaries += page.messages.filter { !known.contains($0.id) }
+            emailNextCursor = page.nextCursor
+            emailRefreshError = nil
+        } catch { emailRefreshError = "Couldn’t load older mail. Please try again." }
+    }
 
-    /// The user's answer for one unknown sender. It is remembered
-    /// where the mail arrives, so the same sender is never asked
-    /// about twice.
-    func decideEmailSender(domain: String, choice: String) async {
-        // The card leaves at tap time; the remembered choice is then
-        // confirmed by a fresh inbox (a failed save brings it back).
+    func originalEmail(id: String) async throws -> OriginalEmail? { try await backend.originalEmail(id: id) }
+    func refreshOwnEmailAddresses() async throws { ownEmailAddresses = try await backend.ownEmailAddresses() }
+    func addOwnEmailAddress(_ address: String) async throws -> OwnEmailAddress {
+        let result = try await backend.addOwnEmailAddress(address)
+        ownEmailAddresses.removeAll { $0.address == result.address }
+        ownEmailAddresses.append(result)
+        return result
+    }
+    func removeOwnEmailAddress(_ address: String) async -> Bool {
+        guard await backend.removeOwnEmailAddress(address) else { return false }
+        ownEmailAddresses.removeAll { $0.address == address }
+        return true
+    }
+    func markEmailAsMe(id: String, marked: Bool) async throws -> OwnEmailAddress? {
+        let response = try await backend.markEmailAsMe(id: id, marked: marked)
+        if let index = filedEmailSummaries.firstIndex(where: { $0.id == id }) { filedEmailSummaries[index].markedAsMe = response.marked }
+        if let address = response.ownerAddress {
+            ownEmailAddresses.removeAll { $0.address == address.address }
+            ownEmailAddresses.append(address)
+        }
+        return response.ownerAddress
+    }
+
+    /// The one sender call the user can make: ignore this sender
+    /// (silent filing, no evaluation) — or undo that. Remembered
+    /// where the mail arrives.
+    @discardableResult
+    func decideEmailSender(domain: String, choice: String) async -> Bool {
+        guard await backend.decideEmailSender(domain: domain, choice: choice) else { return false }
+        ignoredSenderDomains = choice == "ignore"
+            ? Array(Set(ignoredSenderDomains + [domain])).sorted()
+            : ignoredSenderDomains.filter { $0 != domain }
         filedEmailSummaries = filedEmailSummaries.map { mail in
-            guard mail.senderDomain == domain, mail.decision == "pending" else { return mail }
+            guard mail.senderDomain == domain else { return mail }
             var copy = mail
-            copy.decision = choice
+            copy.decision = choice == "ignore" ? "ignore" : "work"
             return copy
         }
-        if let fresh = await backend.decideEmailSender(domain: domain, choice: choice) {
-            filedEmailSummaries = fresh
-        } else {
-            await refreshHyggeEmail()
-        }
+        return true
     }
 
     /// The moment the user chooses a Hygge address: allocated once
@@ -994,11 +1053,18 @@ final class AppStore {
 
     /// Forgets one trusted sign-in. The saved login is kept, so the
     /// next visit simply signs in with it again.
-    func deleteSessionProfile(domain: String) async {
-        await backend.deleteSessionProfile(domain: domain)
+    @discardableResult
+    func deleteSessionProfile(domain: String) async -> Bool {
+        guard await backend.deleteSessionProfile(domain: domain) else {
+            lastMessage = "We couldn’t confirm removal of the remembered sign-in. Please try again."
+            return false
+        }
         sessionProfileRefs.removeAll { $0.domain == domain }
-        lastMessage = "Trusted sign-in for \(domain) forgotten. Your saved login is still kept safely."
+        lastMessage = credential(forDomain: domain) != nil
+            ? "Remembered sign-in for \(domain) forgotten. Your saved login remains."
+            : "Remembered sign-in for \(domain) forgotten."
         save()
+        return true
     }
 
     // MARK: - Opportunities & applications
@@ -1299,6 +1365,10 @@ final class AppStore {
         profileEditRevision += 1
         hyggeEmailAddress = nil
         filedEmailSummaries = []
+        ownEmailAddresses = []
+        emailNextCursor = nil
+        emailHasLoaded = false
+        emailRefreshError = nil
         hasOnboarded = false
         sites = SeedSites.all
         siteMemory = SiteMemoryRepository()
@@ -1309,6 +1379,9 @@ final class AppStore {
         proposals = []
         accountStates = [:]
         chatTranscript = []
+        pendingConversationMessageID = nil
+        pendingConversationGeneration = nil
+        conversationNeedsReconciliation = false
         activityEvents = []
         beliefs = BeliefBook()
         searchEvidence = []
@@ -1328,9 +1401,48 @@ final class AppStore {
 
     // MARK: - Thread, journal, insights, site control
 
-    func appendChat(fromAgent: Bool, text: String) {
-        chatTranscript.append(ChatEntry(fromAgent: fromAgent, text: text))
+    func saveConversationOutbox(messageID: UUID?, generation: String? = nil) {
+        pendingConversationMessageID = messageID
+        pendingConversationGeneration = generation
+        writeCache()
+    }
+
+    /// Fence full-cache imports until the agent's canonical mutations have been pulled.
+    func beginConversationRequest() async {
+        let pendingPush = pushTask
+        pushTask?.cancel()
+        await pendingPush?.value
+        if !conversationNeedsReconciliation { await pushStateNow() }
+        pushTask?.cancel()
+        conversationNeedsReconciliation = true
+        writeCache()
+    }
+
+    func appendConversationMessage(fromAgent: Bool, text: String, context: ChatContextRef? = nil, id: UUID = UUID()) {
+        guard !chatTranscript.contains(where: { $0.id == id }) else { return }
+        chatTranscript.append(ChatEntry(id: id, fromAgent: fromAgent, text: text, context: context))
+        writeCache()
+    }
+
+    func appendChat(fromAgent: Bool, text: String, context: ChatContextRef? = nil, id: UUID = UUID()) {
+        guard !chatTranscript.contains(where: { $0.id == id }) else { return }
+        chatTranscript.append(ChatEntry(id: id, fromAgent: fromAgent, text: text, context: context))
         save()
+    }
+
+    /// Transcript as the model sees it: a message sent about a
+    /// card carries a plain "[about: …]" tag so "this" resolves
+    /// without polluting what the user reads in the thread.
+    func chatTranscriptLines() -> [BackendClient.TranscriptLine] {
+        chatTranscript.map { entry in
+            var text = entry.text
+            if let context = entry.context {
+                text += " [about: \(context.title)"
+                if !context.subtitle.isEmpty { text += " — \(context.subtitle)" }
+                text += "]"
+            }
+            return BackendClient.TranscriptLine(fromAgent: entry.fromAgent, text: text)
+        }
     }
 
     var journalEntries: [JournalEntry] { JournalBuilder.entries(from: activityEvents) }
@@ -1343,7 +1455,6 @@ final class AppStore {
     /// Urgent decisions only. Optional site suggestions never inflate this.
     var needsYouCount: Int {
         tasks.filter { $0.status == .awaitingApproval || $0.needsChatHelp }.count
-            + pendingEmailDecisions.count
     }
 
     /// What the flame badge may promise: only what tapping him
@@ -1468,6 +1579,14 @@ final class AppStore {
             return addSiteFromChat(domain: domain)
         case .checkEmail:
             return await checkEmailFromChat()
+        case .readMail(let mailID, let act):
+            guard hyggeEmailAddress != nil else { return await checkEmailFromChat() }
+            guard let mailID else { return inboxReadOut() }
+            guard let mail = filedEmailSummaries.first(where: { $0.id.lowercased() == mailID.lowercased() }) else {
+                return "That email is no longer in your inbox, so I left that request undone."
+            }
+            return actOnResolvedMail(EmailReferenceResolver.Resolution(mail: mail, wantsAction: act),
+                                     askText: act ? "handle this email" : "")
         }
     }
 
@@ -1591,10 +1710,6 @@ final class AppStore {
         if filedEmailSummaries.count > 3 {
             reply += "\n…\(filedEmailSummaries.count) filed in all. The full list is under Hygge email in your profile."
         }
-        let deciding = pendingEmailSenderDomains
-        if !deciding.isEmpty {
-            reply += "\n\(deciding.count == 1 ? "One sender is" : "\(deciding.count) senders are") new to me — I've put \(deciding.count == 1 ? "it" : "them") on your Home screen for your call."
-        }
         return reply
     }
 
@@ -1610,12 +1725,19 @@ final class AppStore {
 
     enum ModelIntentOutcome {
         case handled(String)
-        case needsConfirmation(ChatAction)
+        case needsConfirmation(ChatActionBatch.Progress)
         case unhandled
     }
 
     private func chatIntentContext() -> BackendClient.ChatIntentContext {
-        BackendClient.ChatIntentContext(
+        // The latest message's card, when it has one: "this" in
+        // the message means exactly this object.
+        let focus = chatTranscript.last(where: { !$0.fromAgent })?.context.map { context in
+            BackendClient.ChatIntentContext.FocusLine(
+                kind: context.kind, id: context.id, title: context.title,
+                subtitle: context.subtitle, siteId: context.siteID)
+        }
+        return BackendClient.ChatIntentContext(
             sites: sites.map { site in
                 .init(id: site.id, name: site.name, domain: site.domain,
                       state: (accountStates[site.id] ?? .unknown).label)
@@ -1625,7 +1747,8 @@ final class AppStore {
                       summary: truncatedForChat(mail.summary, limit: 240),
                       highlights: mail.highlights ?? [])
             },
-            paused: isPaused)
+            paused: isPaused,
+            focus: focus)
     }
 
     /// Ask the model what this message wants done, then run only
@@ -1640,47 +1763,48 @@ final class AppStore {
                                                     inbox: filedEmailSummaries) {
             await refreshHyggeEmail()
         }
-        let transcript = chatTranscript.map {
-            BackendClient.TranscriptLine(fromAgent: $0.fromAgent, text: $0.text)
-        }
-        guard let dto = try? await backend.chatIntent(transcript: transcript, profile: profile,
-                                                      context: chatIntentContext()) else {
+        let transcript = chatTranscriptLines()
+        guard let dtos = try? await backend.chatIntentActions(transcript: transcript, profile: profile,
+                                                             context: chatIntentContext()),
+              !dtos.isEmpty else {
             return .unhandled
         }
+        return await continueChatBatch(dtos.map(chatBatchItem))
+    }
+
+    func continueChatBatch(_ items: [ChatBatchItem]) async -> ModelIntentOutcome {
+        let progress = await ChatActionBatch.run(items) { await self.performChatAction($0) }
+        if progress.confirmation != nil { return .needsConfirmation(progress) }
+        return .handled(progress.replies.joined(separator: " "))
+    }
+
+    private func chatBatchItem(_ dto: BackendClient.ChatIntentActionDTO) -> ChatBatchItem {
         switch dto.kind {
-        case "scan":
-            guard let id = dto.siteId, site(id: id) != nil else { return .unhandled }
-            return .handled(await performChatAction(.scanSite(siteID: id)))
-        case "join":
-            guard let id = dto.siteId, site(id: id) != nil else { return .unhandled }
-            return .handled(await performChatAction(.joinSite(siteID: id)))
-        case "stop":
-            guard let id = dto.siteId, site(id: id) != nil else { return .unhandled }
-            return .needsConfirmation(.stopSite(siteID: id))
+        case "scan", "join", "stop":
+            guard let id = dto.siteId, site(id: id) != nil else {
+                return .unavailable("I couldn't find the site for that \(dto.kind) request, so I left it undone.")
+            }
+            if dto.kind == "scan" { return .action(.scanSite(siteID: id)) }
+            if dto.kind == "join" { return .action(.joinSite(siteID: id)) }
+            return .action(.stopSite(siteID: id))
         case "add":
             guard let domain = dto.domain,
-                  TargetSite.userAdded(name: "", urlOrDomain: domain, category: .localGig) != nil else { return .unhandled }
-            return .handled(await performChatAction(.addSite(domain: domain)))
-        case "floor":
-            guard let amount = dto.amount, amount > 0, amount < 1000 else { return .unhandled }
-            return .needsConfirmation(.changeFloor(amount))
-        case "approve": return .needsConfirmation(.approveFirst)
-        case "book": return .needsConfirmation(.bookFirst)
-        case "pause": return .handled(await performChatAction(.pause))
-        case "resume": return .handled(await performChatAction(.resume))
-        case "explainDropped": return .handled(await performChatAction(.explainDropped))
-        case "email":
-            guard hyggeEmailAddress != nil else { return .handled(await checkEmailFromChat()) }
-            if let mailId = dto.mailId {
-                guard let mail = filedEmailSummaries.first(where: { $0.id.lowercased() == mailId.lowercased() })
-                else { return .unhandled }
-                return .handled(actOnResolvedMail(
-                    EmailReferenceResolver.Resolution(mail: mail, wantsAction: dto.act == true),
-                    askText: text))
+                  TargetSite.userAdded(name: "", urlOrDomain: domain, category: .localGig) != nil else {
+                return .unavailable("I couldn't use that site address, so I haven't added it.")
             }
-            return .handled(inboxReadOut())
-        default:
-            return .unhandled
+            return .action(.addSite(domain: domain))
+        case "floor":
+            guard let amount = dto.amount, amount > 0, amount < 1000 else {
+                return .unavailable("I couldn't use that rate, so your lowest rate hasn't changed.")
+            }
+            return .action(.changeFloor(amount))
+        case "approve": return .action(.approveFirst)
+        case "book": return .action(.bookFirst)
+        case "pause": return .action(.pause)
+        case "resume": return .action(.resume)
+        case "explainDropped": return .action(.explainDropped)
+        case "email": return .action(.readMail(mailID: dto.mailId, act: dto.act == true))
+        default: return .unavailable("I couldn't carry out one of those requests, so I left it undone.")
         }
     }
 
@@ -1763,16 +1887,18 @@ final class AppStore {
 
     /// Full reconciliation: credential, proposals, site memory, pending
     /// drafts, and future suggestions all end with the disconnect.
-    func disconnect(siteID: String) async {
-        guard let site = site(id: siteID) else { return }
+    @discardableResult
+    func disconnect(siteID: String) async -> Bool {
+        guard let site = site(id: siteID) else { return false }
         if let credential = credential(forDomain: site.domain) {
-            await backend.deleteCredential(id: credential.id)
-            credentialRefs.removeAll { $0.id == credential.id }
+            guard await deleteCredential(id: credential.id) else { return false }
         }
-        // Disconnect ends everything for the site, trusted sign-in too
-        // (the separate per-item controls remain for partial removal).
-        await backend.deleteSessionProfile(domain: site.domain)
-        sessionProfileRefs.removeAll { $0.domain == site.domain }
+        // Keep confirmed partial cleanup, but do not claim disconnection
+        // until the remembered sign-in has also been removed.
+        guard await deleteSessionProfile(domain: site.domain) else {
+            lastMessage = "We couldn’t finish disconnecting \(site.name). Some saved access may already be removed. Please try again."
+            return false
+        }
         proposals.removeAll { $0.siteID == siteID }
         siteMemory.memories.removeAll { $0.domain == site.domain }
         for index in tasks.indices where tasks[index].siteID == siteID
@@ -1782,6 +1908,7 @@ final class AppStore {
         accountStates[siteID] = .disconnected
         lastMessage = "Disconnected \(site.name). Saved login deleted, drafts cleared, and I won't suggest it again."
         save()
+        return true
     }
 
     /// Plain-language context the conversation model may use (never secrets).
@@ -1811,7 +1938,7 @@ final class AppStore {
                      lastVisitAt: lastVisitAt, sites: sites, siteMemory: siteMemory,
                      credentialRefs: credentialRefs, opportunities: opportunities, tasks: tasks,
                      applications: applications, proposals: proposals, accountStates: accountStates,
-                     chatTranscript: chatTranscript, activityEvents: activityEvents,
+                     chatTranscript: chatTranscript.filter { $0.id != pendingConversationMessageID }, activityEvents: activityEvents,
                      beliefs: beliefs, searchEvidence: searchEvidence,
                      feedbackEvents: feedbackEvents)
     }
@@ -1877,15 +2004,16 @@ final class AppStore {
     /// Foreground/launch pull: reconcile durable tasks and chat requests;
     /// calls currently in flight on this device keep their local ownership.
     @discardableResult
-    func pullFromServer() async -> Bool {
+    func pullFromServer(reconcilingConversation: Bool = false) async -> Bool {
         guard isBackendFirst, !isSyncing else { return false }
         isSyncing = true
         defer { isSyncing = false }
-        if pendingProfileEdit { await pushStateNow() }
+        if pendingProfileEdit && !conversationNeedsReconciliation { await pushStateNow() }
         let revisionBeforePull = profileEditRevision
         guard let export = try? await backend.exportState() else { return false }
         guard revisionBeforePull == profileEditRevision else { return false }
         applyServerExport(export)
+        if reconcilingConversation { conversationNeedsReconciliation = false }
         if let remoteRows = try? await backend.setupTaskRows() {
             for row in remoteRows where !runningTaskIDs.contains(row.task.id) {
                 let task = row.task
@@ -1938,7 +2066,9 @@ final class AppStore {
             let localDemo = opportunities.filter { $0.isDemo && !serverIDs.contains($0.id.uuidString.lowercased()) }
             opportunities = serverOpportunities + localDemo
         }
+        let unsent = chatTranscript.first { $0.id == pendingConversationMessageID }
         chatTranscript = export.messages.map(\.data).sorted { $0.createdAt < $1.createdAt }
+        if let unsent, !chatTranscript.contains(where: { $0.id == unsent.id }) { chatTranscript.append(unsent) }
         applications = export.applications.map(\.data)
         proposals = export.proposals.map(\.data)
         accountStates = export.accountStates
@@ -1964,7 +2094,7 @@ final class AppStore {
     }
 
     private func schedulePush() {
-        guard isBackendFirst else { return }
+        guard isBackendFirst, !conversationNeedsReconciliation, pendingConversationMessageID == nil else { return }
         pushTask?.cancel()
         pushTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -1974,6 +2104,7 @@ final class AppStore {
     }
 
     private func pushStateNow() async {
+        guard isBackendFirst, !conversationNeedsReconciliation, pendingConversationMessageID == nil else { return }
         let revision = profileEditRevision
         do {
             let result = try await backend.importState(currentImport())
@@ -2119,6 +2250,9 @@ final class AppStore {
         snapshot.profilePhotoNeedsUpload = profilePhotoNeedsUpload
         snapshot.profilePhotoIsLegacy = profilePhotoIsLegacy
         snapshot.pendingProfileEdit = pendingProfileEdit
+        snapshot.pendingConversationMessageID = pendingConversationMessageID
+        snapshot.pendingConversationGeneration = pendingConversationGeneration
+        snapshot.conversationNeedsReconciliation = conversationNeedsReconciliation
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)
@@ -2143,6 +2277,9 @@ final class AppStore {
         proposals = snapshot.proposals
         accountStates = snapshot.accountStates
         chatTranscript = snapshot.chatTranscript
+        pendingConversationMessageID = snapshot.pendingConversationMessageID
+        pendingConversationGeneration = snapshot.pendingConversationGeneration
+        conversationNeedsReconciliation = snapshot.conversationNeedsReconciliation
         // First run after the badge learned to count unread: treat
         // history as read rather than badging the whole past.
         if UserDefaults.standard.object(forKey: "hygge.chatLastReadAt") == nil { markChatRead() }

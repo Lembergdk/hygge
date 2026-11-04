@@ -1,15 +1,17 @@
 import SwiftUI
 import UIKit
 
-/// One horizontal interaction for every feed card. UIKit rejects vertical pans
-/// before recognition so dragging a card vertically still scrolls the feed.
+/// One horizontal interaction for every feed card: right swipe
+/// always means "Chat about this" (the card rides into the
+/// conversation as context), left swipe dismisses where allowed.
+/// A card's own action buttons live in its opened detail, never
+/// on the swipe. UIKit rejects vertical pans before recognition
+/// so dragging a card vertically still scrolls the feed.
 struct SwipeFeedCard<Content: View>: View {
     let id: String
-    let primaryTitle: String
-    var primaryIcon = "arrow.right"
     @Binding var openCardID: String?
     let open: () -> Void
-    let primary: () -> Void
+    let chat: () -> Void
     let dismiss: () -> Void
     var allowsDismissal = true
     @ViewBuilder var content: Content
@@ -31,8 +33,8 @@ struct SwipeFeedCard<Content: View>: View {
             .offset(x: offset)
             .rotationEffect(.degrees(rotation))
             .background {
-                FeedSwipeUnderlay(offset: offset, armed: armed, primaryTitle: primaryTitle,
-                                  primaryIcon: primaryIcon, reduceMotion: reduceMotion,
+                FeedSwipeUnderlay(offset: offset, armed: armed,
+                                  reduceMotion: reduceMotion,
                                   disabled: committing, commit: commit)
                     .accessibilityHidden(true)
                     .opacity(offset == 0 ? 0 : 1)
@@ -45,13 +47,13 @@ struct SwipeFeedCard<Content: View>: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { open() }
-            .accessibilityAction(named: Text(primaryTitle)) { primary() }
+            .accessibilityAction(named: Text("Chat about this")) { chat() }
             .accessibilityActions {
                 if allowsDismissal { Button("Dismiss", action: dismiss) }
             }
             .accessibilityHint(allowsDismissal
-                ? "Opens details. Swipe right for \(primaryTitle.lowercased()), left to dismiss."
-                : "Opens details. Swipe right for \(primaryTitle.lowercased()).")
+                ? "Opens details. Swipe right to chat about this, left to dismiss."
+                : "Opens details. Swipe right to chat about this.")
             .onChange(of: openCardID) { _, value in if value != id { close() } }
     }
     private var rotation: Double {
@@ -93,7 +95,7 @@ struct SwipeFeedCard<Content: View>: View {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(reduceMotion ? 120 : 220))
             guard !Task.isCancelled else { return }
-            if direction > 0 { primary() } else { dismiss() }
+            if direction > 0 { chat() } else { dismiss() }
             offset = 0; origin = 0; committing = false; openCardID = nil
         }
     }
@@ -102,31 +104,29 @@ struct SwipeFeedCard<Content: View>: View {
 private struct FeedSwipeUnderlay: View {
     let offset: CGFloat
     let armed: Bool
-    let primaryTitle: String
-    let primaryIcon: String
     let reduceMotion: Bool
     let disabled: Bool
     let commit: (Int) -> Void
-    private var isPrimary: Bool { offset >= 0 }
+    private var isChat: Bool { offset >= 0 }
     private var title: String {
-        if armed { return isPrimary ? "Release to \(primaryTitle.lowercased())" : "Release to dismiss" }
-        return isPrimary ? primaryTitle : "Dismiss"
+        if armed { return isChat ? "Release to chat" : "Release to dismiss" }
+        return isChat ? "Chat about this" : "Dismiss"
     }
     var body: some View {
         GeometryReader { geometry in
-            ZStack(alignment: isPrimary ? .leading : .trailing) {
-                (isPrimary ? HyggeTheme.sageDeep : HyggeTheme.ember)
-                Button { commit(isPrimary ? 1 : -1) } label: {
+            ZStack(alignment: isChat ? .leading : .trailing) {
+                (isChat ? HyggeTheme.sageDeep : HyggeTheme.ember)
+                Button { commit(isChat ? 1 : -1) } label: {
                     VStack(spacing: 6) {
-                        Image(systemName: isPrimary ? primaryIcon : "leaf")
+                        Image(systemName: isChat ? "bubble.left.fill" : "leaf")
                             .font(.system(size: 22, weight: .semibold))
                             .scaleEffect(armed && !reduceMotion ? 1.15 : 1)
                         Text(title).font(.system(.caption, design: .rounded, weight: .semibold))
                             .multilineTextAlignment(.center)
                     }
-                    .foregroundStyle(isPrimary ? HyggeTheme.onSage : HyggeTheme.faceBrown)
+                    .foregroundStyle(isChat ? HyggeTheme.onSage : HyggeTheme.faceBrown)
                     .frame(width: max(CGFloat(FeedSwipe.revealWidth), abs(offset)), height: geometry.size.height)
-                    .frame(width: max(0, abs(offset)), alignment: isPrimary ? .leading : .trailing)
+                    .frame(width: max(0, abs(offset)), alignment: isChat ? .leading : .trailing)
                     .clipped().contentShape(Rectangle())
                 }.buttonStyle(.plain).disabled(disabled || offset == 0)
             }

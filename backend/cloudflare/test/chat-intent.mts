@@ -4,7 +4,7 @@
 // fall back to plain conversation.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chatIntent, validateChatIntent } from "../src/onboarding.ts";
+import { chatSiteCandidates, chatIntent, validateChatIntent, validateChatIntentList } from "../src/onboarding.ts";
 
 const CONTEXT = {
   sites: [
@@ -30,6 +30,29 @@ test("validateChatIntent keeps only known kinds with context-bound ids", () => {
   assert.equal(validateChatIntent({ action: { kind: "email", mailId: "nope" } }, CONTEXT), null);
   assert.equal(validateChatIntent({ action: { kind: "wire_money", amount: 5 } }, CONTEXT), null);
   assert.equal(validateChatIntent({ action: { kind: "floor", amount: 50000 } }, CONTEXT), null);
+
+test("validateChatIntentList validates each tool call, drops the bad ones", () => {
+  // "Both" for two named sites: two validated calls.
+  assert.deepEqual(
+    validateChatIntentList({ actions: [
+      { kind: "add", domain: "contra.com" },
+      { kind: "add", domain: "https://www.toptal.com/" },
+    ] }, CONTEXT),
+    [{ kind: "add", domain: "contra.com" }, { kind: "add", domain: "toptal.com" }]);
+  // Unknown ids and junk fall out; the good call survives.
+  assert.deepEqual(
+    validateChatIntentList({ actions: [
+      { kind: "join", siteId: "invented" },
+      { kind: "scan", siteId: "rover" },
+      { kind: "wire_money", amount: 5 },
+    ] }, CONTEXT),
+    [{ kind: "scan", siteId: "rover" }]);
+  // Caps at five; empty or missing reads as none.
+  assert.equal(
+    validateChatIntentList({ actions: [1, 2, 3, 4, 5, 6, 7].map(() => ({ kind: "pause" })) }, CONTEXT)?.length, 5);
+  assert.equal(validateChatIntentList({ actions: [] }, CONTEXT), null);
+  assert.equal(validateChatIntentList({}, CONTEXT), null);
+});
   assert.equal(validateChatIntent({ action: null }, CONTEXT), null);
   assert.equal(validateChatIntent({}, CONTEXT), null);
   assert.equal(validateChatIntent(null, CONTEXT), null);
@@ -60,4 +83,46 @@ test("chatIntent falls back to conversation when unconfigured or unparseable", a
   const bad = await chatIntent({ client: junk, transcript: [], context: CONTEXT });
   assert.equal(bad.action, null);
   assert.equal(bad.simulated, false);
+});
+
+
+test("valid actions after junk survive before the five-action cap", () => {
+  assert.deepEqual(validateChatIntentList({ actions: [null, {}, 1, false, { kind: "bad" },
+    { kind: "scan", siteId: "rover" }] }, CONTEXT), [{ kind: "scan", siteId: "rover" }]);
+});
+
+test("both is grounded by candidates and returns both actions without singular fallback", async () => {
+  const candidates = [{ name: "Contra", domain: "contra.com", siteId: null },
+    { name: "Toptal", domain: "toptal.com", siteId: null }];
+  const client = { configured: true, cfg: { modelFast: "m-fast" }, complete: async (args: any) => {
+    const payload = JSON.parse(args.user);
+    assert.deepEqual(payload.context.candidates, candidates);
+    assert.match(payload.conversation, /Contra and Toptal/);
+    assert.match(payload.conversation, /both/);
+    return JSON.stringify({ actions: candidates.map((c) => ({ kind: "add", domain: c.domain })) });
+  }};
+  const out = await chatIntent({ client, context: { ...CONTEXT, candidates }, transcript: [
+    { fromAgent: true, text: "Should I add Contra and Toptal?" }, { fromAgent: false, text: "both" }
+  ] });
+  assert.equal(out.action, null);
+  assert.deepEqual(out.actions, [{ kind: "add", domain: "contra.com" }, { kind: "add", domain: "toptal.com" }]);
+});
+
+test("a one-item action list also fills the legacy singular field", async () => {
+  const client = { configured: true, cfg: { modelFast: "m-fast" }, complete: async () =>
+    JSON.stringify({ actions: [{ kind: "scan", siteId: "rover" }] }) };
+  const out = await chatIntent({ client, context: CONTEXT });
+  assert.deepEqual(out.action, { kind: "scan", siteId: "rover" });
+});
+
+test("candidates prefer open proposals, exclude approved sites, retain untracked inventory", () => {
+  assert.deepEqual(chatSiteCandidates([
+    { name: "Rover", domain: "rover.com", siteId: "rover", tracked: true },
+    { name: "Contra inventory", domain: "contra.com", siteId: "contra", tracked: false }
+  ], [{ name: "Contra proposal", domain: "contra.com", siteId: "contra" }], [
+    { name: "Rover", domain: "www.rover.com", siteId: null },
+    { name: "Contra catalog", domain: "contra.com", siteId: null },
+    { name: "Toptal", domain: "toptal.com", siteId: null }
+  ]), [{ name: "Contra proposal", domain: "contra.com", siteId: "contra" },
+    { name: "Toptal", domain: "toptal.com", siteId: null }]);
 });
