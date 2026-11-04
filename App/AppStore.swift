@@ -1456,25 +1456,195 @@ final class AppStore {
         return joinSiteFromChat(site)
     }
 
-    /// Chat "check your email": report only what the inbox actually
-    /// holds, refreshed at ask time.
+    /// Chat "check your email": read the inbox back — newest few,
+    /// in the mail's own (already redacted) words.
     private func checkEmailFromChat() async -> String {
         await refreshHyggeEmail()
         guard hyggeEmailAddress != nil else {
             return "Your Hygge email isn't set up yet. You'll find it in your profile, under Hygge email."
         }
-        guard let latest = filedEmailSummaries.first else {
+        return inboxReadOut()
+    }
+
+    private func inboxReadOut() -> String {
+        guard !filedEmailSummaries.isEmpty else {
             return "Nothing has arrived in your Hygge inbox yet."
         }
-        var reply = "Latest in your inbox: “\(latest.subject)” from \(latest.senderDomain)."
-        if filedEmailSummaries.count > 1 {
-            reply += " There are \(filedEmailSummaries.count) filed in all — they're listed under Hygge email in your profile."
+        let lines = filedEmailSummaries.prefix(3).map { mail in
+            "• “\(mail.subject.isEmpty ? "Mail from \(mail.senderDomain)" : mail.subject)” from \(mail.senderDomain) — \(truncatedForChat(mail.summary, limit: 160))"
+        }
+        var reply = "Here's what's in your inbox:\n" + lines.joined(separator: "\n")
+        if filedEmailSummaries.count > 3 {
+            reply += "\n…\(filedEmailSummaries.count) filed in all. The full list is under Hygge email in your profile."
         }
         let deciding = pendingEmailSenderDomains
         if !deciding.isEmpty {
-            reply += " \(deciding.count == 1 ? "One sender is" : "\(deciding.count) senders are") new to me — I've put \(deciding.count == 1 ? "it" : "them") on your Home screen for your call."
+            reply += "\n\(deciding.count == 1 ? "One sender is" : "\(deciding.count) senders are") new to me — I've put \(deciding.count == 1 ? "it" : "them") on your Home screen for your call."
         }
         return reply
+    }
+
+    private func truncatedForChat(_ text: String, limit: Int) -> String {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.count > limit else { return clean }
+        let cut = clean.prefix(limit)
+        let boundary = cut.lastIndex(of: " ")
+        return "\(boundary.map { cut[..<$0] } ?? Substring(cut))…"
+    }
+
+    // MARK: - Model-led intent, app-validated
+
+    enum ModelIntentOutcome {
+        case handled(String)
+        case needsConfirmation(ChatAction)
+        case unhandled
+    }
+
+    private func chatIntentContext() -> BackendClient.ChatIntentContext {
+        BackendClient.ChatIntentContext(
+            sites: sites.map { site in
+                .init(id: site.id, name: site.name, domain: site.domain,
+                      state: (accountStates[site.id] ?? .unknown).label)
+            },
+            inbox: filedEmailSummaries.prefix(8).map { mail in
+                .init(id: mail.id, senderDomain: mail.senderDomain, subject: mail.subject,
+                      summary: truncatedForChat(mail.summary, limit: 240),
+                      highlights: mail.highlights ?? [])
+            },
+            paused: isPaused)
+    }
+
+    /// Ask the model what this message wants done, then run only
+    /// what validates against real state. Understanding is the
+    /// model's; permission is the app's: invented sites or mail
+    /// never execute, and consequential kinds still wait for the
+    /// confirmation card. Any doubt falls through to the
+    /// deterministic paths and then to plain conversation.
+    func modelIntent(for text: String) async -> ModelIntentOutcome {
+        let recent = chatTranscript.dropLast().suffix(6).map(\.text)
+        if EmailReferenceResolver.mightConcernEmail(text: text, recentTranscript: recent,
+                                                    inbox: filedEmailSummaries) {
+            await refreshHyggeEmail()
+        }
+        let transcript = chatTranscript.map {
+            BackendClient.TranscriptLine(fromAgent: $0.fromAgent, text: $0.text)
+        }
+        guard let dto = try? await backend.chatIntent(transcript: transcript, profile: profile,
+                                                      context: chatIntentContext()) else {
+            return .unhandled
+        }
+        switch dto.kind {
+        case "scan":
+            guard let id = dto.siteId, site(id: id) != nil else { return .unhandled }
+            return .handled(await performChatAction(.scanSite(siteID: id)))
+        case "join":
+            guard let id = dto.siteId, site(id: id) != nil else { return .unhandled }
+            return .handled(await performChatAction(.joinSite(siteID: id)))
+        case "stop":
+            guard let id = dto.siteId, site(id: id) != nil else { return .unhandled }
+            return .needsConfirmation(.stopSite(siteID: id))
+        case "add":
+            guard let domain = dto.domain,
+                  TargetSite.userAdded(name: "", urlOrDomain: domain, category: .localGig) != nil else { return .unhandled }
+            return .handled(await performChatAction(.addSite(domain: domain)))
+        case "floor":
+            guard let amount = dto.amount, amount > 0, amount < 1000 else { return .unhandled }
+            return .needsConfirmation(.changeFloor(amount))
+        case "approve": return .needsConfirmation(.approveFirst)
+        case "book": return .needsConfirmation(.bookFirst)
+        case "pause": return .handled(await performChatAction(.pause))
+        case "resume": return .handled(await performChatAction(.resume))
+        case "explainDropped": return .handled(await performChatAction(.explainDropped))
+        case "email":
+            guard hyggeEmailAddress != nil else { return .handled(await checkEmailFromChat()) }
+            if let mailId = dto.mailId {
+                guard let mail = filedEmailSummaries.first(where: { $0.id.lowercased() == mailId.lowercased() })
+                else { return .unhandled }
+                return .handled(actOnResolvedMail(
+                    EmailReferenceResolver.Resolution(mail: mail, wantsAction: dto.act == true),
+                    askText: text))
+            }
+            return .handled(inboxReadOut())
+        default:
+            return .unhandled
+        }
+    }
+
+    /// A message that might be about mail ("so check it", "what did
+    /// the ApartmentIQ one say?", "do something about it") is
+    /// resolved against the actual inbox and the recent thread, and
+    /// answered from the mail itself — the user is never bounced to
+    /// reciting an exact phrase. Returns nil when mail plainly
+    /// isn't meant, leaving the normal conversation to flow.
+    func handleEmailAsk(text: String) async -> String? {
+        let recent = chatTranscript.dropLast().suffix(6).map(\.text)
+        guard EmailReferenceResolver.mightConcernEmail(text: text, recentTranscript: recent,
+                                                       inbox: filedEmailSummaries) else { return nil }
+        await refreshHyggeEmail()
+        guard hyggeEmailAddress != nil else {
+            return "Your Hygge email isn't set up yet. You'll find it in your profile, under Hygge email."
+        }
+        if let resolution = EmailReferenceResolver.resolve(text: text, recentTranscript: recent,
+                                                           inbox: filedEmailSummaries) {
+            return actOnResolvedMail(resolution, askText: text)
+        }
+        let lower = text.lowercased()
+        if lower.contains("email") || lower.contains("inbox") || lower.contains(" mail") {
+            return inboxReadOut()
+        }
+        return nil
+    }
+
+    /// Read one resolved mail back in its own words, then — when the
+    /// user asked for action — take exactly one, chosen by evidence
+    /// and named in the reply: look on the site it belongs to, join
+    /// a known site, or add the site a jobs mail links to.
+    private func actOnResolvedMail(_ resolution: EmailReferenceResolver.Resolution, askText: String) -> String {
+        let mail = resolution.mail
+        var reply = "“\(mail.subject.isEmpty ? "Mail from \(mail.senderDomain)" : mail.subject)” from \(mail.senderDomain)."
+        let summary = mail.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !summary.isEmpty { reply += " \(truncatedForChat(summary, limit: 300))" }
+        if let labels = mail.highlights, !labels.isEmpty {
+            reply += " \(labels.joined(separator: ". "))."
+        }
+        guard resolution.wantsAction else { return reply }
+
+        if let site = siteMatchingMail(mail) {
+            let state = accountStates[site.id] ?? .unknown
+            reply += " " + (state.isWatching || state == .hasAccount
+                ? scanSiteFromChat(siteID: site.id)
+                : joinSiteFromChat(site))
+            return reply
+        }
+        let mentionsWork = (mail.highlights ?? []).contains { $0.localizedCaseInsensitiveContains("new work") }
+        if mentionsWork, let host = EmailReferenceResolver.linkHosts(in: mail).first {
+            // Adding a brand-new place is a bigger step than reading
+            // or looking: a bare "check it" reads the mail and
+            // offers; "do something about it" goes ahead.
+            let lower = askText.lowercased()
+            let strongAsk = ["do ", "something", "handle", "sort", "go ahead", "add", "start", "watch", "follow up"]
+                .contains(where: { lower.contains($0) })
+            if strongAsk {
+                reply += " " + addSiteFromChat(domain: host)
+            } else {
+                reply += " I'm not watching \(host) yet — say the word and I'll add it and start looking there."
+            }
+            return reply
+        }
+        if mail.decision == "pending" {
+            reply += " This sender is new to me, so I've put it on your Home screen for your call before I act on their mail."
+            return reply
+        }
+        reply += " Nothing else in it needs action from me — it's filed."
+        return reply
+    }
+
+    private func siteMatchingMail(_ mail: FiledEmailSummary) -> TargetSite? {
+        if let siteID = mail.siteID, let site = site(id: siteID) { return site }
+        let hosts = [mail.senderDomain.lowercased()] + EmailReferenceResolver.linkHosts(in: mail)
+        return sites.first { site in
+            hosts.contains { host in host == site.domain || host.hasSuffix("." + site.domain) }
+        }
     }
 
     /// Full reconciliation: credential, proposals, site memory, pending
@@ -1503,7 +1673,14 @@ final class AppStore {
     /// Plain-language context the conversation model may use (never secrets).
     var conversationContextSummary: String {
         let journal = journalEntries.prefix(5).map(\.sentence).joined(separator: " ")
-        return "Needs-you cards waiting: \(needsYouCount). Paused: \(isPaused). Approved sites: \(accountStates.filter { $0.value == .hasAccount || $0.value.isWatching }.keys.joined(separator: ", ")). Recent journal: \(journal)"
+        var summary = "Needs-you cards waiting: \(needsYouCount). Paused: \(isPaused). Approved sites: \(accountStates.filter { $0.value == .hasAccount || $0.value.isWatching }.keys.joined(separator: ", ")). Recent journal: \(journal)"
+        if !filedEmailSummaries.isEmpty {
+            let mail = filedEmailSummaries.prefix(3).map {
+                "from \($0.senderDomain) “\($0.subject)” — \(truncatedForChat($0.summary, limit: 160))"
+            }.joined(separator: "; ")
+            summary += " Filed mail (newest first): \(mail)"
+        }
+        return summary
     }
 
     // MARK: - Server sync (Brief 01)

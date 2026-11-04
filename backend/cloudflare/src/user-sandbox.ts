@@ -9,7 +9,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { json } from "./env.ts";
 import { LLMClient, type LLMConfig } from "./llm.ts";
-import { onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
+import { chatIntent, onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { BrowserRunBrowser } from "./browser.ts";
 import { handleProfilePhoto, profilePhotoAllowedForTask, type ProfilePhoto, type ProfilePhotoStore } from "./profile-photo.ts";
 import { makeDecider, runMission, distillHints, emailCodeAllowedForTask } from "./agent.ts";
@@ -1827,6 +1827,15 @@ export class UserSandbox extends DurableObject<Env> {
         return new Response(readable, {
           headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
         });
+      }
+      // Model-led understanding, app-validated: what does this
+      // message want done? See onboarding.ts chatIntent.
+      if (request.method === "POST" && parts.join("/") === "onboarding/intent") {
+        return json(await chatIntent({
+          client: new LLMClient(this.llmConfig("hygge-onboarding")),
+          ...(body as object),
+          conversationId: this.ctx.id.toString(),
+        }));
       }
       if (request.method === "POST" && parts.join("/") === "onboarding/message") {
         return json(await onboardingMessage({

@@ -19,7 +19,7 @@ const OBJECTIVES: Record<string, string> = {
   // Legacy step name from older app builds; treat as the where question.
   whereWhen: "Ask roughly where they are (town or city). Explain briefly: it keeps local work near them. Only this one question.",
   summary: "Summarize their profile in a warm sentence or two, propose a one-line headline, and end with: I'll look overnight and tell you in the morning - sooner if something needs you.",
-  general: "This is the ongoing Hygge conversation (onboarding is long done). Help with whatever they ask using the profile and context summary. HARD RULE: this reply cannot start, stop, or change any work — no searches, no adding places, no sending, no booking. Never say you did, will, or are doing any of those things, and never confirm a change as done. The app itself carries out plainly-worded instructions before this reply is even written; when someone asks for work in words you cannot verify were acted on, tell them the exact words that work here: 'scan <place>', 'add <place or its web address>', 're-add <place>', 'check your email', 'pause', 'resume'. If they state a preference (only overnights in November, mornings preferred), extract it into the profile patch fields where possible and say what you understood, without claiming anything was applied. Answer status questions from the context summary; never invent activity that is not in it.",
+  general: "This is the ongoing Hygge conversation (onboarding is long done). Help with whatever they ask using the profile and context summary. HARD RULE: this reply cannot start, stop, or change any work — no searches, no adding places, no sending, no booking. Never say you did, will, or are doing any of those things, and never confirm a change as done. The app itself carries out instructions (including reading filed mail the conversation refers to) before this reply is even written, so if you are writing, either the ask was conversational or it could not be resolved surely. NEVER ask them to repeat an instruction in different or exact words, and never recite command phrases. When they refer to something earlier — an email, a place, a job — answer about that thing from the conversation and the context summary (filed mail subjects and summaries are in it). If a work ask is genuinely ambiguous, ask ONE short question naming the concrete options. If they state a preference (only overnights in November, mornings preferred), extract it into the profile patch fields where possible and say what you understood, without claiming anything was applied. Answer status questions from the context summary; never invent activity that is not in it.",
   done: "Wrap up warmly in one line.",
 };
 
@@ -259,5 +259,107 @@ async function onboardingMessageStreamInner({ client, step = "welcome", transcri
   } catch (e: any) {
     const result = { ...fallback(), error: e.message };
     return streamOut(result);
+  }
+}
+
+// ---- chat intent: the model decides, the app validates --------------------
+//
+// Chat understanding is the model's job, not a grammar's. Before a
+// conversational reply is written, this step asks the model whether
+// the latest message wants something DONE. It may only name sites
+// and mail that the app put in the context; validateChatIntent
+// drops anything else, and consequential kinds still go through
+// the app's confirmation card. No action (or no model) simply
+// means: ordinary conversation, or the app's deterministic
+// fallbacks — understanding is model-led, permission is not.
+
+export type ChatIntentAction =
+  | { kind: "scan" | "join" | "stop"; siteId: string }
+  | { kind: "add"; domain: string }
+  | { kind: "email"; mailId?: string | null; act?: boolean }
+  | { kind: "floor"; amount: number }
+  | { kind: "pause" | "resume" | "approve" | "book" | "explainDropped" };
+
+const DOMAIN_SHAPE = /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/;
+
+export function validateChatIntent(parsed: any, context: any): ChatIntentAction | null {
+  const action = parsed?.action;
+  if (!action || typeof action !== "object") return null;
+  const sites: any[] = Array.isArray(context?.sites) ? context.sites : [];
+  const inbox: any[] = Array.isArray(context?.inbox) ? context.inbox : [];
+  const siteByRef = (ref: unknown) => {
+    const needle = String(ref ?? "").toLowerCase();
+    return sites.find((s) =>
+      String(s.id).toLowerCase() === needle
+      || String(s.domain ?? "").toLowerCase() === needle
+      || String(s.name ?? "").toLowerCase() === needle) ?? null;
+  };
+  switch (String(action.kind ?? "")) {
+    case "scan":
+    case "join":
+    case "stop": {
+      const site = siteByRef(action.siteId ?? action.site ?? action.domain);
+      return site ? { kind: action.kind, siteId: String(site.id) } : null;
+    }
+    case "add": {
+      const raw = String(action.domain ?? "").trim().toLowerCase()
+        .replace(/^https?:\/\//, "").replace(/^www\./, "");
+      const domain = raw.split("/")[0];
+      return DOMAIN_SHAPE.test(domain) ? { kind: "add", domain } : null;
+    }
+    case "email": {
+      const mailId = action.mailId == null ? null : String(action.mailId);
+      if (mailId !== null && !inbox.some((m) => String(m.id).toLowerCase() === mailId.toLowerCase())) return null;
+      return { kind: "email", mailId, act: action.act === true };
+    }
+    case "floor": {
+      const amount = Number(action.amount);
+      return Number.isFinite(amount) && amount > 0 && amount < 1000 ? { kind: "floor", amount } : null;
+    }
+    case "pause":
+    case "resume":
+    case "approve":
+    case "book":
+    case "explainDropped":
+      return { kind: action.kind };
+    default:
+      return null;
+  }
+}
+
+const INTENT_SYSTEM = [
+  "You decide whether the user's latest Hygge chat message wants something DONE.",
+  "Reason about referents from the conversation (\"it\", \"that forward\", \"the Rover one\")",
+  "and about intent in your own judgment — phrasing is free, there are no magic words.",
+  "Reply ONLY with JSON: {\"action\": {...} } or {\"action\": null}.",
+  "Actions: {\"kind\":\"scan\"|\"join\"|\"stop\",\"siteId\":<id from sites>} (look for work on it /",
+  "add or re-add it / stop watching it), {\"kind\":\"add\",\"domain\":<site address they named>},",
+  "{\"kind\":\"email\",\"mailId\":<id from inbox or null for the inbox in general>,\"act\":<true when they",
+  "want something DONE about it, false when asking what it says>}, {\"kind\":\"floor\",\"amount\":<number>},",
+  "{\"kind\":\"pause\"|\"resume\"|\"approve\"|\"book\"|\"explainDropped\"} (approve/book = the waiting draft",
+  "or booking; explainDropped = asking what was skipped in search).",
+  "Use ONLY ids present in the context. Return null for: conversation, questions the context",
+  "cannot act on, stated preferences, anything negated (\"don't scan Rover\"), and anything you are",
+  "genuinely unsure is an instruction. One action at most — the main one.",
+].join(" ");
+
+export async function chatIntent(args: any): Promise<{ action: ChatIntentAction | null; simulated: boolean }> {
+  const { client, transcript = [], context = {}, profile = {} } = args ?? {};
+  if (!client?.configured) return { action: null, simulated: true };
+  try {
+    const text = await client.complete({
+      model: client.cfg.modelFast, system: INTENT_SYSTEM, conversationId: args.conversationId,
+      user: JSON.stringify({
+        context,
+        profile: {
+          interests: profile.interests ?? [], skills: profile.skills ?? [],
+          locationLabel: profile.locationLabel ?? "", hourlyRateFloor: profile.hourlyRateFloor ?? null,
+        },
+        conversation: capTranscriptText(transcript),
+      }),
+    });
+    return { action: validateChatIntent(parseDecision(text), context), simulated: false };
+  } catch {
+    return { action: null, simulated: false };
   }
 }

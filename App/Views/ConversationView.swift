@@ -219,9 +219,35 @@ struct ConversationView: View {
             return
         }
         store.appendChat(fromAgent: false, text: text)
-        // Explicit commands are structured actions, validated by the app.
-        // Safe ones run at once; consequential ones wait for confirmation.
-        if let action = ChatActionParser.parse(text, sites: store.sites) {
+        // Understanding is model-led: one short intent call decides
+        // whether this message wants something done (referents and
+        // all), and the store validates whatever it proposes before
+        // anything runs. The strict grammar and the deterministic
+        // email resolver remain as offline fallbacks underneath.
+        isThinking = true
+        switch await store.modelIntent(for: text) {
+        case .handled(let replyText):
+            isThinking = false
+            store.appendChat(fromAgent: true, text: replyText)
+            return
+        case .needsConfirmation(let action):
+            isThinking = false
+            pendingAction = action
+            return
+        case .unhandled:
+            isThinking = false
+        }
+        let parsedAction = ChatActionParser.parse(text, sites: store.sites)
+        if parsedAction == nil || parsedAction == .checkEmail {
+            isThinking = true
+            let emailReply = await store.handleEmailAsk(text: text)
+            isThinking = false
+            if let emailReply {
+                store.appendChat(fromAgent: true, text: emailReply)
+                return
+            }
+        }
+        if let action = parsedAction {
             if action.requiresConfirmation {
                 pendingAction = action
                 return
