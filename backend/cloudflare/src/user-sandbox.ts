@@ -351,11 +351,29 @@ export class UserSandbox extends DurableObject<Env> {
   /// decisions as assistant turns; they are internal decisions, not
   /// user-visible messages, and the reply prompt treats them so.
   private responseChain(key: string) {
+    const summaryKey = `${key}:summary`;
     return {
       get: async (): Promise<string | undefined> =>
         (await this.ctx.storage.get<string>(key)) ?? undefined,
       set: async (id: string): Promise<void> => {
         await this.ctx.storage.put(key, id);
+      },
+      clear: async (): Promise<void> => {
+        await this.ctx.storage.delete(key);
+      },
+      getSummary: async (): Promise<{ text: string; turns: number } | null> => {
+        const raw = await this.ctx.storage.get<string>(summaryKey);
+        if (!raw) return null;
+        try {
+          const parsed = JSON.parse(raw);
+          return (parsed && typeof parsed.text === "string" && typeof parsed.turns === "number") ? parsed : null;
+        } catch { return null; }
+      },
+      setSummary: async (s: { text: string; turns: number }): Promise<void> => {
+        await this.ctx.storage.put(summaryKey, JSON.stringify(s));
+      },
+      clearSummary: async (): Promise<void> => {
+        await this.ctx.storage.delete(summaryKey);
       },
     };
   }

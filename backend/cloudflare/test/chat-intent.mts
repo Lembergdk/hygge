@@ -148,3 +148,123 @@ test("chatIntent bootstraps a missing chain with the legacy blob, then saves the
   assert.ok(JSON.parse(seen[0].user).conversation.includes("scan Rover"));
   assert.equal(stored, "resp-1");
 });
+
+// Full chain object (summary storage included), as the Durable
+// Object route builds it. The fake model answers summarizations
+// with a fixed summary and chat calls with an add action.
+function fullChain(initialId?: string) {
+  let id = initialId;
+  let summary: { text: string; turns: number } | null = null;
+  return {
+    get: async () => id,
+    set: async (v: string) => { id = v; },
+    clear: async () => { id = undefined; },
+    getSummary: async () => summary,
+    setSummary: async (s: { text: string; turns: number }) => { summary = s; },
+    clearSummary: async () => { summary = null; },
+    state: () => ({ id, summary }),
+  };
+}
+
+function summarizingClient(seen: any[], summaries: string[]) {
+  return {
+    configured: true,
+    cfg: { modelFast: "m-fast" },
+    complete: async (args: any) => {
+      seen.push(args);
+      if (String(args.system).includes("Summarize a chat thread")) {
+        summaries.push(args.user);
+        return "Summary: user discussed Rover; assistant offered Contra and Toptal, awaiting reply.";
+      }
+      if (args.onResponseId) await args.onResponseId("resp-new");
+      return JSON.stringify({ actions: [{ kind: "add", domain: "contra.com" }] });
+    },
+  };
+}
+
+test("chatIntent proactively compacts a long thread: summary stored, chain reset, latest message only", async () => {
+  const filler = Array.from({ length: 30 }, (_, i) => ({
+    fromAgent: i % 2 === 0, text: `filler turn ${i} `.padEnd(300, "x"),
+  }));
+  const transcript = [...filler, { fromAgent: false, text: "Both" }];
+  const seen: any[] = [];
+  const summaries: string[] = [];
+  const chain = fullChain("resp-prev");
+  const out = await chatIntent({
+    client: summarizingClient(seen, summaries),
+    transcript,
+    context: CONTEXT,
+    chain,
+  });
+  assert.deepEqual(out.actions, [{ kind: "add", domain: "contra.com" }]);
+  // One summarization, then the chat call on a fresh chain.
+  assert.equal(summaries.length, 1);
+  const chatCall = seen.find((a) => !String(a.system).includes("Summarize a chat thread"));
+  assert.equal(chatCall.previousResponseId, undefined);
+  assert.equal(chatCall.user, "Both");
+  // Summary travels in instructions alongside per-turn context.
+  assert.ok(String(chatCall.system).includes("awaiting reply"));
+  assert.ok(String(chatCall.system).includes("rover.com"));
+  // Chain advanced to the fresh response; summary covers the filler.
+  assert.equal(chain.state().id, "resp-new");
+  assert.equal(chain.state().summary?.turns, 30);
+  assert.ok((chain.state().summary?.text ?? "").includes("awaiting reply"));
+});
+
+test("chatIntent on a chained 400 compacts and retries WITH the summary", async () => {
+  const transcript = [
+    { fromAgent: true, text: "Which other sites did you have in mind — Contra or Toptal for example?" },
+    { fromAgent: false, text: "Both" },
+  ];
+  const seen: any[] = [];
+  const chain = fullChain("resp-prev");
+  const client = {
+    configured: true,
+    cfg: { modelFast: "m-fast" },
+    complete: async (args: any) => {
+      seen.push(args);
+      if (String(args.system).includes("Summarize a chat thread")) {
+        return "Summary: assistant offered Contra and Toptal, awaiting reply.";
+      }
+      if (args.previousResponseId === "resp-prev") {
+        const err = new Error("LLM m-fast returned 400") as any;
+        err.status = 400;
+        throw err;
+      }
+      if (args.onResponseId) await args.onResponseId("resp-retry");
+      return JSON.stringify({ actions: [{ kind: "add", domain: "contra.com" }] });
+    },
+  };
+  const out = await chatIntent({ client, transcript, context: CONTEXT, chain });
+  assert.deepEqual(out.actions, [{ kind: "add", domain: "contra.com" }]);
+  // Chained call, summarization, retry on a fresh chain with summary.
+  assert.equal(seen.filter((a) => !String(a.system).includes("Summarize a chat thread")).length, 2);
+  const retry = seen[seen.length - 1];
+  assert.equal(retry.previousResponseId, undefined);
+  assert.ok(String(retry.system).includes("awaiting reply"));
+  assert.equal(chain.state().id, "resp-retry");
+  assert.ok((chain.state().summary?.text ?? "").includes("awaiting reply"));
+});
+
+test("chatIntent never restarts fresh without a summary: an uncompactable 400 propagates, chain untouched", async () => {
+  const transcript = [{ fromAgent: false, text: "scan Rover" }];
+  let calls = 0;
+  const chain = fullChain("resp-prev");
+  const client = {
+    configured: true,
+    cfg: { modelFast: "m-fast" },
+    complete: async () => {
+      calls++;
+      const err = new Error("LLM m-fast returned 400") as any;
+      err.status = 400;
+      throw err;
+    },
+  };
+  const out = await chatIntent({ client, transcript, context: CONTEXT, chain });
+  // Falls back to conversation; no retry, no chain reset, no summary.
+  assert.equal(out.action, null);
+  assert.equal(out.actions, null);
+  assert.equal(calls, 1);
+  assert.equal(chain.state().id, "resp-prev");
+  assert.equal(chain.state().summary, null);
+});

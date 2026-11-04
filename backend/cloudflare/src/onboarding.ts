@@ -109,6 +109,169 @@ function latestUserText(transcript: any[] = []): string {
   return "";
 }
 
+/// ---- chat compaction: summarize, never silently restart ------------
+///
+/// A Responses chain grows with every turn and the API never trims
+/// it, so a never-ending chat thread would eventually 400.
+/// Restarting fresh on overflow would silently drop the thread's
+/// history — the context loss chaining exists to prevent. Instead,
+/// the thread is compacted: older turns are summarized into a short
+/// durable summary (stored beside the chain id, re-sent in
+/// instructions on every later turn like profile state), and the
+/// chain restarts from there. The chain then carries only recent
+/// turns; the summary carries everything older. Compaction runs
+/// proactively once the thread passes the old transcript budget,
+/// and reactively when a chained call still 400s. If compaction
+/// yields no summary, the error propagates to the caller's fallback
+/// — history is compressed or the turn fails honestly, never
+/// silently dropped.
+
+const COMPACT_TRANSCRIPT_CHARS = 8000;
+const COMPACT_MIN_NEW_CHARS = 2000;
+const SUMMARY_MAX_CHARS = 2000;
+
+const SUMMARIZE_SYSTEM = [
+  "Summarize a chat thread for continuity, so a later turn can pick",
+  "up exactly where it left off. Keep: decisions made, sites added /",
+  "tracked / stopped, standing directives (e.g. 'don't try X again'),",
+  "preferences (rate, place, kinds of work), facts the user volunteered",
+  "(name, place, skills), open tasks, and any question or offer still",
+  "awaiting the user's reply — pending offers matter most, because the",
+  "next message may answer them ('both', 'yes'). If a previous summary",
+  "is given, merge it: keep its facts unless the new turns contradict",
+  "them. Compact structured lines, no prose flourishes, under 1500",
+  "characters. Never invent facts, sites, or amounts.",
+].join(" ");
+
+function transcriptLines(transcript: any[] = []): string[] {
+  return transcript.map((m: any) => `${m?.fromAgent ? "Agent" : "User"}: ${String(m?.text ?? "")}`);
+}
+
+function lastUserIndex(transcript: any[] = []): number {
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    if (transcript[i]?.fromAgent === false) return i;
+  }
+  return -1;
+}
+
+async function readStoredSummary(chain: any): Promise<{ text: string; turns: number } | null> {
+  try {
+    const raw = await chain.getSummary();
+    return (raw && typeof raw.text === "string" && typeof raw.turns === "number") ? raw : null;
+  } catch { return null; }
+}
+
+/// Summarize turns [from, to) (plus a previous summary, if any) in
+/// one single-shot call. Single-shot by design: no previousResponseId
+/// and no onResponseId, so summarizing never touches the chat chain
+/// it compacts. Throws on an empty summary so callers never store
+/// — or reset the chain for — a vacuous compaction.
+async function summarizeTurns(client: any, model: string, transcript: any[], prevSummary: string | null, from: number, to: number): Promise<{ text: string; turns: number }> {
+  const turnsText = transcriptLines(transcript.slice(from, to)).join("\n");
+  const user = [
+    prevSummary ? `Previous summary:\n${prevSummary}` : null,
+    `Conversation turns to summarize:\n${turnsText}`,
+  ].filter(Boolean).join("\n\n");
+  const text = await client.complete({ model, system: SUMMARIZE_SYSTEM, user });
+  const clean = String(text ?? "").trim();
+  if (!clean) throw new Error("empty summary");
+  return { text: clean.slice(0, SUMMARY_MAX_CHARS), turns: to };
+}
+
+/// Compact the thread backing a chain scope. Returns the summary to
+/// carry in instructions and whether the chain was reset. Proactive
+/// (force=false): only when the thread passes the old transcript
+/// budget with enough new turns since the last summary to be worth
+/// summarizing. Reactive (force=true, after a chained 400): whenever
+/// there is anything new to summarize, or an existing summary to
+/// keep while the chain resets. A thread shorter than the stored
+/// turn count means the thread was replaced under us: both summary
+/// and chain id are dropped so the next turn bootstraps instead of
+/// chaining onto an unrelated thread. State changes only on
+/// success — a failed summarization leaves chain and summary
+/// untouched, and the caller falls back.
+async function compactChatThread(o: { client: any; model: string; chain: any; transcript: any[]; force: boolean }): Promise<{ summary: string | null; reset: boolean }> {
+  const stored = await readStoredSummary(o.chain);
+  if (stored && o.transcript.length < stored.turns) {
+    try { await o.chain.clearSummary(); await o.chain.clear(); } catch { /* proceed fresh regardless */ }
+    return { summary: null, reset: true };
+  }
+  const lastUser = lastUserIndex(o.transcript);
+  if (lastUser < 0) return { summary: stored?.text ?? null, reset: false };
+  const from = stored?.turns ?? 0;
+  const newTurns = o.transcript.slice(from, lastUser);
+  const newText = transcriptLines(newTurns).join("\n");
+  const totalText = transcriptLines(o.transcript).join("\n");
+  const should = o.force
+    ? (newTurns.length > 0 || stored !== null)
+    : (totalText.length > COMPACT_TRANSCRIPT_CHARS && newText.length > COMPACT_MIN_NEW_CHARS);
+  if (!should) return { summary: stored?.text ?? null, reset: false };
+  if (newTurns.length === 0) {
+    // History already summarized; only the chain grew. Reset it.
+    if (stored) await o.chain.clear();
+    return { summary: stored?.text ?? null, reset: stored !== null };
+  }
+  const next = await summarizeTurns(o.client, o.model, o.transcript, stored?.text ?? null, from, lastUser);
+  await o.chain.setSummary(next);
+  await o.chain.clear();
+  return { summary: next.text, reset: true };
+}
+
+/// One chained chat turn (o: { client, chain, transcript, model,
+/// system, contextNote, legacyUser, conversationId?, onDelta? }).
+/// `system` is the base prompt; `contextNote` is the per-turn context
+/// suffix (sites/inbox/focus, or objective/step/profile) appended to
+/// instructions whenever history comes from the chain or a summary;
+/// `legacyUser` is the transcript-blob input used only to bootstrap
+/// a chain that does not exist yet (or with no chain at all, as in
+/// tests and the preview endpoint). Modes: chained (live chain id,
+/// input = latest message), compacted (fresh chain after compaction,
+/// input = latest message, summary in instructions), bootstrap /
+/// legacy (blob input, no chain). On a chained 400, compacts and
+/// retries once WITH the summary; without one, the error
+/// propagates. Chains without summary methods (minimal fakes) skip
+/// compaction entirely and behave as before.
+async function callChainedModel(o: any): Promise<string> {
+  const hasChain = Boolean(o.chain);
+  const hasSummary = hasChain
+    && typeof o.chain.getSummary === "function"
+    && typeof o.chain.setSummary === "function"
+    && typeof o.chain.clear === "function"
+    && typeof o.chain.clearSummary === "function";
+  let prev: string | undefined = hasChain ? await o.chain.get() : undefined;
+  let summary: string | null = null;
+  if (hasSummary) {
+    const state = await compactChatThread({ client: o.client, model: o.model, chain: o.chain, transcript: o.transcript, force: false });
+    summary = state.summary;
+    if (state.reset) prev = undefined;
+  }
+  const mode = !hasChain ? "legacy" : (prev ? "chained" : (summary ? "compacted" : "bootstrap"));
+  const system = (mode === "chained" || mode === "compacted")
+    ? o.system + o.contextNote + (summary ? `\n\nEarlier conversation, summarized:\n${summary}` : "")
+    : o.system;
+  const latest = latestUserText(o.transcript);
+  const user = (mode === "chained" || mode === "compacted") ? (latest || o.legacyUser) : o.legacyUser;
+  const saveId = hasChain ? (id: string) => o.chain.set(id) : undefined;
+  const doCall = (sys: string, usr: string, prevId: string | undefined) => {
+    const args: any = { model: o.model, system: sys, conversationId: o.conversationId, user: usr,
+      ...(prevId ? { previousResponseId: prevId } : {}),
+      ...(saveId ? { onResponseId: saveId } : {}) };
+    return o.onDelta ? o.client.completeStream(args, o.onDelta) : o.client.complete(args);
+  };
+  try {
+    return await doCall(system, user, mode === "chained" ? prev : undefined);
+  } catch (e: any) {
+    if (mode === "chained" && e?.status === 400 && hasSummary) {
+      const state = await compactChatThread({ client: o.client, model: o.model, chain: o.chain, transcript: o.transcript, force: true });
+      if (state.summary) {
+        const retrySystem = o.system + o.contextNote + `\n\nEarlier conversation, summarized:\n${state.summary}`;
+        return await doCall(retrySystem, user, undefined);
+      }
+    }
+    throw e;
+  }
+}
+
 function traceIdentity(args: any) {
   const suppliedConversation = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
   const cfg = args.client?.cfg ?? {};
@@ -146,23 +309,15 @@ async function onboardingMessageInner({ client, step = "welcome", transcript = [
              ...heuristicSuggestions(transcriptText), simulated: true };
   }
   try {
-    // Same chaining rule as chatIntent: a live chain sends only the
-    // latest user message (history lives server-side); without one,
-    // the legacy blob bootstraps it. Step/objective/profile travel
-    // in instructions either way, since instructions do not persist.
-    const prev = chain ? await chain.get() : undefined;
-    const latest = latestUserText(transcript);
-    const chained = Boolean(chain && prev);
+    // Chaining + compaction live in callChainedModel (same rule as
+    // chatIntent). Step/objective/profile travel in instructions,
+    // since instructions do not persist across turns.
     const legacyUser = JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary, conversation: transcriptText });
-    const text = await client.complete({
-      model: client.cfg.modelFast,
-      system: chained
-        ? `${SYSTEM}\n\nContext for this turn (JSON): ${JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary })} — earlier turns of this conversation are available as history; the input is the latest user message. Prior assistant turns shaped like {"actions":[...]} are internal action decisions, not messages you sent the user — never quote, repeat, or continue them as prose.`
-        : SYSTEM,
-      conversationId,
-      user: chained ? (latest || legacyUser) : legacyUser,
-      ...(chained ? { previousResponseId: prev } : {}),
-      ...(chain ? { onResponseId: (id: string) => chain.set(id) } : {}),
+    const text = await callChainedModel({
+      client, chain, transcript,
+      model: client.cfg.modelFast, system: SYSTEM,
+      contextNote: `\n\nContext for this turn (JSON): ${JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary })} — earlier turns of this conversation are available as history; the input is the latest user message. Prior assistant turns shaped like {"actions":[...]} are internal action decisions, not messages you sent the user — never quote, repeat, or continue them as prose.`,
+      legacyUser, conversationId,
     });
     const parsed = parseDecision(text) as any;
     if (!parsed?.reply) throw new Error("unparseable onboarding reply");
@@ -271,22 +426,16 @@ async function onboardingMessageStreamInner({ client, step = "welcome", transcri
   if (!client.configured) return streamOut(fallback());
   try {
     const extractor = new ReplyStreamExtractor();
-    const prev = chain ? await chain.get() : undefined;
-    const latest = latestUserText(transcript);
-    const chained = Boolean(chain && prev);
     const legacyUser = JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary, conversation: transcriptText });
-    const full = await client.completeStream({
-      model: client.cfg.modelFast,
-      system: chained
-        ? `${SYSTEM}\n\nContext for this turn (JSON): ${JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary })} — earlier turns of this conversation are available as history; the input is the latest user message. Prior assistant turns shaped like {"actions":[...]} are internal action decisions, not messages you sent the user — never quote, repeat, or continue them as prose.`
-        : SYSTEM,
-      conversationId,
-      user: chained ? (latest || legacyUser) : legacyUser,
-      ...(chained ? { previousResponseId: prev } : {}),
-      ...(chain ? { onResponseId: (id: string) => chain.set(id) } : {}),
-    }, (delta: string) => {
-      const out = extractor.push(delta);
-      if (out) emit({ type: "reply-delta", text: out });
+    const full = await callChainedModel({
+      client, chain, transcript,
+      model: client.cfg.modelFast, system: SYSTEM,
+      contextNote: `\n\nContext for this turn (JSON): ${JSON.stringify({ currentObjective: objective, step, profileSoFar: profile, contextSummary })} — earlier turns of this conversation are available as history; the input is the latest user message. Prior assistant turns shaped like {"actions":[...]} are internal action decisions, not messages you sent the user — never quote, repeat, or continue them as prose.`,
+      legacyUser, conversationId,
+      onDelta: (delta: string) => {
+        const out = extractor.push(delta);
+        if (out) emit({ type: "reply-delta", text: out });
+      },
     });
     const parsed = parseDecision(full) as any;
     if (!parsed?.reply) throw new Error("unparseable onboarding reply");
@@ -406,16 +555,11 @@ export async function chatIntent(args: any): Promise<{ action: ChatIntentAction 
   const { client, transcript = [], context = {}, profile = {}, chain } = args ?? {};
   if (!client?.configured) return { action: null, actions: null, simulated: true };
   try {
-    // Chained calls send only the latest user message: the server
-    // holds the thread under previous_response_id, so the capped
-    // transcript blob is needed only to bootstrap a chain that does
-    // not exist yet (a thread that predates chaining, or a lost
-    // chain id). The per-turn context (sites, inbox, focus,
-    // candidates) still travels every turn, in instructions,
-    // because instructions do not persist across turns.
-    const prev = chain ? await chain.get() : undefined;
-    const latest = latestUserText(transcript);
-    const chained = Boolean(chain && prev);
+    // Chaining + compaction live in callChainedModel: a live chain
+    // sends only the latest message, per-turn context (sites, inbox,
+    // focus, candidates) travels in instructions — instructions do
+    // not persist across turns — and the transcript blob is needed
+    // only to bootstrap a chain that does not exist yet.
     const profileSubset = {
       interests: profile.interests ?? [], skills: profile.skills ?? [],
       locationLabel: profile.locationLabel ?? "", hourlyRateFloor: profile.hourlyRateFloor ?? null,
@@ -425,15 +569,11 @@ export async function chatIntent(args: any): Promise<{ action: ChatIntentAction 
       profile: profileSubset,
       conversation: capTranscriptText(transcript),
     });
-    const text = await client.complete({
-      model: client.cfg.modelFast,
-      system: chained
-        ? `${INTENT_SYSTEM}\n\nContext for this turn (JSON): ${JSON.stringify({ context, profile: profileSubset })}`
-        : INTENT_SYSTEM,
-      conversationId: args.conversationId,
-      user: chained ? (latest || legacyUser) : legacyUser,
-      ...(chained ? { previousResponseId: prev } : {}),
-      ...(chain ? { onResponseId: (id: string) => chain.set(id) } : {}),
+    const text = await callChainedModel({
+      client, chain, transcript,
+      model: client.cfg.modelFast, system: INTENT_SYSTEM,
+      contextNote: `\n\nContext for this turn (JSON): ${JSON.stringify({ context, profile: profileSubset })}`,
+      legacyUser, conversationId: args.conversationId,
     });
     const parsed = parseDecision(text);
     return {

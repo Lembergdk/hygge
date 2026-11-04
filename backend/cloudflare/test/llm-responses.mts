@@ -52,27 +52,22 @@ test("complete posts instructions + input to /responses and reports the response
   }
 });
 
-test("complete chains with previous_response_id and restarts fresh on a chained 400", async () => {
+test("complete surfaces a chained 400 with status and does not retry", async () => {
+  // No silent fresh restart: the caller compacts and retries with a
+  // summary, or lets the error propagate — the client never drops
+  // the chain on its own.
   const originalFetch = globalThis.fetch;
-  const bodies: any[] = [];
-  let reported: string | undefined;
-  globalThis.fetch = (async (_url: any, init: any) => {
-    const body = JSON.parse(String(init.body));
-    bodies.push(body);
-    if (body.previous_response_id) return jsonResponse({ error: "chain too long" }, 400);
-    return jsonResponse(responsesBody("fresh", "resp-fresh"));
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return jsonResponse({ error: "chain too long" }, 400);
   }) as any;
   try {
-    const text = await client().complete({
-      model: "m-fast", system: "s", user: "u",
-      previousResponseId: "resp-stale",
-      onResponseId: async (id) => { reported = id; },
-    });
-    assert.equal(text, "fresh");
-    assert.equal(bodies.length, 2);
-    assert.equal(bodies[0].previous_response_id, "resp-stale");
-    assert.ok(!("previous_response_id" in bodies[1]));
-    assert.equal(reported, "resp-fresh");
+    await assert.rejects(
+      client().complete({ model: "m-fast", system: "s", user: "u", previousResponseId: "resp-stale" }),
+      (e: any) => e.status === 400 && /returned 400/.test(e.message),
+    );
+    assert.equal(calls, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -131,27 +126,19 @@ test("completeStream parses output_text deltas across chunk boundaries and repor
   }
 });
 
-test("completeStream chains and restarts fresh on a chained 400 before the body", async () => {
+test("completeStream surfaces a chained 400 with status and does not retry", async () => {
   const originalFetch = globalThis.fetch;
-  const bodies: any[] = [];
-  globalThis.fetch = (async (_url: any, init: any) => {
-    const body = JSON.parse(String(init.body));
-    bodies.push(body);
-    if (body.previous_response_id) return jsonResponse({ error: "chain too long" }, 400);
-    return sseResponse([
-      "data: {\"type\":\"response.output_text.delta\",\"delta\":\"fresh\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fresh\",\"model\":\"m-fast\",\"status\":\"completed\"}}\n\n",
-    ]);
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return jsonResponse({ error: "chain too long" }, 400);
   }) as any;
   try {
-    const full = await client().completeStream(
-      { model: "m-fast", system: "s", user: "u", previousResponseId: "resp-stale" },
-      () => {},
+    await assert.rejects(
+      client().completeStream({ model: "m-fast", system: "s", user: "u", previousResponseId: "resp-stale" }, () => {}),
+      (e: any) => e.status === 400,
     );
-    assert.equal(full, "fresh");
-    assert.equal(bodies.length, 2);
-    assert.equal(bodies[0].previous_response_id, "resp-stale");
-    assert.ok(!("previous_response_id" in bodies[1]));
-    assert.equal(bodies[0].stream, true);
+    assert.equal(calls, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }

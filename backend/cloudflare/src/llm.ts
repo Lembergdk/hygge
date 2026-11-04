@@ -154,6 +154,17 @@ export function traceUsageAttributes(usage: ChatUsage | undefined) {
   return attrs;
 }
 
+/// HTTP failure from the model endpoint, carrying the status so
+/// callers can react to a specific one — a 400 on a chained call
+/// means the chain outgrew the model's window, and the caller
+/// compacts and retries rather than the client silently restarting
+/// the chain fresh (which would drop the thread's history).
+function llmHttpError(model: string, status: number): Error & { status: number } {
+  const err = new Error(`LLM ${model} returned ${status}`) as Error & { status: number };
+  err.status = status;
+  return err;
+}
+
 /// Text of a Responses API response: the message items' output_text
 /// parts, in order. Reasoning and other items carry no user-visible
 /// text and are skipped. A top-level `output_text` aggregate is the
@@ -238,9 +249,11 @@ export class LLMClient {
   /// `previousResponseId` chains this turn onto a prior response
   /// in the same conversation — the server holds the history, so
   /// chained callers send only the new turn instead of a transcript
-  /// blob. A 400 on a chained call means the chain outgrew the
-  /// model's window (the API never trims it): restart fresh once
-  /// rather than failing the turn, and report the fresh id through
+  /// blob. A 400 on a chained call (the chain outgrew the model's
+  /// window — the API never trims it) is surfaced with its status,
+  /// not retried fresh: the caller compacts the thread and retries
+  /// with the summary, so history is compressed, never silently
+  /// dropped. The fresh response id is reported through
   /// `onResponseId` so the caller's chain store advances to it.
   async complete({ model, system, user, conversationId, imageDataURL, previousResponseId, onResponseId }: { model: string; system: string; user: string; conversationId?: string; imageDataURL?: string; previousResponseId?: string; onResponseId?: (id: string) => void | Promise<void> }): Promise<string> {
     return withSpan(`chat ${model}`, this.chatAttrs(model, conversationId), async (span) => {
@@ -250,20 +263,20 @@ export class LLMClient {
       // Images never enter application traces or gateway body logs.
       if (imageDataURL) headers["cf-aig-collect-log-payload"] = "false";
       span.setAttribute("hygge.vision.attached", Boolean(imageDataURL));
-      const bodyFor = (prev: string | undefined) => JSON.stringify({
-        model,
-        instructions: system,
-        input: imageDataURL
-          ? [{ type: "input_text", text: user }, { type: "input_image", image_url: imageDataURL }]
-          : user,
-        ...(prev ? { previous_response_id: prev } : {}),
-      });
       const url = `${this.cfg.baseUrl.replace(/\/$/, "")}/responses`;
-      let res = await fetch(url, { method: "POST", headers, body: bodyFor(previousResponseId) });
-      if (!res.ok && res.status === 400 && previousResponseId) {
-        res = await fetch(url, { method: "POST", headers, body: bodyFor(undefined) });
-      }
-      if (!res.ok) throw new Error(`LLM ${model} returned ${res.status}`);
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model,
+          instructions: system,
+          input: imageDataURL
+            ? [{ type: "input_text", text: user }, { type: "input_image", image_url: imageDataURL }]
+            : user,
+          ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
+        }),
+      });
+      if (!res.ok) throw llmHttpError(model, res.status);
       this.gatewayLogAttr(span, res);
       const data = (await res.json()) as {
         id?: string;
@@ -290,9 +303,9 @@ export class LLMClient {
   /// Only `response.output_text.delta` events carry user-visible
   /// text; `response.completed` carries the id and usage, and
   /// `response.created` the id early. All other event types (item
-  /// added/done, reasoning deltas, annotations) are ignored. The
-  /// same chained-400 rule as `complete` applies before the body
-  /// is read; a failure mid-stream propagates, it is not retried.
+  /// added/done, reasoning deltas, annotations) are ignored. A
+  /// failure before the body is read surfaces with its status like
+  /// `complete`; a failure mid-stream propagates, it is not retried.
   async completeStream(
     { model, system, user, conversationId, previousResponseId, onResponseId }: { model: string; system: string; user: string; conversationId?: string; previousResponseId?: string; onResponseId?: (id: string) => void | Promise<void> },
     onDelta: (delta: string) => void,
@@ -300,19 +313,19 @@ export class LLMClient {
     return withSpan(`chat ${model}`, this.chatAttrs(model, conversationId), async (span) => {
     this.payloadAttrs(span, system, user);
     const headers = llmRequestHeaders(this.cfg, model);
-    const bodyFor = (prev: string | undefined) => JSON.stringify({
-      model,
-      instructions: system,
-      input: user,
-      stream: true,
-      ...(prev ? { previous_response_id: prev } : {}),
-    });
     const url = `${this.cfg.baseUrl.replace(/\/$/, "")}/responses`;
-    let res = await fetch(url, { method: "POST", headers, body: bodyFor(previousResponseId) });
-    if (!res.ok && res.status === 400 && previousResponseId) {
-      res = await fetch(url, { method: "POST", headers, body: bodyFor(undefined) });
-    }
-    if (!res.ok) throw new Error(`LLM ${model} returned ${res.status}`);
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        instructions: system,
+        input: user,
+        stream: true,
+        ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
+      }),
+    });
+    if (!res.ok) throw llmHttpError(model, res.status);
     if (!res.body) throw new Error("LLM stream had no body");
     this.gatewayLogAttr(span, res);
     const reader = res.body.getReader();
