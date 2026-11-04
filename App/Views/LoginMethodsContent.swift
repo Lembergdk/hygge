@@ -5,6 +5,9 @@ struct LoginMethodsContent: View {
     @Environment(AppStore.self) private var store
     @State private var methods: [LinkedLoginMethod] = []
     @State private var loaded = false
+    /// The stored session was rejected (revoked/expired): retrying
+    /// cannot help, so the page offers signing in again instead.
+    @State private var signedOut = false
     @State private var linkEmail = ""
     @State private var message: String?
     @State private var isWorking = false
@@ -17,7 +20,14 @@ struct LoginMethodsContent: View {
         VStack(alignment: .leading, spacing: 22) {
             Text("Connected").font(.title3.weight(.bold)).foregroundStyle(HyggeTheme.ink)
             if !loaded {
-                if message == nil { ProgressView() }
+                if signedOut {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("You’re signed out on this phone. Sign in again to manage your logins.")
+                            .foregroundStyle(HyggeTheme.secondary)
+                        Button("Sign in again") { Task { await store.signOut() } }
+                            .buttonStyle(SettingsActionStyle())
+                    }
+                } else if message == nil { ProgressView() }
                 else { Button("Try again") { Task { await load() } } }
             } else {
                 VStack(spacing: 0) {
@@ -182,8 +192,12 @@ struct LoginMethodsContent: View {
         }
         #endif
         message = nil
+        signedOut = false
         do { methods = try await store.backend.fetchLoginMethods(); loaded = true }
-        catch { message = "Your logins couldn’t be loaded. Try again when you’re connected." }
+        catch AuthClientError.unauthorized { signedOut = true }
+        // Surface the server's own words (AuthCopy) instead of
+        // blaming connectivity for every failure shape.
+        catch { message = AuthCopy.message(for: error) }
     }
 
     private func sendLink(to email: String) async {
