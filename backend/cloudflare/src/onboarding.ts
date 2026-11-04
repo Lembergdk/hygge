@@ -282,15 +282,36 @@ export type ChatIntentAction =
 
 const DOMAIN_SHAPE = /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/;
 
+export interface ChatSiteCandidate { name: string; domain: string; siteId: string | null }
+
+/// Open proposals win over catalog aliases. Merely appearing in the user's
+/// site inventory does not mean a site has been approved for tracking.
+export function chatSiteCandidates(
+  sites: Array<ChatSiteCandidate & { tracked: boolean }>,
+  proposals: ChatSiteCandidate[], catalog: ChatSiteCandidate[],
+): ChatSiteCandidate[] {
+  const normalize = (domain: string) => domain.trim().toLowerCase().replace(/^www\./, "");
+  const tracked = new Set(sites.filter((s) => s.tracked).map((s) => normalize(s.domain)));
+  const seen = new Set<string>();
+  const result: ChatSiteCandidate[] = [];
+  for (const entry of [...proposals, ...sites.filter((s) => !s.tracked), ...catalog]) {
+    const domain = normalize(entry.domain);
+    if (!DOMAIN_SHAPE.test(domain) || tracked.has(domain) || seen.has(domain)) continue;
+    seen.add(domain);
+    result.push({ name: entry.name, domain, siteId: entry.siteId });
+  }
+  return result;
+}
+
 /// Validate a list of actions (confirmations like "both" or
 /// "add all three"): each entry validated exactly like a single
 /// action, invalid entries dropped, null when nothing survives.
 export function validateChatIntentList(parsed: any, context: any): ChatIntentAction[] | null {
   const raw = parsed?.actions;
   if (!Array.isArray(raw)) return null;
-  const kept = raw.slice(0, 5)
+  const kept = raw
     .map((entry) => validateOneAction(entry, context))
-    .filter((a): a is ChatIntentAction => a !== null);
+    .filter((a): a is ChatIntentAction => a !== null).slice(0, 5);
   return kept.length ? kept : null;
 }
 
@@ -347,7 +368,7 @@ const INTENT_SYSTEM = [
   "context.focus, when present, is the exact feed card the latest message is about —",
   "\"this\", \"it\", and \"that one\" refer to it; prefer its ids over any other referent.",
   "Reason freely about what the user wants — phrasing is free, there are no magic words,",
-  "and there is no limit of one: do everything they asked for, in an order that makes sense.",
+  "and there is no limit of one: do everything they asked for, in order, with at most five calls.",
   "Reason about referents from the conversation (\"it\", \"that forward\", \"the Rover one\")",
   "and about intent in your own judgment — phrasing is free, there are no magic words.",
   "Reply ONLY with JSON: {\"actions\": [ ... ] } or {\"action\": {...} } for a single call, or null/empty when",
@@ -381,11 +402,9 @@ export async function chatIntent(args: any): Promise<{ action: ChatIntentAction 
       }),
     });
     const parsed = parseDecision(text);
-    return {
-      action: validateChatIntent(parsed, context),
-      actions: validateChatIntentList(parsed, context),
-      simulated: false,
-    };
+    const single = validateChatIntent(parsed, context);
+    const actions = validateChatIntentList(parsed, context) ?? (single ? [single] : null);
+    return { action: actions?.length === 1 ? actions[0] : null, actions, simulated: false };
   } catch {
     return { action: null, actions: null, simulated: false };
   }

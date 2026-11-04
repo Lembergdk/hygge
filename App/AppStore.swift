@@ -1476,6 +1476,14 @@ final class AppStore {
             return addSiteFromChat(domain: domain)
         case .checkEmail:
             return await checkEmailFromChat()
+        case .readMail(let mailID, let act):
+            guard hyggeEmailAddress != nil else { return await checkEmailFromChat() }
+            guard let mailID else { return inboxReadOut() }
+            guard let mail = filedEmailSummaries.first(where: { $0.id.lowercased() == mailID.lowercased() }) else {
+                return "That email is no longer in your inbox, so I left that request undone."
+            }
+            return actOnResolvedMail(EmailReferenceResolver.Resolution(mail: mail, wantsAction: act),
+                                     askText: act ? "handle this email" : "")
         }
     }
 
@@ -1614,7 +1622,7 @@ final class AppStore {
 
     enum ModelIntentOutcome {
         case handled(String)
-        case needsConfirmation(ChatAction)
+        case needsConfirmation(ChatActionBatch.Progress)
         case unhandled
     }
 
@@ -1658,67 +1666,42 @@ final class AppStore {
               !dtos.isEmpty else {
             return .unhandled
         }
-        // Tool calls, not a form: the model may use any number of
-        // them. Join/add/scan run straight through (each validated
-        // below); anything consequential still goes through the
-        // single-action confirmation path for safety.
-        if dtos.allSatisfy({ ["join", "add", "scan"].contains($0.kind) }) {
-            var replies: [String] = []
-            for dto in dtos {
-                switch dto.kind {
-                case "scan":
-                    guard let id = dto.siteId, site(id: id) != nil else { continue }
-                    replies.append(await performChatAction(.scanSite(siteID: id)))
-                case "join":
-                    guard let id = dto.siteId, site(id: id) != nil else { continue }
-                    replies.append(await performChatAction(.joinSite(siteID: id)))
-                case "add":
-                    guard let domain = dto.domain,
-                          TargetSite.userAdded(name: "", urlOrDomain: domain, category: .localGig) != nil
-                    else { continue }
-                    replies.append(await performChatAction(.addSite(domain: domain)))
-                default:
-                    continue
-                }
-            }
-            guard !replies.isEmpty else { return .unhandled }
-            return .handled(replies.joined(separator: " "))
-        }
-        guard let dto = dtos.first else { return .unhandled }
+        return await continueChatBatch(dtos.map(chatBatchItem))
+    }
+
+    func continueChatBatch(_ items: [ChatBatchItem]) async -> ModelIntentOutcome {
+        let progress = await ChatActionBatch.run(items) { await self.performChatAction($0) }
+        if progress.confirmation != nil { return .needsConfirmation(progress) }
+        return .handled(progress.replies.joined(separator: " "))
+    }
+
+    private func chatBatchItem(_ dto: BackendClient.ChatIntentActionDTO) -> ChatBatchItem {
         switch dto.kind {
-        case "scan":
-            guard let id = dto.siteId, site(id: id) != nil else { return .unhandled }
-            return .handled(await performChatAction(.scanSite(siteID: id)))
-        case "join":
-            guard let id = dto.siteId, site(id: id) != nil else { return .unhandled }
-            return .handled(await performChatAction(.joinSite(siteID: id)))
-        case "stop":
-            guard let id = dto.siteId, site(id: id) != nil else { return .unhandled }
-            return .needsConfirmation(.stopSite(siteID: id))
+        case "scan", "join", "stop":
+            guard let id = dto.siteId, site(id: id) != nil else {
+                return .unavailable("I couldn't find the site for that \(dto.kind) request, so I left it undone.")
+            }
+            if dto.kind == "scan" { return .action(.scanSite(siteID: id)) }
+            if dto.kind == "join" { return .action(.joinSite(siteID: id)) }
+            return .action(.stopSite(siteID: id))
         case "add":
             guard let domain = dto.domain,
-                  TargetSite.userAdded(name: "", urlOrDomain: domain, category: .localGig) != nil else { return .unhandled }
-            return .handled(await performChatAction(.addSite(domain: domain)))
-        case "floor":
-            guard let amount = dto.amount, amount > 0, amount < 1000 else { return .unhandled }
-            return .needsConfirmation(.changeFloor(amount))
-        case "approve": return .needsConfirmation(.approveFirst)
-        case "book": return .needsConfirmation(.bookFirst)
-        case "pause": return .handled(await performChatAction(.pause))
-        case "resume": return .handled(await performChatAction(.resume))
-        case "explainDropped": return .handled(await performChatAction(.explainDropped))
-        case "email":
-            guard hyggeEmailAddress != nil else { return .handled(await checkEmailFromChat()) }
-            if let mailId = dto.mailId {
-                guard let mail = filedEmailSummaries.first(where: { $0.id.lowercased() == mailId.lowercased() })
-                else { return .unhandled }
-                return .handled(actOnResolvedMail(
-                    EmailReferenceResolver.Resolution(mail: mail, wantsAction: dto.act == true),
-                    askText: text))
+                  TargetSite.userAdded(name: "", urlOrDomain: domain, category: .localGig) != nil else {
+                return .unavailable("I couldn't use that site address, so I haven't added it.")
             }
-            return .handled(inboxReadOut())
-        default:
-            return .unhandled
+            return .action(.addSite(domain: domain))
+        case "floor":
+            guard let amount = dto.amount, amount > 0, amount < 1000 else {
+                return .unavailable("I couldn't use that rate, so your lowest rate hasn't changed.")
+            }
+            return .action(.changeFloor(amount))
+        case "approve": return .action(.approveFirst)
+        case "book": return .action(.bookFirst)
+        case "pause": return .action(.pause)
+        case "resume": return .action(.resume)
+        case "explainDropped": return .action(.explainDropped)
+        case "email": return .action(.readMail(mailID: dto.mailId, act: dto.act == true))
+        default: return .unavailable("I couldn't carry out one of those requests, so I left it undone.")
         }
     }
 

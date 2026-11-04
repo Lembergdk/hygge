@@ -15,6 +15,7 @@ struct ConversationView: View {
     @State private var streamingText: String?
     @State private var isThinking = false
     @State private var pendingAction: ChatAction?
+    @State private var pendingRemainder: [ChatBatchItem] = []
     @State private var replyTarget: TaskReplyTarget?
     @State private var credentialRequest: AppStore.CredentialSaveRequest?
     @State private var takeBrowserControl = false
@@ -105,7 +106,14 @@ struct ConversationView: View {
                             withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
                             if let id = store.chatTranscript.last?.taskID { prepareReply(to: id) }
                         }
-                        .onDisappear { store.markChatRead() }
+                        .onDisappear {
+                            store.markChatRead()
+                            if pendingAction != nil {
+                                store.appendChat(fromAgent: true, text: "I left the unconfirmed request and any remaining requests undone. Ask me again when you're ready.")
+                                pendingAction = nil
+                                pendingRemainder = []
+                            }
+                        }
                         .onChange(of: streamingText?.count ?? 0) { _, _ in
                             proxy.scrollTo("bottom", anchor: .bottom)
                         }
@@ -194,7 +202,7 @@ struct ConversationView: View {
                     .frame(width: 44, height: 44)
                     .background(HyggeTheme.sageDeep, in: Circle())
             }
-            .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty || isThinking)
+            .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty || isThinking || pendingAction != nil)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
     }
@@ -250,6 +258,7 @@ struct ConversationView: View {
     }
 
     private func send() async {
+        guard !isThinking, pendingAction == nil else { return }
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isThinking else { return }
         input = ""
@@ -281,9 +290,9 @@ struct ConversationView: View {
             isThinking = false
             store.appendChat(fromAgent: true, text: replyText)
             return
-        case .needsConfirmation(let action):
+        case .needsConfirmation(let progress):
             isThinking = false
-            pendingAction = action
+            presentBatch(progress)
             return
         case .unhandled:
             isThinking = false
@@ -457,6 +466,14 @@ struct ConversationView: View {
         }
     }
 
+    private func presentBatch(_ progress: ChatActionBatch.Progress) {
+        if !progress.replies.isEmpty {
+            store.appendChat(fromAgent: true, text: progress.replies.joined(separator: " "))
+        }
+        pendingAction = progress.confirmation
+        pendingRemainder = progress.remaining
+    }
+
     private func actionQuestion(_ action: ChatAction) -> String {
         switch action {
         case .stopSite(let siteID):
@@ -470,7 +487,7 @@ struct ConversationView: View {
             return "Approve the first waiting draft?"
         case .bookFirst:
             return "Go ahead with the waiting booking?"
-        case .pause, .resume, .explainDropped, .scanSite, .joinSite, .addSite, .checkEmail:
+        case .pause, .resume, .explainDropped, .scanSite, .joinSite, .addSite, .checkEmail, .readMail:
             return "Do that now?"
         }
     }
@@ -483,25 +500,44 @@ struct ConversationView: View {
                 .font(.caption.weight(.bold)).foregroundStyle(HyggeTheme.ember)
             Text(actionQuestion(action))
                 .font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
+            if !pendingRemainder.isEmpty {
+                Text("I'll continue the remaining requests after this decision. Not now cancels them too.")
+                    .font(.caption).foregroundStyle(HyggeTheme.secondary)
+            }
             HStack(spacing: 9) {
                 Button("Yes, do it") {
+                    let remaining = pendingRemainder
                     pendingAction = nil
+                    pendingRemainder = []
+                    isThinking = true
                     store.appendChat(fromAgent: false, text: "Yes, do it")
                     Task {
+                        defer { isThinking = false }
                         let replyText = await store.performChatAction(action)
                         store.appendChat(fromAgent: true, text: replyText)
+                        switch await store.continueChatBatch(remaining) {
+                        case .handled(let reply):
+                            if !reply.isEmpty { store.appendChat(fromAgent: true, text: reply) }
+                        case .needsConfirmation(let progress): presentBatch(progress)
+                        case .unhandled: break
+                        }
                     }
                 }
                 .font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 15).padding(.vertical, 9)
                 .background(HyggeTheme.ember, in: Capsule()).foregroundStyle(.white)
                 Button("Not now") {
+                    let hasRemaining = !pendingRemainder.isEmpty
                     pendingAction = nil
+                    pendingRemainder = []
                     store.appendChat(fromAgent: false, text: "Not now")
-                    store.appendChat(fromAgent: true, text: "Okay — nothing changed.")
+                    store.appendChat(fromAgent: true, text: hasRemaining
+                        ? "Okay — I left this and the remaining requests undone."
+                        : "Okay — I left that request undone.")
                 }
                 .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
             }
+            .disabled(isThinking)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(15).hyggeCard(radius: 18)

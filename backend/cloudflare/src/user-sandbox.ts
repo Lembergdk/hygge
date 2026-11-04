@@ -10,7 +10,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { json } from "./env.ts";
 import { LLMClient, type LLMConfig } from "./llm.ts";
-import { chatIntent, onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
+import { chatSiteCandidates, chatIntent, onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { BrowserRunBrowser } from "./browser.ts";
 import { handleProfilePhoto, profilePhotoAllowedForTask, type ProfilePhoto, type ProfilePhotoStore } from "./profile-photo.ts";
 import { makeDecider, runMission, distillHints, emailCodeAllowedForTask } from "./agent.ts";
@@ -2214,30 +2214,23 @@ export class UserSandbox extends DurableObject<Env> {
         // already tracked. The model still reasons freely; this
         // only grounds names to addresses.
         const store = this.stateStore();
-        const tracked = new Set(
-          store.list("sites").map((row) => String((row.data as any)?.domain ?? "").toLowerCase()));
-        const candidates: Array<{ name: string; domain: string; siteId: string | null }> = [];
-        const seen = new Set<string>();
-        const pushCandidate = (name: string, domain: string, siteId: string | null) => {
-          const key = domain.toLowerCase();
-          if (!key || seen.has(key) || tracked.has(key)) return;
-          seen.add(key);
-          candidates.push({ name, domain, siteId });
-        };
-        for (const row of store.list("sites")) {
+        const inventory = store.list("sites").flatMap((row) => {
           const site = scanSiteFromRow(String(row.id), row.data);
-          if (site) pushCandidate(site.name, site.domain, site.siteID);
-        }
-        for (const row of store.list("proposals")) {
+          if (!site) return [];
+          const state = store.get("accountStates", site.siteID)?.data as any;
+          return [{ name: site.name, domain: site.domain, siteId: site.siteID,
+            tracked: ["watching", "profileLive", "hasAccount", "joining", "needsVerification"].includes(state?.state ?? "") }];
+        });
+        const proposals = store.list("proposals").flatMap((row) => {
           const data = row.data as any;
-          if (data?.status !== "proposed") continue;
-          const siteID = String(data.siteID ?? "");
-          const site = scanSiteFromRow(siteID, store.get("sites", siteID)?.data);
-          pushCandidate(site?.name ?? siteID, site?.domain ?? siteID, siteID);
-        }
-        for (const list of Object.values(STATIC_PROPOSALS)) {
-          for (const entry of list) pushCandidate(entry.name, domainOf(entry.url), null);
-        }
+          if (data?.status !== "proposed") return [];
+          const siteId = String(data.siteID ?? "");
+          const site = inventory.find((s) => s.siteId === siteId);
+          return site ? [{ name: site.name, domain: site.domain, siteId }] : [];
+        });
+        const catalog = Object.values(STATIC_PROPOSALS).flat().map((entry) =>
+          ({ name: entry.name, domain: domainOf(entry.url), siteId: null }));
+        const candidates = chatSiteCandidates(inventory, proposals, catalog);
         return json(await chatIntent({
           client: new LLMClient(this.llmConfig("hygge-onboarding")),
           ...intentBody,
