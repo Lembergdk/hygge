@@ -12,7 +12,7 @@ import {createWorkspaceServer} from '../../container/server.mjs';
 
 // Real Chromium + real SQLite + real capture/HMAC/checkpoints. The Cloudflare
 // lifecycle and R2 network are explicit local adapters, never provider proof.
-test('integrated mission commits real browser profile/evidence before task success and replays without browsing',async t=>{
+test('integrated mission commits real browser profile/evidence before task success and replays without browsing',{timeout:300_000},async t=>{
  const executablePath=process.env.HYGGE_TEST_CHROME??'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
  await fs.access(executablePath);
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'hygge-wave2-integrated-'));
@@ -35,7 +35,7 @@ test('integrated mission commits real browser profile/evidence before task succe
  const container:any={get running(){return running;},inspect:async()=>running?{image,labels}:null,
   start(options:any){labels=options.labels;running=true;starting=createWorkspaceServer({identity:JSON.parse(options.env.HYGGE_IDENTITY),secret:Uint8Array.from(Buffer.from(options.env.HYGGE_RPC_SECRET,'base64')),root:path.join(root,'workspace'),executablePath,allowLoopback:true,launchArgs:['--no-sandbox','--ignore-certificate-errors']}).then(async app=>{node=app;await app.listen();return app;});},
   setInactivityTimeout:async()=>{},interceptOutboundHttp:async()=>{},interceptOutboundHttps:async()=>{},monitor:async()=>{},destroy:async()=>{if(starting)await starting;if(node)await node.close();running=false;},
-  getTcpPort(){return {fetch:async(request:Request)=>{await starting;const address=node.server.address();return fetch(`http://127.0.0.1:${address.port}${new URL(request.url).pathname}`,{method:request.method,headers:request.headers,body:request.body?await request.text():undefined});}};},
+  getTcpPort(){return {fetch:async(request:Request)=>{await starting;const address=node.server.address();return fetch(`http://127.0.0.1:${address.port}${new URL(request.url).pathname}`,{method:request.method,headers:request.headers,body:request.body?await request.text():undefined,signal:request.signal});}};},
  };
  const blobs=new Map<string,Uint8Array>();
  const bucket:any={put:async(k:string,v:Uint8Array)=>{if(!blobs.has(k))blobs.set(k,Uint8Array.from(v));},get:async(k:string)=>{const value=blobs.get(k);return value?{arrayBuffer:async()=>Uint8Array.from(value).buffer}:null;}};
@@ -53,6 +53,14 @@ test('integrated mission commits real browser profile/evidence before task succe
  const last=JSON.parse(new TextDecoder().decode(blobs.get(manifests.at(-1)!)!));
  assert.ok(last.files.some((f:any)=>f.path.includes('profile/')));assert.ok(Object.keys(last.artifacts).some(k=>k.endsWith('_completion')));
  assert.equal((await workspace.run(task,mission)).status,'succeeded');assert.equal(missions,1);
+ // Document mirrors use byte bounds, owner admission, immutable revisions, and deletion tombstones.
+ const notePath='synthetic-generation/notes/preferences.md',unicode=new TextEncoder().encode('世'.repeat(100000));
+ const noteReceipt=await workspace.saveDocument(notePath,1,unicode);
+ assert.ok(noteReceipt.coveredArtifactRefs.some(ref=>ref.startsWith('file_')));
+ await workspace.eraseDocument(notePath,1);
+ await assert.rejects(workspace.saveDocument(notePath,1,unicode),/REVISION_DELETED/);
+ const corrected=await workspace.saveDocument(notePath,2,new TextEncoder().encode('Corrected note'));
+ assert.ok(corrected.coveredArtifactRefs.some(ref=>ref.startsWith('file_')&&ref.endsWith('_2')));
  // A new DO composition reattaches to the exact live incarnation; no fresh disk.
  const reconstructed=createWorkspaceExecution({owner:workspace.foundation.persistence.owner,env,storage,container,loadTask,projectTask});
  await reconstructed.ensure();assert.ok(await reconstructed.browser.snapshot(result.session_id));

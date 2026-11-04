@@ -86,6 +86,13 @@ export function getMissionJob(storage: WorkspaceSqlStorage, jobId: string): Miss
   return rows.length ? rowFrom(rows[0]) : null;
 }
 
+/** Metadata only: broad task status does not prove a delivery has started. */
+export function latestMissionJob(storage:WorkspaceSqlStorage,taskId:string):MissionJobRow|null {
+  ensureMissionJobsTable(storage);
+  const rows=[...storage.sql.exec('SELECT * FROM mission_jobs WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',taskId)];
+  return rows.length?rowFrom(rows[0]):null;
+}
+
 /// One active job per task: a duplicate submission (double approve,
 /// retried request) returns the job already in flight instead of
 /// minting a second dispatch. A terminal job never blocks a new

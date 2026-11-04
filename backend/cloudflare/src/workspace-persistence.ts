@@ -17,12 +17,29 @@ export function ownerKey(owner: WorkspaceIdentity): string {
 export function sameOwner(a: WorkspaceIdentity, b: WorkspaceIdentity): boolean { return ownerKey(a) === ownerKey(b); }
 export function revision(n: number): number { if (!Number.isSafeInteger(n) || n < 0) fail('INVALID_REVISION'); return n; }
 export function nonempty(s: string): string { if (typeof s !== 'string' || !s.trim() || s.length > 4096) fail('INVALID_ID'); return s; }
+/** Diagnostics contain schema keys/indices and types, never rejected values or user-defined keys. */
+export class InvalidWorkspacePayload extends WorkspaceError {
+  readonly path:string;readonly valueType:string;
+  constructor(path:string,valueType:string){super('INVALID_PAYLOAD');this.path=path;this.valueType=valueType;}
+}
+const diagnosticKeys=new Set(['decision','snapshot','sessionID','action','target','targetLabel','targetSensitive','value','valueRef','reason','effect','preview','tier','model','questions','userMessage','skillDraft','taskId','runId','sequence','args','input','result']);
 export function canonical(value: unknown): string {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
-  if (typeof value === 'object' && value) return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical((value as Record<string, unknown>)[k])).join(',') + '}';
-  return fail('INVALID_PAYLOAD');
+  const ancestors=new Set<object>();
+  function visit(item:unknown,path:string,depth:number):string {
+    const invalid=(type:string):never=>{throw new InvalidWorkspacePayload(path,type);};
+    if(depth>64)return invalid('depth');
+    if(item===null||typeof item==='string'||typeof item==='boolean')return JSON.stringify(item);
+    if(typeof item==='number')return Number.isFinite(item)?JSON.stringify(item):invalid('non-finite-number');
+    if(typeof item!=='object')return invalid(typeof item);
+    if(ancestors.has(item))return invalid('cycle');
+    if(!Array.isArray(item)&&Object.getPrototypeOf(item)!==Object.prototype&&Object.getPrototypeOf(item)!==null)return invalid('non-json-object');
+    ancestors.add(item);
+    try{
+      if(Array.isArray(item))return '['+Array.from({length:item.length},(_,i)=>visit(item[i],`${path}[${i}]`,depth+1)).join(',')+']';
+      return '{'+Object.keys(item).sort().map((key,i)=>JSON.stringify(key)+':'+visit((item as Record<string,unknown>)[key],diagnosticKeys.has(key)?`${path}.${key}`:`${path}[property:${i}]`,depth+1)).join(',')+'}';
+    }finally{ancestors.delete(item);}
+  }
+  return visit(value,'$',0);
 }
 export async function digest(value: unknown): Promise<string> {
   const data = new TextEncoder().encode(canonical(value));
