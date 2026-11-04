@@ -4,7 +4,7 @@ import SwiftUI
 /// engine, gyro lean, idle life, drag-anywhere carrying with flailing
 /// limbs, twirl-until-nauseous, and the explorable gesture vocabulary.
 /// Every reaction is a little scene — face, arms, legs and body together —
-/// and each gesture's scene is remappable in Flame Lab.
+/// with tap/press scenes remappable in Flame Lab and unified touch physics.
 struct FlameActor: View {
     var size: CGFloat
     var clipOverride: FlameAnimation? = nil
@@ -34,33 +34,17 @@ struct FlameActor: View {
     @State private var laptopOn = false
     @State private var typingTap: Int = 0
     @State private var pinchScale: CGFloat = 1
-    @GestureState private var dragTranslation: CGSize = .zero
+    @GestureState private var touchIsDown = false
+    @State private var touchPhysics = FlameTouchPhysics()
+    @State private var touchTask: Task<Void, Never>?
+    @State private var touchFrame = CGRect.zero
+    @State private var touchStartedAt = 0.0
+    @State private var pinching = false
     @State private var isDragging = false
     @State private var spinAccum: Double = 0
     @State private var lastDragAngle: Double?
     @State private var pendingNausea = false
-    // Secondary-motion springs for carried limbs.
-    @State private var armSLVel: Double = 0
-    @State private var armSRVel: Double = 0
-    @State private var legSLVel: Double = 0
-    @State private var legSRVel: Double = 0
-    @State private var rotVel: Double = 0
-    @State private var smoothVX: Double = 0
-    @State private var smoothVY: Double = 0
-    @State private var lastDragSample: (time: Date, translation: CGSize)?
-    @State private var lastSampleDT: Double = 1.0 / 60
-    /// Classification buffer: a touch starts undecided; nothing follows
-    /// the finger until it is known to be a carry rather than a flick.
-    private enum DragPhase { case deciding, carrying, flickArmed, tracking }
-    @State private var dragPhase: DragPhase?
-    @State private var touchBeganAt: Date?
-    /// Smoothed follow offset while carried (catches up after the buffer,
-    /// hangs him below the fingertip so his whole body stays visible).
-    @State private var displayDrag: CGSize = .zero
     @State private var travelTask: Task<Void, Never>?
-
-    /// How far below the finger he hangs while carried.
-    private var carryLift: CGFloat { size * 0.52 }
     @State private var reactionTask: Task<Void, Never>?
     @State private var pendingTapTask: Task<Void, Never>?
     @State private var idlePlanner = FlameIdlePlanner()
@@ -69,7 +53,6 @@ struct FlameActor: View {
     @State private var longPressFired = false
     @State private var lastTapAt: Date?
     @State private var tapIsSecond = false
-    @State private var flickExpiryTask: Task<Void, Never>?
 
     private var settings: FlameInteractionSettings { playStore.settings }
     private var height: CGFloat { size * 1.25 }
@@ -80,28 +63,29 @@ struct FlameActor: View {
 
     private var tilt: FlameTilt {
         guard !reduceMotion else { return .zero }
-        let drag = FlameTiltMapper.pointerTilt(
-            translationX: Double(dragTranslation.width),
-            translationY: Double(dragTranslation.height), width: 180, height: 180)
-        let gyro = settings.gyroEnabled ? motion.tilt : .zero
-        return FlameTilt(x: gyro.x + drag.x, y: gyro.y + drag.y)
+        guard !touchPhysics.isActive else { return .zero }
+        return settings.gyroEnabled ? motion.tilt : .zero
     }
 
     var body: some View {
         RiggedFlame(pose: pose, size: size,
                     walking: walkCycle && !reduceMotion,
                     clipOverride: clipOverride,
-                    laptop: laptopOn, typingTap: typingTap)
+                    laptop: laptopOn, typingTap: typingTap, touch: touchPhysics)
             .scaleEffect(x: breathing && !reduceMotion ? 0.995 : 1,
                          y: breathing && !reduceMotion ? 1.02 : 1, anchor: .bottom)
             .animation(.easeInOut(duration: 1.7).repeatForever(autoreverses: true),
                        value: breathing)
             .scaleEffect(pinchScale, anchor: .bottom)
             .rotationEffect(.degrees(-tilt.x * settings.gyroLeanDegrees), anchor: .bottom)
-            .offset(x: tilt.x * 8 * settings.liveliness + dragVisualOffset.width,
-                    y: tilt.y * 5 + dragVisualOffset.height)
+            .offset(x: tilt.x * 8 * settings.liveliness + touchOffset.width,
+                    y: tilt.y * 5 + touchOffset.height)
             .frame(width: size, height: height)
             .contentShape(Rectangle())
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { touchFrame = $0 }
+            .onChange(of: touchIsDown) { _, down in
+                if !down, touchPhysics.isHeld { cancelTouch() }
+            }
             .simultaneousGesture(dragGesture, including: interactive ? .gesture : .none)
             .simultaneousGesture(pinchGesture, including: interactive ? .gesture : .none)
             .simultaneousGesture(longPressGesture,
@@ -118,11 +102,13 @@ struct FlameActor: View {
                 if !now { typingTap = 0 }
             }
             .onDisappear {
+                cancelTouch()
                 motion.stop(); reactionTask?.cancel(); pendingTapTask?.cancel()
                 travelTask?.cancel()
             }
             .onChange(of: traveling) { _, now in
                 if now {
+                    cancelTouch()
                     startTravelHops()
                 } else {
                     // Land the moment he arrives instead of finishing
@@ -132,8 +118,11 @@ struct FlameActor: View {
                     Task { @MainActor in await rest() }
                 }
             }
-            .onChange(of: scenePhase) { updateMotion() }
-            .onChange(of: reduceMotion) { updateMotion() }
+            .onChange(of: scenePhase) {
+                if scenePhase != .active { cancelTouch() }
+                updateMotion()
+            }
+            .onChange(of: reduceMotion) { cancelTouch(); updateMotion() }
             .onChange(of: settings.gyroEnabled) { updateMotion() }
             .onChange(of: motion.shakeCount) {
                 if interactive { fire(.shake, direction: 0, intensity: 1) }
@@ -149,22 +138,6 @@ struct FlameActor: View {
     }
 
     private struct IdleKey: Equatable { var active: Bool; var browsing: Bool }
-
-    private var dragVisualOffset: CGSize {
-        switch dragPhase {
-        case .carrying:
-            return displayDrag
-        case .flickArmed:
-            // A whisper of follow so the wind-up reads, never a mini-drag.
-            return CGSize(width: min(6, max(-6, dragTranslation.width * 0.08)),
-                          height: min(6, max(-6, dragTranslation.height * 0.08)))
-        case .tracking:
-            return CGSize(width: dragTranslation.width * 0.12,
-                          height: dragTranslation.height * 0.10)
-        case .deciding, nil:
-            return .zero
-        }
-    }
 
     /// Hops while he travels between spots: crouch, airborne with limbs
     /// tucked and arms up, land — repeated until he arrives.
@@ -194,257 +167,135 @@ struct FlameActor: View {
         }
     }
 
-    private func armFlickExpiry(after delay: Double) {
-        flickExpiryTask?.cancel()
-        flickExpiryTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled, dragPhase == .flickArmed,
-                  touchBeganAt != nil else { return }
-            demoteFlick()
-        }
-    }
-
-    /// A flick that never got released was a fast drag: pick him up.
-    private func demoteFlick() {
-        flickExpiryTask?.cancel()
-        if movable {
-            startCarry()
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                displayDrag = CGSize(width: dragTranslation.width,
-                                     height: dragTranslation.height + carryLift)
-            }
-            if !reduceMotion {
-                var p = FlamePose.rest
-                p.face = .surprised; p.armSL = 118; p.armSR = -118
-                p.legSL = 16; p.legSR = -16; p.dy = -2
-                withAnimation(.easeOut(duration: 0.15)) { pose = p }
-            }
-        } else {
-            dragPhase = .tracking
-            if !reduceMotion {
-                withAnimation(.easeOut(duration: 0.15)) { pose = .rest }
-            }
-        }
-    }
-
-    private func startCarry() {
-        flickExpiryTask?.cancel()
-        displayDrag = dragVisualOffset
-        dragPhase = .carrying
-        isDragging = true
-        reactionTask?.cancel()
-        spinAccum = 0
-        lastDragAngle = nil
-        pendingNausea = false
-        resetSprings()
-        onDragBegan?()
-    }
-
-    /// Catch up to the finger (plus the below-finger hang) with a fast
-    /// spring — no snap after the buffer.
-    private func carryStep(_ value: DragGesture.Value) {
-        let k = min(1, lastSampleDT * 18)
-        displayDrag.width += (value.translation.width - displayDrag.width) * k
-        displayDrag.height += (value.translation.height + carryLift - displayDrag.height) * k
-        trackSpin(value.location)
-        heldPose(value)
+    private var touchScale: Double { Double(size) / FlameTouchPhysics.referenceSize }
+    private var touchOffset: CGSize {
+        CGSize(width: touchPhysics.body.x * touchScale, height: touchPhysics.body.y * touchScale)
     }
 
     private func beginTouch(_ value: DragGesture.Value) {
+        touchTask?.cancel()
+        reactionTask?.cancel(); reactionTask = nil
+        pendingTapTask?.cancel()
         tapIsSecond = FlameGestureClassifier.isDoubleTap(
             previousAt: lastTapAt?.timeIntervalSinceReferenceDate,
             now: Date().timeIntervalSinceReferenceDate)
-        touchBeganAt = Date()
-        dragPhase = .deciding
-        smoothVX = 0; smoothVY = 0
-        lastDragSample = (Date(), value.translation)
-        reactionTask?.cancel()
-        pendingTapTask?.cancel()
-        if !reduceMotion {
-            withAnimation(.easeOut(duration: 0.12)) {
-                var p = FlamePose.rest
-                p.sy = 0.97; p.sx = 1.02
-                pose = p
+        touchStartedAt = ProcessInfo.processInfo.systemUptime
+        let point = FlamePoint(
+            x: Double(value.startLocation.x - touchFrame.minX) / touchScale - 106.75,
+            y: Double(value.startLocation.y - touchFrame.minY) / touchScale - 134.1666667)
+        touchPhysics.begin(at: point, movable: movable, reduceMotion: reduceMotion)
+        pose = .rest
+        spinAccum = 0; lastDragAngle = nil; pendingNausea = false
+        startTouchFrames()
+    }
+
+    /// Drive the spring on frames, including after release and while a
+    /// stationary finger waits for pickup. Gesture events only supply input.
+    private func startTouchFrames() {
+        touchTask?.cancel()
+        touchTask = Task { @MainActor in
+            var previous = ProcessInfo.processInfo.systemUptime
+            while !Task.isCancelled, touchPhysics.isActive, scenePhase == .active {
+                let now = ProcessInfo.processInfo.systemUptime
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    let wasCarrying = touchPhysics.phase == .carrying
+                    touchPhysics.advance(by: now - previous)
+                    if !wasCarrying, touchPhysics.phase == .carrying {
+                        isDragging = true
+                        onDragBegan?()
+                    }
+                }
+                previous = now
+                do { try await Task.sleep(for: .milliseconds(16)) }
+                catch { return }
             }
         }
     }
 
-    private func updateVelocity(_ value: DragGesture.Value) {
-        let now = Date()
-        if let last = lastDragSample {
-            let raw = now.timeIntervalSince(last.time)
-            if raw > 0.001 {
-                lastSampleDT = min(raw, 0.05)
-                smoothVX += (Double(value.translation.width - last.translation.width) / raw - smoothVX) * 0.35
-                smoothVY += (Double(value.translation.height - last.translation.height) / raw - smoothVY) * 0.35
-            }
-        }
-        lastDragSample = (now, value.translation)
-    }
-
-    /// Wind-up while a flick is armed: crouch/lean *with* the flick so
-    /// the release reaction continues a motion already started.
-    private func anticipationPose(_ value: DragGesture.Value) {
-        guard !reduceMotion else { return }
-        let mag = max(1, hypot(value.translation.width, value.translation.height))
-        let ux = Double(value.translation.width / mag)
-        let uy = Double(value.translation.height / mag)
-        let up: Double = max(0, -uy)
-        let down: Double = max(0, uy)
-        var p = FlamePose.rest
-        p.face = .surprised
-        p.rot = ux * 7
-        p.dy = CGFloat(up * 3)
-        p.sy = CGFloat(1 - up * 0.09 + down * 0.04)
-        p.sx = CGFloat(1 + up * 0.06)
-        p.armSL = 26 + ux * 22
-        p.armSR = -26 + ux * 22
-        p.legSL = up * 18
-        p.legSR = -up * 18
-        withAnimation(.easeOut(duration: 0.09)) { pose = p }
+    private func cancelTouch() {
+        let wasCarrying = isDragging
+        touchTask?.cancel(); touchTask = nil
+        touchPhysics.cancel()
+        isDragging = false
+        if wasCarrying { onDragEnded?(nil) }
     }
 
     // MARK: - Gestures
 
     private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
-            .updating($dragTranslation) { value, state, _ in state = value.translation }
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .updating($touchIsDown) { _, state, _ in state = true }
             .onChanged { value in
                 lastInteraction = Date()
-                guard !traveling else { return }
-                if touchBeganAt == nil { beginTouch(value) }
-                updateVelocity(value)
-                let mag = hypot(value.translation.width, value.translation.height)
-                let elapsed = touchBeganAt.map { Date().timeIntervalSince($0) } ?? 0
-                switch dragPhase {
-                case .deciding, nil:
-                    switch FlameGestureClassifier.dragIntent(
-                        elapsed: elapsed, magnitude: Double(mag),
-                        velocity: hypot(smoothVX, smoothVY)) {
-                    case .flick:
-                        dragPhase = .flickArmed
-                        anticipationPose(value)
-                        armFlickExpiry(after: max(0.05, 0.30 - elapsed))
-                    case .carry:
-                        if movable { startCarry() } else { dragPhase = .tracking }
-                    case .deciding:
-                        break
-                    }
-                case .flickArmed:
-                    if FlameGestureClassifier.flickExpires(
-                        elapsed: elapsed, velocity: hypot(smoothVX, smoothVY)) {
-                        // Still holding after a fast start: it was a drag.
-                        demoteFlick()
-                        if dragPhase == .carrying { carryStep(value) }
-                    } else {
-                        anticipationPose(value)
-                    }
-                case .carrying:
-                    carryStep(value)
-                case .tracking:
-                    break
-                }
+                guard !traveling, !pinching, !longPressFired,
+                      Date().timeIntervalSince(lastPinchEnd) > 0.3 else { return }
+                if !touchPhysics.isHeld { beginTouch(value) }
+                let translation = FlamePoint(x: Double(value.translation.width) / touchScale,
+                                             y: Double(value.translation.height) / touchScale)
+                touchPhysics.move(to: translation,
+                                  at: ProcessInfo.processInfo.systemUptime - touchStartedAt)
+                if touchPhysics.phase == .carrying { trackSpin(value.location) }
             }
             .onEnded { value in
                 lastInteraction = Date()
-                flickExpiryTask?.cancel()
-                var phase = dragPhase
-                let touchDuration = touchBeganAt.map { Date().timeIntervalSince($0) } ?? 0
-                if phase == .flickArmed, touchDuration >= 0.35, movable {
-                    startCarry()
-                    phase = .carrying
-                }
-                touchBeganAt = nil
-                dragPhase = nil
-                displayDrag = .zero
                 if longPressFired { longPressFired = false; return }
-                if phase == .carrying {
+                guard touchPhysics.isHeld else { return }
+                let time = ProcessInfo.processInfo.systemUptime - touchStartedAt
+                touchPhysics.move(to: FlamePoint(x: Double(value.translation.width) / touchScale,
+                                                y: Double(value.translation.height) / touchScale), at: time)
+                let wasCarrying = touchPhysics.phase == .carrying
+                let moved = touchPhysics.travel > 5
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    let committed = touchPhysics.release(at: time)
                     isDragging = false
-                    resetSprings()
-                    let committed = CGSize(width: value.translation.width,
-                                           height: value.translation.height + carryLift)
-                    if pendingNausea {
-                        onDragEnded?(committed)
-                        perform(.nauseous, direction: 0, intensity: 1.2)
-                    } else if FlameGestureClassifier.isFlickRelease(
-                        translationX: Double(value.translation.width),
-                        translationY: Double(value.translation.height),
-                        predictedX: Double(value.predictedEndTranslation.width),
-                        predictedY: Double(value.predictedEndTranslation.height)),
-                              let kind = FlameGestureClassifier.classify(
-                        translationX: Double(value.translation.width),
-                        translationY: Double(value.translation.height),
-                        predictedX: Double(value.predictedEndTranslation.width),
-                        predictedY: Double(value.predictedEndTranslation.height),
-                        tapNormalizedY: 0.5) {
-                        // A flick is a reaction, not a relocation.
-                        onDragEnded?(nil)
-                        let predicted = hypot(value.predictedEndTranslation.width,
-                                              value.predictedEndTranslation.height)
-                        let dir: CGFloat = kind == .swipeLeft ? -1 : (kind == .swipeRight ? 1 : 0)
-                        fire(kind, direction: dir,
-                             intensity: min(1.5, max(0.9, Double(predicted) / 220)))
-                    } else {
-                        onDragEnded?(committed)
-                        land()
+                    if wasCarrying {
+                        onDragEnded?(committed.map {
+                            CGSize(width: $0.x * touchScale, height: $0.y * touchScale)
+                        })
                     }
+                }
+                if wasCarrying {
+                    if pendingNausea { perform(.nauseous, direction: 0, intensity: 1.2) }
+                    return
+                }
+                // A short swipe is the spring's continued stretch, never
+                // a second hop/jump scene or a placement change.
+                if moved {
+                    let x = value.translation.width, y = value.translation.height
+                    let gesture: FlameGestureKind = abs(x) >= abs(y)
+                        ? (x < 0 ? .swipeLeft : .swipeRight)
+                        : (y < 0 ? .swipeUp : .swipeDown)
+                    onGesture?(gesture, .stretch)
                     return
                 }
                 guard Date().timeIntervalSince(lastPinchEnd) > 0.3 else { return }
+                let local = value.startLocation
                 let kind = FlameGestureClassifier.classify(
                     translationX: Double(value.translation.width),
                     translationY: Double(value.translation.height),
-                    predictedX: Double(value.predictedEndTranslation.width),
-                    predictedY: Double(value.predictedEndTranslation.height),
-                    tapNormalizedY: height > 0 ? Double(value.startLocation.y / height) : 0.5)
+                    predictedX: Double(value.translation.width),
+                    predictedY: Double(value.translation.height),
+                    tapNormalizedY: height > 0 ? Double((local.y - touchFrame.minY) / height) : 0.5)
                 guard let kind else { return }
-                let direction: CGFloat
-                switch kind {
-                case .swipeLeft: direction = -1
-                case .swipeRight: direction = 1
-                case .tapHead, .tapBody, .tapFeet:
-                    direction = value.startLocation.x < size * 0.5 ? 1 : -1
-                default: direction = 0
-                }
-                // A long touch let go gently was a drag, not a flick,
-                // however far the finger travelled.
-                let isSwipeKind = kind == .swipeUp || kind == .swipeDown
-                    || kind == .swipeLeft || kind == .swipeRight
-                if isSwipeKind, touchDuration >= 0.35,
-                   !FlameGestureClassifier.isFlickRelease(
-                    translationX: Double(value.translation.width),
-                    translationY: Double(value.translation.height),
-                    predictedX: Double(value.predictedEndTranslation.width),
-                    predictedY: Double(value.predictedEndTranslation.height)) {
-                    return
-                }
-                let predicted = hypot(value.predictedEndTranslation.width,
-                                      value.predictedEndTranslation.height)
-                let intensity = min(1.5, max(0.8, Double(predicted) / 220))
-                if kind == .tapHead || kind == .tapBody || kind == .tapFeet {
-                    if tapIsSecond {
-                        lastTapAt = nil
-                        pendingTapTask?.cancel()
-                        fire(.doubleTap, direction: direction, intensity: 1.15)
-                    } else {
-                        lastTapAt = Date()
-                        // A tap that does something (the feed's hop to
-                        // chat) goes straight there: the hop IS the
-                        // reaction. Playing pat/poke first read as him
-                        // waving his arms before jumping.
-                        if onTap == nil {
-                            fire(kind, direction: direction, intensity: intensity)
-                        }
-                        scheduleTap()
-                    }
+                let direction: CGFloat = local.x - touchFrame.minX < size * 0.5 ? 1 : -1
+                if tapIsSecond {
+                    lastTapAt = nil
+                    pendingTapTask?.cancel()
+                    fire(.doubleTap, direction: direction, intensity: 1.15)
                 } else {
-                    fire(kind, direction: direction, intensity: intensity)
+                    lastTapAt = Date()
+                    if onTap == nil { fire(kind, direction: direction, intensity: 1) }
+                    scheduleTap()
                 }
             }
     }
 
     private func trackSpin(_ location: CGPoint) {
-        let center = CGPoint(x: size / 2, y: height / 2)
+        let center = CGPoint(x: touchFrame.midX, y: touchFrame.midY)
         let angle = atan2(Double(location.y - center.y), Double(location.x - center.x))
         if let last = lastDragAngle {
             var delta = angle - last
@@ -456,63 +307,16 @@ struct FlameActor: View {
         lastDragAngle = angle
     }
 
-    private func resetSprings() {
-        armSLVel = 0; armSRVel = 0; legSLVel = 0; legSRVel = 0; rotVel = 0
-    }
-
-    /// One under-damped spring step: limbs chase their targets with lag
-    /// and overshoot, so they trail, swing and settle like soft toys
-    /// instead of snapping to a pose.
-    private func spring(_ pos: Double, _ vel: inout Double,
-                        toward target: Double, dt: Double) -> Double {
-        let stiffness = 210.0, damping = 13.0
-        vel += (stiffness * (target - pos) - damping * vel) * dt
-        return pos + vel * dt
-    }
-
-    /// Carried like a plush toy, with secondary motion: arms up but
-    /// trailing the hand, legs dangling and pendulum-swinging against
-    /// travel, body leaning and stretching with speed.
-    private func heldPose(_ value: DragGesture.Value) {
-        guard !reduceMotion else { return }
-        let dt = lastSampleDT
-        let vx = smoothVX, vy = smoothVY
-        let speed = hypot(vx, vy)
-        let trail = min(58, max(-58, -vx * 0.045))          // limbs lag behind travel
-        let lift = min(26, max(-14, -vy * 0.016))           // rising hand lifts limbs
-        var p = pose
-        p.armSL = spring(p.armSL, &armSLVel, toward: 118 + trail + lift, dt: dt)
-        p.armSR = spring(p.armSR, &armSRVel, toward: -118 + trail + lift, dt: dt)
-        p.legSL = spring(p.legSL, &legSLVel, toward: trail * 0.95, dt: dt)
-        p.legSR = spring(p.legSR, &legSRVel, toward: trail * 0.8 - 8, dt: dt)
-        p.rot = spring(p.rot, &rotVel, toward: min(16, max(-16, vx * 0.016)), dt: dt)
-        p.face = pendingNausea ? .dizzy : (speed > 90 ? .surprised : .normal)
-        p.sx = 1 + min(0.05, abs(vx) * 0.00003)
-        p.sy = 1 + min(0.05, max(0, -vy) * 0.00003)
-        p.dy = -size * 0.02
-        p.dx = 0
-        pose = p
-    }
-
-    private func land() {
-        guard !reduceMotion else { pose = .rest; return }
-        reactionTask?.cancel()
-        reactionTask = Task { @MainActor in
-            await pose(.easeIn(duration: 0.1), hold: 0.1) { p in
-                p.dy = 3; p.sx = 1.09; p.sy = 0.89; p.face = .happy
-            }
-            if !Task.isCancelled { await rest() }
-        }
-    }
-
     private var pinchGesture: some Gesture {
         MagnifyGesture()
             .onChanged { value in
                 lastInteraction = Date()
+                if !pinching { cancelTouch(); pinching = true }
                 pinchScale = min(1.6, max(0.6, value.magnification))
             }
             .onEnded { value in
                 lastInteraction = Date()
+                pinching = false
                 lastPinchEnd = Date()
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.65)) { pinchScale = 1 }
                 if value.magnification < 0.82 { fire(.pinchIn, direction: 0, intensity: 1) }
@@ -523,7 +327,8 @@ struct FlameActor: View {
     private var longPressGesture: some Gesture {
         LongPressGesture(minimumDuration: 0.6, maximumDistance: 12)
             .onEnded { _ in
-                guard !traveling else { return }
+                guard !traveling, !isDragging, touchPhysics.travel <= 5 else { return }
+                cancelTouch()
                 longPressFired = true
                 lastInteraction = Date()
                 fire(.longPress, direction: 0, intensity: 1)
@@ -549,7 +354,7 @@ struct FlameActor: View {
     }
 
     private func perform(_ reaction: FlameReactionKind, direction: CGFloat, intensity: Double) {
-        guard !reduceMotion, reaction != .none, !isDragging else { return }
+        guard !reduceMotion, reaction != .none, !touchPhysics.isHeld else { return }
         lastInteraction = Date()
         reactionTask?.cancel()
         let live = settings.liveliness * intensity
@@ -809,7 +614,7 @@ struct FlameActor: View {
             if attention {
                 // A badge is showing: the only idle move is pointing
                 // and looking up at it (badge sits top-left of him).
-                guard !Task.isCancelled, reactionTask == nil, !isDragging,
+                guard !Task.isCancelled, reactionTask == nil, !touchPhysics.isActive,
                       Date().timeIntervalSince(lastInteraction) > 1.2 else {
                     try? await Task.sleep(for: .seconds(0.3))
                     continue
@@ -824,7 +629,7 @@ struct FlameActor: View {
             }
             if browsing {
                 // A live session overrides all idle life: he types.
-                guard !Task.isCancelled, reactionTask == nil, !isDragging,
+                guard !Task.isCancelled, reactionTask == nil, !touchPhysics.isActive,
                       Date().timeIntervalSince(lastInteraction) > 0.8 else {
                     try? await Task.sleep(for: .seconds(0.3))
                     continue
@@ -837,7 +642,7 @@ struct FlameActor: View {
             let step = idlePlanner.next()
             let wait = settings.idleInterval * step.delayFactor / max(0.5, settings.liveliness)
             try? await Task.sleep(for: .seconds(wait))
-            guard !Task.isCancelled, reactionTask == nil, !isDragging,
+            guard !Task.isCancelled, reactionTask == nil, !touchPhysics.isActive,
                   Date().timeIntervalSince(lastInteraction) > 3 else { continue }
             await runIdle(step.action)
             if !Task.isCancelled { await rest() }

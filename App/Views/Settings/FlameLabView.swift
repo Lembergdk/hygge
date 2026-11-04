@@ -20,6 +20,9 @@ struct FlameLabView: View {
     @State private var lastGesture: FlameGestureKind?
     @State private var lastReaction: FlameReactionKind?
     @State private var copied = false
+    @State private var laptop = false
+    @State private var placement = CGSize.zero
+    @State private var dragStart = CGSize.zero
     @FocusState private var descriptionFocus: FlameGestureKind?
 
     var body: some View {
@@ -55,15 +58,25 @@ struct FlameLabView: View {
 
     private func stage(play: FlamePlayStore) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            Toggle("Laptop variant", isOn: $laptop)
             ZStack {
                 RoundedRectangle(cornerRadius: 22)
                     .fill(HyggeTheme.paperDeep)
                 FlameActor(size: CGFloat(play.settings.homeFlameSize),
+                           browsing: laptop, movable: true,
                            preview: preview,
                            onGesture: { gesture, reaction in
                                lastGesture = gesture
                                lastReaction = reaction
+                           },
+                           onDragBegan: { dragStart = placement },
+                           onDragEnded: { offset in
+                               if let offset {
+                                   placement = CGSize(width: dragStart.width + offset.width,
+                                                      height: dragStart.height + offset.height)
+                               }
                            })
+                    .offset(placement)
             }
             .frame(height: 240)
             .accessibilityElement(children: .ignore)
@@ -90,7 +103,12 @@ struct FlameLabView: View {
                 .font(.caption)
                 .foregroundStyle(HyggeTheme.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            ForEach(FlameGestureKind.allCases) { gesture in
+            Text("Flicks stretch and spring back. Hold and drag to pick him up.")
+                .font(.caption)
+                .foregroundStyle(HyggeTheme.secondary)
+            ForEach(FlameGestureKind.allCases.filter {
+                ![.swipeUp, .swipeDown, .swipeLeft, .swipeRight].contains($0)
+            }) { gesture in
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 10) {
                         Text(gesture.label)
