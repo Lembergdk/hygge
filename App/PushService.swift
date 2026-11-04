@@ -11,12 +11,30 @@ import UserNotifications
 enum PushInbox {
     static var pendingTokenHex: String?
     static var pendingRoute: String?
+    /// Token of the most recent delivery. Duplicate deliveries of the
+    /// same token must not re-trigger a refresh (see receive).
+    static var lastDeliveredTokenHex: String?
     /// Set once by AppStore so a token or tap that arrives while the
     /// app is already running is handled straight away.
     static var onArrival: (@MainActor () -> Void)?
 
     @MainActor
     static func receive(tokenHex: String) {
+        // iOS re-delivers the current token on every
+        // registerForRemoteNotifications call, and refreshPushState
+        // makes that call on every refresh while authorized. Firing
+        // onArrival for a duplicate delivery therefore loops:
+        // refresh -> register -> delivery -> refresh -> ..., each
+        // iteration POSTing /device-tokens, until D1 throttles
+        // (Nov 4, 2026: ~36 POSTs/sec, D1 "overloaded" 10s-window
+        // errors on the session lookup of every authed request).
+        // Only a changed token re-triggers a refresh; sign-out
+        // resets lastDeliveredTokenHex so re-sign-in re-arms.
+        guard tokenHex != lastDeliveredTokenHex else {
+            pendingTokenHex = tokenHex
+            return
+        }
+        lastDeliveredTokenHex = tokenHex
         pendingTokenHex = tokenHex
         onArrival?()
     }

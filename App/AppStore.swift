@@ -561,6 +561,7 @@ final class AppStore {
         }
         UserDefaults.standard.removeObject(forKey: Self.pushPrimerResolvedKey)
         PushInbox.pendingTokenHex = nil
+        PushInbox.lastDeliveredTokenHex = nil
         PushInbox.pendingRoute = nil
         notificationPrimerVisible = false
         pendingTaskOpenID = nil
