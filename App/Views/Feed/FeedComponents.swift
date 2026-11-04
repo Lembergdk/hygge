@@ -74,14 +74,42 @@ struct FeedSummary: View {
 /// scroll view, so it can never fall below the fold at large
 /// Dynamic Type sizes. Surfaces without a footer keep the old
 /// single-argument form via the extension below.
+private struct FeedDetailContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+private struct FeedDetailVisibleHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 struct FeedDetailContent<Content: View, Footer: View>: View {
     @ViewBuilder var content: Content
     @ViewBuilder var footer: Footer
+    @State private var contentHeight: CGFloat = 0
+    @State private var visibleHeight: CGFloat = 0
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) { content }
-                .padding(24).padding(.top, 8).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: FeedDetailContentHeightKey.self, value: proxy.size.height)
+                    }
+                )
         }
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(key: FeedDetailVisibleHeightKey.self, value: proxy.size.height)
+            }
+        )
+        .onPreferenceChange(FeedDetailContentHeightKey.self) { contentHeight = $0 }
+        .onPreferenceChange(FeedDetailVisibleHeightKey.self) { visibleHeight = $0 }
+        // No inner scroll (not even rubber-banding) while every
+        // line is already visible; scrolling exists only to
+        // reach content past the card's height cap.
+        .scrollDisabled(contentHeight <= visibleHeight + 1)
         .background(HyggeTheme.card)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if ObjectIdentifier(Footer.self) != ObjectIdentifier(EmptyView.self) {
@@ -110,6 +138,10 @@ struct FeedPrimaryButton: View {
     var body: some View {
         Button(action: action) {
             Text(title).font(.system(.body, design: .rounded, weight: .semibold))
+                // A primary action never renders below default
+                // body size, however small the user's setting;
+                // above that it scales with them as usual.
+                .dynamicTypeSize(.large...)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity).frame(minHeight: 44).padding(.vertical, 13)
                 .foregroundStyle(HyggeTheme.onSage).background(HyggeTheme.sageDeep, in: Capsule())

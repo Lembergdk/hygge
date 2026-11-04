@@ -84,11 +84,19 @@ struct HomeFeedView: View {
                         Color.black.opacity(0.55).ignoresSafeArea().onTapGesture { closeFocus() }
                             .accessibilityLabel("Back to feed").accessibilityAddTraits(.isButton)
                         FeedFocusCard(close: { closeFocus() }) { focusedContent(focus) }
-                            // At accessibility sizes vertical space is the
-                            // scarce resource: drop the per-surface point
-                            // cap and give the card nearly the full screen.
+                            // Height hugs the content up to the cap (the
+                            // detail scroll only engages past it); the
+                            // browser keeps its fixed tall card because
+                            // its viewport is flexible space. At
+                            // accessibility sizes vertical space is the
+                            // scarce resource, so the cap becomes
+                            // nearly the full screen.
                             .frame(width: min(geometry.size.width - 32, 620),
-                                   height: dynamicTypeSize.isAccessibilitySize
+                                   height: focus.hugsContent ? nil
+                                       : (dynamicTypeSize.isAccessibilitySize
+                                          ? geometry.size.height * 0.92
+                                          : min(geometry.size.height * 0.92, focus.maximumHeight)))
+                            .frame(maxHeight: dynamicTypeSize.isAccessibilitySize
                                        ? geometry.size.height * 0.92
                                        : min(geometry.size.height * 0.92, focus.maximumHeight))
                             .matchedGeometryEffect(id: focus.id, in: focusAnimation, isSource: true)

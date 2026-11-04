@@ -21,6 +21,16 @@ enum FeedFocus: Identifiable {
         case .browser: return 780
         }
     }
+    /// Card height follows its content up to `maximumHeight`
+    /// instead of always claiming the cap. The browser surface
+    /// is the exception: its live viewport is flexible space
+    /// with no intrinsic height, so it keeps the fixed tall card.
+    var hugsContent: Bool {
+        switch self {
+        case .browser: return false
+        default: return true
+        }
+    }
     static func taskKey(_ task: AgentTask) -> String {
         if task.isActiveInFeed { return "task-live-\(task.id)" }
         return "task-\(task.id)-\(task.status.rawValue)-\(task.help?.id.uuidString ?? "")"

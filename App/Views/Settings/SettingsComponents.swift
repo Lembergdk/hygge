@@ -70,6 +70,7 @@ struct SettingsActionStyle: ButtonStyle {
     var filled = true
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.body.weight(.semibold))
+            .dynamicTypeSize(.large...)
             .frame(maxWidth: .infinity, minHeight: 48)
             .padding(.horizontal, 12)
             .foregroundStyle(filled ? HyggeTheme.onSage : HyggeTheme.sageDeep)
