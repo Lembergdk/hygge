@@ -40,8 +40,8 @@ const check = async (name: string, run: () => Promise<void>) => {
     console.error(`GATEWAY ${name} FAIL ${error?.status ? `HTTP ${error.status}` : error?.name ?? "Error"}`);
   }
 };
-// A valid 64x64 RGB PNG, with no user content.
-const imageDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAfklEQVR4nNXOQREAIAzAsK4K8W8GRPDYNQoynEuZxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmcxEmc24FfD2TIAc+I9emSAAAAAElFTkSuQmCC";
+// A valid 256x256 RGB PNG, with no user content.
+const imageDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAACv0lEQVR4nO3TMQEAIAzAsIFC/JsBGRxNFPTpmnMHqvbvAPjJAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgGYsge0kQNPSfTYegAAAABJRU5ErkJggg==";
 for (const model of new Set([cfg.modelFast, cfg.modelStrong])) {
   await check(`text-${model}`, async () => {
     const text = await client.complete({ model, system: "Reply with exactly OK.", user: "Synthetic transport check." });
@@ -68,7 +68,7 @@ await check("native-tools-and-results", async () => {
   activeCheck = "native-tools-call";
   const first = await post({ model: cfg.modelFast, store: false, include: ["reasoning.encrypted_content"],
     input: "Call record_test for synthetic site contra.com. This records no real data.",
-    tool_choice: { type: "function", name: "record_test" },
+    tool_choice: "auto",
     tools: [{ type: "function", name: "record_test", description: "Synthetic transport test; no side effects.",
       parameters: { type: "object", properties: { domain: { type: "string" } }, required: ["domain"], additionalProperties: false } }] });
   assert.equal(first.status, "completed");
