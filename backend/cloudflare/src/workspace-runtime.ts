@@ -197,5 +197,21 @@ export class WorkspaceRegistry {
       tx.put(key, value); tx.put(this.key(lease), r); return value.receipt;
     });
   }
+  /** Trusted upgrade controller only: a fresh verified checkpoint and exact fence precede an image change. */
+  async changeStoppedImage(actor:WorkspaceIdentity,owner:WorkspaceIdentity,request:{operationId:string;fenceOperationId:string;sourceImage:string;targetImage:string;generation:number;expectedRevision:number;checkpointId:string}):Promise<WorkspaceBinding>{
+    assertOwner(actor,owner);this.operationId(request.operationId);this.operationId(request.fenceOperationId);
+    if(!/@sha256:[a-f0-9]{64}$/.test(request.targetImage)||request.targetImage===request.sourceImage)throw Error('INVALID_IMAGE_UPGRADE');
+    const key=`image-change/${ownerKey(owner)}/${request.operationId}`,fingerprint=JSON.stringify(request);
+    return this.storage.transaction(tx=>{
+      const prior=tx.get<{fingerprint:string}>(key),r=this.record(tx,owner);
+      if(prior){if(prior.fingerprint!==fingerprint)throw Error('IDEMPOTENCY_CONFLICT');return r.binding;}
+      const proof=tx.get<RuntimeFenceEvidence>(`fence/${ownerKey(owner)}/${request.fenceOperationId}`);
+      if(r.pending||r.lease||r.binding.lifecycleState!=='stopped'||r.binding.runtimeId!==null||r.binding.providerRuntimeId!==null||r.binding.generation!==request.generation||r.binding.revision!==request.expectedRevision||r.binding.desiredImageDigest!==request.sourceImage||r.binding.recoveryPoint?.checkpointId!==request.checkpointId)throw Error('IMAGE_UPGRADE_PRECONDITION');
+      if(!proof||proof.previousGeneration!==request.generation||proof.previousIncarnation!==r.binding.incarnation||proof.browserRetired!==true||r.completed['op:'+request.fenceOperationId]?.kind!=='fence')throw Error('FENCE_UNCONFIRMED');
+      assertOwner(owner,proof);
+      r.binding={...r.binding,desiredImageDigest:request.targetImage,revision:r.binding.revision+1};
+      tx.put(key,{fingerprint});tx.put(this.key(owner),r);return r.binding;
+    });
+  }
   private operationId(id: string) { if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('INVALID_OPERATION_ID'); }
 }

@@ -1,3 +1,5 @@
+import {imagePolicy,lockedUpgrade,restoreAuthorized,fenceIntent} from './workspace-image-policy.ts';
+import {createWorkspaceImageUpgrade} from './workspace-image-upgrade.ts';
 import type { Env } from './env.ts';
 import type { WorkspaceIdentity, RuntimeLease } from './workspace-contract.ts';
 import type { WorkspaceSqlStorage } from './workspace-runtime.ts';
@@ -19,12 +21,15 @@ export interface WorkspaceExecutionOptions {
   loadTask(id:string):any;
   projectTask(task:any):void;
   denyFetcher?:Fetcher;
+  assertLifecycleIdle?:()=>void;
 }
 /** Installed once per verified owner DO. All tools stay behind this private broker. */
 export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   const {owner,env,storage}=options;
   if (!env.WORKSPACE_CHECKPOINTS || !env.HYGGE_WORKSPACE_IMAGE || !env.HYGGE_WORKSPACE_NAMESPACE || !options.container) throw new Error('WORKSPACE_DEPLOYMENT_BINDINGS_REQUIRED');
   const objects=r2WorkspaceObjects(env.WORKSPACE_CHECKPOINTS);
+  const policy=imagePolicy(env.HYGGE_WORKSPACE_UPGRADE_POLICY,env.HYGGE_WORKSPACE_IMAGE);
+  const allowedImages=policy?[policy.sourceImage,policy.targetImage]:[];
   let initialized:Promise<void>|undefined;
   const lineagePins=new Map<string,RuntimeLease>();
   function assertLineage(expected:RuntimeLease,current:RuntimeLease){
@@ -40,6 +45,7 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   let foundation:ReturnType<typeof createWorkspaceFoundation>;
   // The registry is authoritative even when the container/DO process restarts.
   async function ensure() {
+    if(lockedUpgrade(foundation.persistence))throw Error('IMAGE_UPGRADE_IN_PROGRESS');
     await (initialized ??= initialize().catch(error=>{initialized=undefined;throw error;}));
     const binding=await foundation.registry.ensure(owner,owner,'initial_start');
     if (binding.lifecycleState!=='ready') throw new Error('WORKSPACE_NOT_READY');
@@ -49,6 +55,7 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     else if (Date.parse(lease.expiresAt)-Date.now()<60_000) await foundation.registry.heartbeat(owner,lease);
   }
   const bridge=createContainerWorkspace({owner,container:options.container,image:env.HYGGE_WORKSPACE_IMAGE,denyFetcher:options.denyFetcher ?? env.SELF,
+    allowedImages,fenceIntent:{read:id=>fenceIntent(foundation.persistence).read(id),record:(id,b)=>fenceIntent(foundation.persistence).record(id,b)},
     rpcSecret:workspaceSecret(storage,'container-rpc'),objects,namespaceId:env.HYGGE_WORKSPACE_NAMESPACE,
     providerWorkspaceId:owner.workspaceId,getLease:async()=>{await ensure();const lease=await foundation.registry.readLease(owner,owner);for(const pin of lineagePins.values())assertSameIncarnation(pin,lease);return lease;}});
   const rules=reviewedCompletionRules(env.HYGGE_WORKSPACE_POSTCONDITIONS);
@@ -68,6 +75,37 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       const verification=input.verification;
       const proof=foundation.persistence.get<any>('runner_evidence',verification.evidenceRef)?.value;
       return !!proof && proof.policyVersion===verification.policyVersion && proof.verified===true && proof.runId===run.runId && proof.taskId===run.taskId;
+    },
+  });
+  let upgradeFoundation:ReturnType<typeof createWorkspaceFoundation>;
+  const upgradeBridge=createContainerWorkspace({owner,container:options.container,image:env.HYGGE_WORKSPACE_IMAGE,allowedImages,
+    denyFetcher:options.denyFetcher??env.SELF,rpcSecret:workspaceSecret(storage,'container-rpc'),objects,
+    namespaceId:env.HYGGE_WORKSPACE_NAMESPACE,providerWorkspaceId:owner.workspaceId,
+    authorizeRestore:(point,image,binding)=>restoreAuthorized(foundation.persistence,point,image,binding),
+    fenceIntent:fenceIntent(foundation.persistence),
+    getLease:()=>upgradeFoundation.registry.readLease(owner,owner),
+  });
+  upgradeFoundation=createWorkspaceFoundation({owner,storage,objects,signingKey:workspaceSecret(storage,'capability'),
+    provider:upgradeBridge.provider,captureDriver:upgradeBridge.captureDriver,captureLimits:{maxEntries:8192,maxBytes:16*1024*1024},leaseDurationMs:300_000,
+    consent:{assertDispatchAllowed(){throw Error('LIFECYCLE_ACTION_FORBIDDEN');}},verifyOutcome:async()=>false,verifyCompletion:async()=>false,
+  });
+  const upgrade=createWorkspaceImageUpgrade({foundation:upgradeFoundation,bridge:upgradeBridge,policy,
+    assertIdle(){
+      if(!options.assertLifecycleIdle)throw Error('LIFECYCLE_IDLE_PROOF_REQUIRED');
+      options.assertLifecycleIdle();
+      if(foundation.persistence.get('runner_owner','active')||lineagePins.size)throw Error('WORKSPACE_ADMISSION_BUSY');
+    },
+    async capture(writeId){
+      const old=await upgradeFoundation.registry.saved(owner,owner,writeId);if(old)return upgradeFoundation.verifyDurability(old.receipt.receiptId);
+      let binding=await upgradeFoundation.registry.read(owner,owner);await upgradeBridge.attach(binding);
+      let lease=await upgradeFoundation.registry.readLease(owner,owner);
+      if(Date.parse(lease.expiresAt)<=Date.now())await upgradeFoundation.registry.reattachVerified(owner,owner,binding.revision,b=>upgradeBridge.attach(b));
+      else if(Date.parse(lease.expiresAt)-Date.now()<120_000)await upgradeFoundation.registry.heartbeat(owner,lease);
+      lease=await upgradeFoundation.registry.readLease(owner,owner);
+      const status=await upgradeBridge.status();binding=await upgradeFoundation.registry.read(owner,owner);
+      return upgradeFoundation.save(await upgradeFoundation.broker.issue(['workspace.commit'],{},lease),{
+        writeId,expectedRegistryRevision:binding.revision,filesystemRevision:status.nextFilesystemRevision,browserProfileRevision:status.nextBrowserProfileRevision,artifactRefs:await upgradeBridge.listArtifacts(),
+      });
     },
   });
   async function initialize() {
@@ -143,12 +181,13 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       return !!proof && proof.reviewedBy===owner.userId && proof.taskId===input.taskId && proof.effectId===input.effectId && proof.status===input.status && !!proof.currentSnapshot;
     },
   });
-  return {browser:bridge.browser,foundation,skills,runner,ensure,
+  return {browser:bridge.browser,foundation,skills,runner,ensure,upgrade,
     async saveDocument(path:string,revision:number,bytes:Uint8Array){
       await ensure();
       return runner.withWorkspaceMutation('document-save',async lease=>{
         const pin=crypto.randomUUID();lineagePins.set(pin,lease);
         try{
+          if((await bridge.status()).artifactProtocolVersion!==1)throw Error('ARTIFACT_PROTOCOL_UPGRADE_REQUIRED');
           const ref=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_${revision}`;
           await bridge.writeArtifact(ref,bytes);
           return await save({expectedLease:lease,task:{id:'document-save',kind:'discover',target_url:'https://invalid.example',status:'running'},runId:'document-save',reason:'pause',evidence:[],requiresBrowserFreeze:true});
@@ -160,6 +199,7 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       return runner.withWorkspaceMutation('document-delete',async lease=>{
         const pin=crypto.randomUUID();lineagePins.set(pin,lease);
         try{
+          if((await bridge.status()).artifactProtocolVersion!==1)throw Error('ARTIFACT_PROTOCOL_UPGRADE_REQUIRED');
           const prefix=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_`;
           await bridge.deleteDocumentArtifacts(prefix,throughRevision);
           return await save({expectedLease:lease,task:{id:'document-delete',kind:'discover',target_url:'https://invalid.example',status:'running'},runId:'document-delete',reason:'pause',evidence:[],requiresBrowserFreeze:true});

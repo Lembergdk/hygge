@@ -1,0 +1,38 @@
+name: Verify workspace image upgrade
+on:
+  workflow_dispatch:
+    inputs:
+      source_image:
+        description: Exact previous Hygge registry digest
+        required: true
+        type: string
+      target_image:
+        description: Exact candidate Hygge registry digest
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  image-pair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend/cloudflare
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SOURCE_IMAGE: ${{ inputs.source_image }}
+      TARGET_IMAGE: ${{ inputs.target_image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Pull exact images and prove isolated upgrade and latest-state rollback
+        run: node container/scripts/registry-image-proof.mjs "$SOURCE_IMAGE" "$TARGET_IMAGE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace-image-upgrade-proof
+          path: backend/cloudflare/workspace-image-upgrade-proof.json

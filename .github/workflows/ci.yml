@@ -64,7 +64,7 @@ jobs:
         timeout-minutes: 10
         run: |
           docker build --platform linux/amd64 -f container/Dockerfile -t hygge-workspace:ci .
-          docker run --rm --network none --entrypoint node hygge-workspace:ci --experimental-strip-types --input-type=module - < container/scripts/image-smoke.mjs
+          docker run --rm -i --network none --entrypoint node hygge-workspace:ci --experimental-strip-types --input-type=module - < container/scripts/image-smoke.mjs
       - name: Retained-container artifact and RPC tests
         timeout-minutes: 10
         run: npm --prefix container test

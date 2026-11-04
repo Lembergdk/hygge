@@ -30,6 +30,7 @@ export interface Env {
   SELF?: Fetcher;
   HYGGE_WORKSPACE_IMAGE?: string; // immutable image@sha256 reference
   HYGGE_WORKSPACE_NAMESPACE?: string;
+  HYGGE_WORKSPACE_UPGRADE_POLICY?: string; // reviewed image pair and explicit canary owners only
   HYGGE_SKILL_REGISTRY?: string; // reviewed configuration, never request/model input
   HYGGE_WORKSPACE_POSTCONDITIONS?: string; // reviewed observable completion rules
   HYGGE_MAINTAINER_SECRET?: string; // secret; shared-skill quarantine authority when set

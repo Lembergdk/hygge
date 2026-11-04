@@ -430,6 +430,9 @@ export class UserSandbox extends DurableObject<Env> {
       env:this.env,storage:this.ctx.storage,container:this.ctx.container!,
       loadTask:id=>this.loadTask(id),projectTask:task=>{this.saveTask(task);recordWorkspaceTaskOutcome(this.chatStore(),task);},
       denyFetcher:(this.ctx as any).exports?.OutboundDeny?.({props:{}}) as Fetcher,
+      assertLifecycleIdle:()=>{
+        if(this.ownerRequests!==1||this.lifecycleBackground||this.cleanupTask||this.activeMissions.size||this.browserResumes.size||this.chatStore().meta().activeTurn)throw Error('WORKSPACE_BUSY');
+      },
     });
   }
 
@@ -1990,17 +1993,21 @@ export class UserSandbox extends DurableObject<Env> {
   private scheduleChatCleanup() {
     if(this.cleanupTask)return;
     this.cleanupTask=(async()=>{
+      if(workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2'&&this.workspace().upgrade.locked()){await this.ctx.storage.setAlarm(Date.now()+300_000);return;}
       const agent=this.chatAgent();await agent.cleanup();
       if(agent.store.state().cleanupPending)await this.ctx.storage.setAlarm(Date.now()+300_000);
     })().finally(()=>{this.cleanupTask=undefined;});
     this.ctx.waitUntil(this.cleanupTask);
   }
   async alarm() {
-    const row=[...this.ctx.storage.sql.exec('SELECT user_id FROM workspace_owner WHERE id=1')][0];
-    if(!row)return;this.userId=String(row.user_id);
-    if(this.cleanupTask)await this.cleanupTask;
-    else await this.chatAgent().cleanup();
-    if(this.chatStore().state().cleanupPending)await this.ctx.storage.setAlarm(Date.now()+3600_000);
+    this.lifecycleBackground++;
+    try{
+      const row=[...this.ctx.storage.sql.exec('SELECT user_id FROM workspace_owner WHERE id=1')][0];
+      if(!row)return;this.userId=String(row.user_id);
+      if(workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2'&&this.workspace().upgrade.locked()){await this.ctx.storage.setAlarm(Date.now()+300_000);return;}
+      if(this.cleanupTask)await this.cleanupTask;else await this.chatAgent().cleanup();
+      if(this.chatStore().state().cleanupPending)await this.ctx.storage.setAlarm(Date.now()+3600_000);
+    }finally{this.lifecycleBackground--;}
   }
   private async chatExclusive<T>(work:()=>Promise<T>):Promise<T> {
     const before=this.chatQueue;let release!:()=>void;this.chatQueue=new Promise<void>(r=>{release=r;});
@@ -2019,7 +2026,13 @@ export class UserSandbox extends DurableObject<Env> {
     };
   }
 
-  async fetch(request: Request): Promise<Response> {
+  private ownerRequests=0;
+  private lifecycleBackground=0;
+  async fetch(request:Request):Promise<Response>{
+    this.ownerRequests++;
+    try{return await this.fetchOwner(request);}finally{this.ownerRequests--;}
+  }
+  private async fetchOwner(request: Request): Promise<Response> {
     const verifiedUser = request.headers.get('x-hygge-user-id');
     if (!verifiedUser) return json({error:'Verified owner required'},403);
     try {
@@ -2037,6 +2050,8 @@ export class UserSandbox extends DurableObject<Env> {
     const url = new URL(request.url);
     const path = url.pathname;
     const parts = path.split("/").filter(Boolean);
+    const upgradeRoute=path==='/sandbox/upgrade';
+    if(workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2'&&this.workspace().upgrade.locked()&&!upgradeRoute)return json({error:'IMAGE_UPGRADE_IN_PROGRESS'},503);
     // Handle the bounded binary body before the generic JSON parser.
     if (path === "/profile/photo") return handleProfilePhoto(request, this.profilePhotoStore());
     let body:any={};
@@ -2049,6 +2064,16 @@ export class UserSandbox extends DurableObject<Env> {
     }
 
     try {
+      if(upgradeRoute){
+        if(workspaceMode(this.env.HYGGE_WORKSPACE_MODE)!=='retained-v2')return json({error:'retained-v2 required'},409);
+        const workspace=this.workspace();
+        if(request.method==='GET'){
+          let binding=null;try{binding=await workspace.foundation.registry.read(workspace.foundation.persistence.owner,workspace.foundation.persistence.owner);}catch(error){if((error as Error).message!=='WORKSPACE_NOT_INITIALIZED')throw error;}
+          return json({binding,upgrade:workspace.upgrade.status()});
+        }
+        if(request.method==='POST')return json(await workspace.upgrade.run(body));
+        return json({error:'Method not allowed'},405);
+      }
       // New clients use one reasoning/tool loop. Legacy intent/onboarding routes remain isolated.
       if(parts[0]==='chat') {
         const agent=this.chatAgent();

@@ -2,6 +2,7 @@ import type {WorkspaceIdentity,WorkspaceBinding,RuntimeLease,RecoveryPoint,Runti
 import type {RuntimeProvider,RuntimeStart} from './workspace-runtime.ts';
 import type {PrivateObjectStore,NativeCaptureDriver,CaptureWrite,NativeCapture} from './workspace-capture.ts';
 import {assertOwner,ownerKey} from './workspace-runtime.ts';
+import {fenceIdentity} from './workspace-image-policy.ts';
 import {WorkspaceBrowser} from './workspace-browser.ts';
 import {signRpc,digest,b64,unb64,validateTree,CHUNK_BYTES,RPC_MAX_BYTES,type ContainerIdentity,type TreeMetadata} from './workspace-container-protocol.ts';
 export interface WorkspaceContainer {
@@ -15,6 +16,10 @@ export interface WorkspaceContainer {
 }
 export interface ContainerWorkspaceOptions {
  owner:WorkspaceIdentity;container:WorkspaceContainer;image:string;rpcSecret:Uint8Array;objects:PrivateObjectStore;
+ /** Trusted deployment configuration and persisted migration grant, never request/model supplied images. */
+ allowedImages?:readonly string[];
+ authorizeRestore?:(point:RecoveryPoint,sourceImage:string,target:WorkspaceBinding)=>boolean;
+ fenceIntent?:{read(id:string):WorkspaceBinding|null;record(id:string,binding:WorkspaceBinding):void};
  namespaceId:string;providerWorkspaceId:string;getLease:()=>Promise<RuntimeLease>;now?:()=>number;
  /** Real service-binding Fetcher that receives (and thus blocks) private-range outbound HTTP. */
  denyFetcher?:Fetcher;
@@ -25,6 +30,8 @@ interface Manifest extends TreeMetadata,WorkspaceIdentity {schemaVersion:number;
 export function createContainerWorkspace(options:ContainerWorkspaceOptions){
  const owner=Object.freeze(structuredClone(options.owner));assertOwner(owner,owner);const secret=Uint8Array.from(options.rpcSecret);if(secret.length<32||!options.namespaceId||!options.providerWorkspaceId||!options.image||!/@sha256:[a-f0-9]{64}$/.test(options.image))throw Error('PINNED_HYGGE_IMAGE_AND_RPC_KEY_REQUIRED');
  async function boundedResponse(response:Response):Promise<string>{if(Number(response.headers.get('content-length')??0)>RPC_MAX_BYTES)throw Error('RPC_RESPONSE_LIMIT');if(!response.body)return '';const reader=response.body.getReader();const decoder=new TextDecoder();let total=0,text='';try{while(true){const part=await reader.read();if(part.done)break;total+=part.value.byteLength;if(total>RPC_MAX_BYTES){await reader.cancel();throw Error('RPC_RESPONSE_LIMIT');}text+=decoder.decode(part.value,{stream:true});}return text+decoder.decode();}finally{reader.releaseLock();}}
+ const allowedImages=new Set([options.image,...(options.allowedImages??[])]);
+ for(const image of allowedImages)if(!/@sha256:[a-f0-9]{64}$/.test(image))throw Error('PINNED_IMAGE_REQUIRED');
  const now=options.now??Date.now;let active:ContainerIdentity|null=null;
  const prefix=`hygge-workspaces/v1/${ownerKey(owner)}`;
  function assertActive(expected:ContainerIdentity){assertOwner(owner,expected);if(!active||active.incarnation!==expected.incarnation||active.generation!==expected.generation)throw Error('STALE_GENERATION');}
@@ -46,22 +53,69 @@ export function createContainerWorkspace(options:ContainerWorkspaceOptions){
   }catch(error){if(error instanceof Error&&error.name==='TimeoutError')throw Error('CONTAINER_RPC_TIMEOUT');throw error;}
  }
  async function call<T>(op:string,args:Record<string,unknown>={}):Promise<T>{const lease=await current();const expected=Object.freeze({...owner,incarnation:lease.incarnation,generation:lease.generation});return raw(op,args,Date.parse(lease.expiresAt),expected);}
- async function recovery(point:RecoveryPoint):Promise<{manifest:Manifest;bytes:Map<string,Uint8Array>}>{assertOwner(owner,point);if(point.storage!=='r2'||point.checkpointId!==point.manifestHash||!/[a-f0-9]{64}/.test(point.manifestHash))throw Error('INVALID_RECOVERY_POINT');const data=await options.objects.get(`${prefix}/manifests/${point.manifestHash}`);if(!data||await digest(data)!==point.manifestHash)throw Error('MANIFEST_VERIFICATION_FAILED');const m=JSON.parse(new TextDecoder().decode(data))as Manifest;assertOwner(owner,m);validateTree(m);if(m.schemaVersion!==1||m.incarnation!==point.sourceIncarnation||m.generation!==point.sourceGeneration||m.sequence!==point.sequence||m.imageDigest!==options.image)throw Error('RECOVERY_IMAGE_OR_LINEAGE_MISMATCH');const bytes=new Map<string,Uint8Array>();for(const f of m.files){const b=await options.objects.get(`${prefix}/blobs/${f.hash}`);if(!b||b.length!==f.size||await digest(b)!==f.hash)throw Error('RESTORE_INTEGRITY');bytes.set(f.path,b);}return{manifest:m,bytes};}
+ async function recovery(point:RecoveryPoint,image:string,target?:WorkspaceBinding):Promise<{manifest:Manifest;bytes:Map<string,Uint8Array>}>{
+  assertOwner(owner,point);
+  if(!allowedImages.has(image)||point.storage!=='r2'||point.checkpointId!==point.manifestHash||!/^[a-f0-9]{64}$/.test(point.manifestHash))throw Error('INVALID_RECOVERY_POINT');
+  const data=await options.objects.get(`${prefix}/manifests/${point.manifestHash}`);
+  if(!data||await digest(data)!==point.manifestHash)throw Error('MANIFEST_VERIFICATION_FAILED');
+  const m=JSON.parse(new TextDecoder().decode(data))as Manifest;assertOwner(owner,m);validateTree(m);
+  if(m.schemaVersion!==1||m.incarnation!==point.sourceIncarnation||m.generation!==point.sourceGeneration||m.sequence!==point.sequence)throw Error('RECOVERY_IMAGE_OR_LINEAGE_MISMATCH');
+  if(m.imageDigest!==image&&(!target||!options.authorizeRestore?.(point,m.imageDigest,target)))throw Error('RECOVERY_IMAGE_OR_LINEAGE_MISMATCH');
+  const bytes=new Map<string,Uint8Array>();
+  for(const f of m.files){const b=await options.objects.get(`${prefix}/blobs/${f.hash}`);if(!b||b.length!==f.size||await digest(b)!==f.hash)throw Error('RESTORE_INTEGRITY');bytes.set(f.path,b);}
+  return{manifest:m,bytes};
+ }
  async function attach(binding:WorkspaceBinding){
   assertOwner(owner,binding);
-  if(binding.provider!=='cloudflare'||binding.namespaceId!==options.namespaceId||binding.providerWorkspaceId!==options.providerWorkspaceId||binding.desiredImageDigest!==options.image||binding.lifecycleState!=='ready'||!binding.runtimeId||binding.providerRuntimeId!==binding.incarnation)throw Error('PLACEMENT_OR_INCARNATION_MISMATCH');
+  if(binding.provider!=='cloudflare'||binding.namespaceId!==options.namespaceId||binding.providerWorkspaceId!==options.providerWorkspaceId||!allowedImages.has(binding.desiredImageDigest)||binding.lifecycleState!=='ready'||!binding.runtimeId||binding.providerRuntimeId!==binding.incarnation)throw Error('PLACEMENT_OR_INCARNATION_MISMATCH');
   const info=await options.container.inspect();const ownerHash=(await digest(new TextEncoder().encode(ownerKey(owner)))).slice(0,32);
-  if(!info||info.image!==options.image||info.labels.owner!==ownerHash||info.labels.incarnation!==binding.incarnation||info.labels.generation!==String(binding.generation))throw Error('EXACT_INCARNATION_MISMATCH');
+  if(!info||info.image!==binding.desiredImageDigest||info.labels.owner!==ownerHash||info.labels.incarnation!==binding.incarnation||info.labels.generation!==String(binding.generation))throw Error('EXACT_INCARNATION_MISMATCH');
   active={...owner,incarnation:binding.incarnation,generation:binding.generation};
   try{const status=await raw('status') as Status;assertOwner(owner,status);if(!status.initialized||status.incarnation!==binding.incarnation||status.generation!==binding.generation)throw Error('EXACT_INCARNATION_MISMATCH');return status;}catch(e){active=null;throw e;}
  }
- const provider:RuntimeProvider={async start(binding:WorkspaceBinding,operationId:string):Promise<RuntimeStart>{assertOwner(owner,binding);if(binding.provider!=='cloudflare'||binding.namespaceId!==options.namespaceId||binding.providerWorkspaceId!==options.providerWorkspaceId||binding.desiredImageDigest!==options.image)throw Error('PLACEMENT_OR_IMAGE_MISMATCH');const ownerHash=(await digest(new TextEncoder().encode(ownerKey(owner)))).slice(0,32);const operationHash=(await digest(new TextEncoder().encode(`${operationId}:${binding.generation}`))).slice(0,32);let info: Awaited<ReturnType<WorkspaceContainer['inspect']>>; try{info=await options.container.inspect();}catch(e){throw new Error(`CONTAINER_INSPECT:${e instanceof Error?e.message:String(e)}`);}
-  if(info){if(info.labels.owner!==ownerHash||info.labels.operation!==operationHash||info.labels.generation!==String(binding.generation)||!info.labels.incarnation||info.image!==options.image)throw Error('EXACT_INCARNATION_MISMATCH');active={...owner,incarnation:info.labels.incarnation,generation:binding.generation};}
-  else{if(!options.denyFetcher||typeof options.denyFetcher.fetch!=='function')throw Error('OUTBOUND_DENY_FETCHER_REQUIRED');active={...owner,incarnation:crypto.randomUUID(),generation:binding.generation};const deny=options.denyFetcher;try{options.container.start({image:options.image,enableInternet:true,instance:'standard-2',env:{HYGGE_IDENTITY:JSON.stringify(active),HYGGE_RPC_SECRET:b64(secret),HOME:'/workspace'},labels:{owner:ownerHash,operation:operationHash,generation:String(binding.generation),incarnation:active.incarnation}});}catch(e){throw new Error(`CONTAINER_START:${e instanceof Error?e.message:String(e)}`);}for(const cidr of ['127.0.0.0/8','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','169.254.0.0/16','0.0.0.0/8','::1/128','fc00::/7','fe80::/10'])await options.container.interceptOutboundHttp(cidr,deny).catch(e=>{throw new Error(`CONTAINER_INTERCEPT:${cidr}:${e instanceof Error?e.message:String(e)}`);});}
+ const provider:RuntimeProvider={async start(binding:WorkspaceBinding,operationId:string):Promise<RuntimeStart>{assertOwner(owner,binding);if(binding.provider!=='cloudflare'||binding.namespaceId!==options.namespaceId||binding.providerWorkspaceId!==options.providerWorkspaceId||!allowedImages.has(binding.desiredImageDigest))throw Error('PLACEMENT_OR_IMAGE_MISMATCH');const ownerHash=(await digest(new TextEncoder().encode(ownerKey(owner)))).slice(0,32);const operationHash=(await digest(new TextEncoder().encode(`${operationId}:${binding.generation}`))).slice(0,32);let info: Awaited<ReturnType<WorkspaceContainer['inspect']>>; try{info=await options.container.inspect();}catch(e){throw new Error(`CONTAINER_INSPECT:${e instanceof Error?e.message:String(e)}`);}
+  if(info){if(info.labels.owner!==ownerHash||info.labels.operation!==operationHash||info.labels.generation!==String(binding.generation)||!info.labels.incarnation||info.image!==binding.desiredImageDigest)throw Error('EXACT_INCARNATION_MISMATCH');active={...owner,incarnation:info.labels.incarnation,generation:binding.generation};}
+  else{if(!options.denyFetcher||typeof options.denyFetcher.fetch!=='function')throw Error('OUTBOUND_DENY_FETCHER_REQUIRED');active={...owner,incarnation:crypto.randomUUID(),generation:binding.generation};const deny=options.denyFetcher;try{options.container.start({image:binding.desiredImageDigest,enableInternet:true,instance:'standard-2',env:{HYGGE_IDENTITY:JSON.stringify(active),HYGGE_RPC_SECRET:b64(secret),HOME:'/workspace'},labels:{owner:ownerHash,operation:operationHash,generation:String(binding.generation),incarnation:active.incarnation}});}catch(e){throw new Error(`CONTAINER_START:${e instanceof Error?e.message:String(e)}`);}for(const cidr of ['127.0.0.0/8','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','169.254.0.0/16','0.0.0.0/8','::1/128','fc00::/7','fe80::/10'])await options.container.interceptOutboundHttp(cidr,deny).catch(e=>{throw new Error(`CONTAINER_INTERCEPT:${cidr}:${e instanceof Error?e.message:String(e)}`);});}
   let status:Status|undefined;let last:unknown;let monitorError:unknown;void options.container.monitor().catch(e=>{monitorError=e;});const startupDeadline=Date.now()+120_000;for(let attempt=0;attempt<120&&Date.now()<startupDeadline;attempt++){if(monitorError)throw new Error(`CONTAINER_MONITOR:${monitorError instanceof Error?monitorError.message:String(monitorError)}`);try{status=await raw('status',{},undefined,undefined,Math.max(1,Math.min(5_000,startupDeadline-Date.now())));break;}catch(e){last=e;await new Promise(r=>setTimeout(r,500));}}if(!status&&monitorError)throw new Error(`CONTAINER_MONITOR:${monitorError instanceof Error?monitorError.message:String(monitorError)}`);if(!status)throw last??Error('CONTAINER_START_TIMEOUT');await options.container.setInactivityTimeout(6*60*60*1000);assertOwner(owner,status);if(status.incarnation!==active.incarnation||status.generation!==binding.generation)throw Error('EXACT_INCARNATION_MISMATCH');
-  if(!status.initialized){if(binding.recoveryPoint){const {manifest:m,bytes}=await recovery(binding.recoveryPoint);await raw('restore.begin',{checkpointId:binding.recoveryPoint.checkpointId,tree:{files:m.files,directories:m.directories,symlinks:m.symlinks,artifacts:m.artifacts}});for(const f of m.files){const b=bytes.get(f.path)!;for(let offset=0;offset<b.length;offset+=CHUNK_BYTES)await raw('restore.chunk',{path:f.path,offset,data:b64(b.subarray(offset,offset+CHUNK_BYTES))});}await raw('restore.finish',{filesystemRevision:m.filesystemRevision,browserProfileRevision:m.browserProfileRevision});}else await raw('initialize',{checkpointId:null});}
+  if(!status.initialized){if(binding.recoveryPoint){const {manifest:m,bytes}=await recovery(binding.recoveryPoint,binding.desiredImageDigest,binding);await raw('restore.begin',{checkpointId:binding.recoveryPoint.checkpointId,tree:{files:m.files,directories:m.directories,symlinks:m.symlinks,artifacts:m.artifacts}});for(const f of m.files){const b=bytes.get(f.path)!;for(let offset=0;offset<b.length;offset+=CHUNK_BYTES)await raw('restore.chunk',{path:f.path,offset,data:b64(b.subarray(offset,offset+CHUNK_BYTES))});}await raw('restore.finish',{filesystemRevision:m.filesystemRevision,browserProfileRevision:m.browserProfileRevision});}else await raw('initialize',{checkpointId:null});}
   status=await raw('status');if(!status!.initialized||status!.recoveredCheckpointId!==(binding.recoveryPoint?.checkpointId??null))throw Error('RESTORE_NOT_VERIFIED');const inspect=await options.container.inspect();if(inspect?.labels.incarnation!==active.incarnation)throw Error('EXACT_INCARNATION_MISMATCH');return{runtimeId:options.providerWorkspaceId,providerRuntimeId:active.incarnation,incarnation:active.incarnation,recoveredCheckpointId:status!.recoveredCheckpointId};},
- async fence(binding:WorkspaceBinding,operationId:string):Promise<RuntimeFenceEvidence>{assertOwner(owner,binding);const info=await options.container.inspect();if(!info||info.labels.incarnation!==binding.incarnation||binding.providerRuntimeId!==binding.incarnation||info.labels.generation!==String(binding.generation))throw Error('FENCE_UNCONFIRMED');await options.container.destroy();await options.container.monitor();if(options.container.running||await options.container.inspect()!==null)throw Error('FENCE_UNCONFIRMED');active=null;return{...owner,provider:'cloudflare',previousRuntimeId:binding.runtimeId!,previousIncarnation:binding.incarnation,previousGeneration:binding.generation,providerRuntimeId:binding.providerRuntimeId!,browserRetired:true,result:'exact_incarnation_stopped',verifiedAt:new Date(now()).toISOString(),providerRequestIds:[`destroy:${operationId}:${binding.incarnation}`]};}};
+ async fence(binding:WorkspaceBinding,operationId:string):Promise<RuntimeFenceEvidence>{
+  assertOwner(owner,binding);
+  if(binding.provider!=='cloudflare'||!allowedImages.has(binding.desiredImageDigest)||binding.namespaceId!==options.namespaceId||binding.providerWorkspaceId!==options.providerWorkspaceId)throw Error('FENCE_UNCONFIRMED');
+  const info=await options.container.inspect(),intent=options.fenceIntent?.read(operationId);
+  if(info){
+   const ownerHash=(await digest(new TextEncoder().encode(ownerKey(owner)))).slice(0,32);
+   if(info.image!==binding.desiredImageDigest||info.labels.owner!==ownerHash||info.labels.incarnation!==binding.incarnation||binding.providerRuntimeId!==binding.incarnation||info.labels.generation!==String(binding.generation))throw Error('FENCE_UNCONFIRMED');
+   options.fenceIntent?.record(operationId,structuredClone(binding));
+   await options.container.destroy();
+  }else{
+   if(!intent||fenceIdentity(intent)!==fenceIdentity(binding)||options.container.running)throw Error('FENCE_UNCONFIRMED');
+  }
+  await options.container.monitor();
+  if(options.container.running||await options.container.inspect()!==null)throw Error('FENCE_UNCONFIRMED');
+  active=null;
+  return{...owner,provider:'cloudflare',previousRuntimeId:binding.runtimeId!,previousIncarnation:binding.incarnation,previousGeneration:binding.generation,providerRuntimeId:binding.providerRuntimeId!,browserRetired:true,result:'exact_incarnation_stopped',verifiedAt:new Date(now()).toISOString(),providerRequestIds:[`destroy:${operationId}:${binding.incarnation}`]};
+ }};
+ /** Retire only an exact, never-leased partial restore. Independent source bytes are verified first. */
+ async function abandonUninitialized(binding:WorkspaceBinding,startOperationId:string){
+  assertOwner(owner,binding);
+  if(binding.provider!=='cloudflare'||binding.lifecycleState!=='starting'||binding.runtimeId!==null||binding.providerRuntimeId!==null||!binding.recoveryPoint||!options.fenceIntent||binding.namespaceId!==options.namespaceId||binding.providerWorkspaceId!==options.providerWorkspaceId)throw Error('UNREADY_RETIREMENT_UNVERIFIED');
+  await recovery(binding.recoveryPoint,binding.desiredImageDigest,binding);
+  const id=`${startOperationId}_partial`,info=await options.container.inspect();
+  if(info){
+   const ownerHash=(await digest(new TextEncoder().encode(ownerKey(owner)))).slice(0,32),operationHash=(await digest(new TextEncoder().encode(`${startOperationId}:${binding.generation}`))).slice(0,32);
+   if(info.image!==binding.desiredImageDigest||info.labels.owner!==ownerHash||info.labels.operation!==operationHash||info.labels.generation!==String(binding.generation)||!info.labels.incarnation)throw Error('UNREADY_RETIREMENT_UNVERIFIED');
+   active={...owner,incarnation:info.labels.incarnation,generation:binding.generation};
+   const status=await raw('status') as Status;
+   if(status.initialized||status.incarnation!==active.incarnation||status.generation!==binding.generation)throw Error('UNREADY_RETIREMENT_UNVERIFIED');
+   options.fenceIntent.record(id,{...binding,runtimeId:options.providerWorkspaceId,providerRuntimeId:active.incarnation,incarnation:active.incarnation});
+   await options.container.destroy();
+  }else{
+   const intent=options.fenceIntent.read(id);
+   if(!intent||fenceIdentity(intent)!==fenceIdentity({...binding,runtimeId:options.providerWorkspaceId,providerRuntimeId:intent.incarnation,incarnation:intent.incarnation})||options.container.running)throw Error('UNREADY_RETIREMENT_UNVERIFIED');
+  }
+  await options.container.monitor();if(options.container.running||await options.container.inspect()!==null)throw Error('UNREADY_RETIREMENT_UNVERIFIED');active=null;
+ }
  const captureDriver:NativeCaptureDriver={async capture(lease:RuntimeLease,request:CaptureWrite){assertOwner(owner,lease);const live=await current();if(live.leaseId!==lease.leaseId)throw Error('STALE_LEASE');const begin=await call<any>('capture.begin',{filesystemRevision:request.filesystemRevision,browserProfileRevision:request.browserProfileRevision});try{validateTree(begin.tree);const files=[];for(const f of begin.tree.files){const bytes=new Uint8Array(f.size);for(let offset=0;offset<f.size;offset+=CHUNK_BYTES){const chunk=await call<{data:string}>('capture.chunk',{captureId:begin.captureId,path:f.path,offset});const b=unb64(chunk.data);if(b.length!==Math.min(CHUNK_BYTES,f.size-offset))throw Error('CAPTURE_CHUNK_MISMATCH');bytes.set(b,offset);}if(await digest(bytes)!==f.hash)throw Error('CAPTURE_INTEGRITY');files.push({path:f.path,mode:f.mode,bytes});}const snapshot:NativeCapture={incarnation:lease.incarnation,generation:lease.generation,filesystemRevision:begin.filesystemRevision,browserProfileRevision:begin.browserProfileRevision,browserState:begin.browserState,files,directories:begin.tree.directories,symlinks:begin.tree.symlinks,artifacts:begin.tree.artifacts};return{snapshot,release:async()=>{await call('capture.release',{captureId:begin.captureId});}};}catch(e){await call('capture.release',{captureId:begin.captureId}).catch(()=>{});throw e;}}};
  const browser=new WorkspaceBrowser({call,async stream(id){const lease=await current();const expected=Object.freeze({...owner,incarnation:lease.incarnation,generation:lease.generation});assertActive(expected);const path=`/live?session=${encodeURIComponent(id)}&expires=${Date.parse(lease.expiresAt)}`;const token=await signRpc(secret,expected,path,'',now());assertActive(expected);return options.container.getTcpPort(8080).fetch(new Request(`http://container${path}`,{headers:{Upgrade:'websocket','x-hygge-rpc':token}}));}});
  async function writeArtifact(ref:string,bytes:Uint8Array){
@@ -94,7 +148,7 @@ export function createContainerWorkspace(options:ContainerWorkspaceOptions){
    return result;
   }catch(error){await transfer('artifact.abort',{uploadId:upload.uploadId}).catch(()=>{});throw error;}
  }
- return{provider,captureDriver,browser,attach,listArtifacts:()=>call<string[]>('artifact.list'),status:()=>call<Status>('status'),writeArtifact,
+ return{provider,captureDriver,browser,attach,abandonUninitialized,verifyRecovery:(point:RecoveryPoint,image:string)=>recovery(point,image),listArtifacts:()=>call<string[]>('artifact.list'),status:()=>call<Status>('status'),writeArtifact,
   async deleteDocumentArtifacts(prefix:string,throughRevision:number){return call('artifact.deleteDocuments',{prefix,throughRevision});},
  };
 }

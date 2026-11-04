@@ -44,3 +44,14 @@ test('multipart transfer cannot continue or abort in a replacement runtime',asyn
  await assert.rejects(f.bridge.writeArtifact('evidence',new Uint8Array(578754)),/STALE_GENERATION/);
  assert.equal(f.calledOps.filter(op=>op==='artifact.chunk').length,1);assert.ok(!f.calledOps.includes('artifact.commit'));assert.ok(!f.calledOps.includes('artifact.abort'));
 });
+
+test('persisted exact fence intent reconciles a lost destroy reply; absent runtimes without intent still fail closed',async()=>{
+ const f=await fixture();let intent:any=null;const original=f.container.destroy;
+ f.container.destroy=async()=>{await original();throw Error('DESTROY_REPLY_LOST');};
+ const bridge=createContainerWorkspace({...f.config,fenceIntent:{read:()=>intent,record:(_id,b)=>{intent=structuredClone(b);}}});await bridge.attach(f.binding);
+ await assert.rejects(bridge.provider.fence(f.binding,'retire'),/REPLY_LOST/);assert.equal(f.container.running,false);
+ const afterReconstruction=createContainerWorkspace({...f.config,fenceIntent:{read:()=>intent,record:()=>{}}});
+ const evidence=await afterReconstruction.provider.fence({...f.binding,revision:f.binding.revision+5,lifecycleState:'fencing'},'retire');assert.equal(evidence.previousIncarnation,f.binding.incarnation);
+ await assert.rejects(createContainerWorkspace(f.config).provider.fence(f.binding,'other'),/FENCE_UNCONFIRMED/);
+ await assert.rejects(afterReconstruction.provider.fence({...f.binding,generation:99},'retire'),/FENCE_UNCONFIRMED/);
+});
