@@ -34,6 +34,9 @@ struct StoreSnapshot: Codable {
     var proposals: [ProposedSite]
     var accountStates: [String: SiteAccountState]
     var chatTranscript: [ChatEntry]
+    var pendingConversationMessageID: UUID? = nil
+    var pendingConversationGeneration: String? = nil
+    var conversationNeedsReconciliation: Bool = false
     var activityEvents: [ActivityEvent]
     var isPaused: Bool
     var lastVisitAt: Date?
@@ -62,6 +65,9 @@ struct StoreSnapshot: Codable {
         proposals = try c.decodeIfPresent([ProposedSite].self, forKey: .proposals) ?? []
         accountStates = try c.decodeIfPresent([String: SiteAccountState].self, forKey: .accountStates) ?? [:]
         chatTranscript = try c.decodeIfPresent([ChatEntry].self, forKey: .chatTranscript) ?? []
+        pendingConversationMessageID = try c.decodeIfPresent(UUID.self, forKey: .pendingConversationMessageID)
+        pendingConversationGeneration = try c.decodeIfPresent(String.self, forKey: .pendingConversationGeneration)
+        conversationNeedsReconciliation = try c.decodeIfPresent(Bool.self, forKey: .conversationNeedsReconciliation) ?? false
         activityEvents = try c.decodeIfPresent([ActivityEvent].self, forKey: .activityEvents) ?? []
         isPaused = try c.decodeIfPresent(Bool.self, forKey: .isPaused) ?? false
         lastVisitAt = try c.decodeIfPresent(Date.self, forKey: .lastVisitAt)
@@ -105,6 +111,9 @@ final class AppStore {
     var proposals: [ProposedSite] = []
     var accountStates: [String: SiteAccountState] = [:]
     var chatTranscript: [ChatEntry] = []
+    private(set) var pendingConversationMessageID: UUID?
+    private(set) var conversationNeedsReconciliation = false
+    private(set) var pendingConversationGeneration: String?
     /// When the user last actually read the thread, on this
     /// device. Drives the flame badge — which must only promise
     /// what opening the chat can resolve.
@@ -1370,6 +1379,9 @@ final class AppStore {
         proposals = []
         accountStates = [:]
         chatTranscript = []
+        pendingConversationMessageID = nil
+        pendingConversationGeneration = nil
+        conversationNeedsReconciliation = false
         activityEvents = []
         beliefs = BeliefBook()
         searchEvidence = []
@@ -1389,8 +1401,32 @@ final class AppStore {
 
     // MARK: - Thread, journal, insights, site control
 
-    func appendChat(fromAgent: Bool, text: String, context: ChatContextRef? = nil) {
-        chatTranscript.append(ChatEntry(fromAgent: fromAgent, text: text, context: context))
+    func saveConversationOutbox(messageID: UUID?, generation: String? = nil) {
+        pendingConversationMessageID = messageID
+        pendingConversationGeneration = generation
+        writeCache()
+    }
+
+    /// Fence full-cache imports until the agent's canonical mutations have been pulled.
+    func beginConversationRequest() async {
+        let pendingPush = pushTask
+        pushTask?.cancel()
+        await pendingPush?.value
+        if !conversationNeedsReconciliation { await pushStateNow() }
+        pushTask?.cancel()
+        conversationNeedsReconciliation = true
+        writeCache()
+    }
+
+    func appendConversationMessage(fromAgent: Bool, text: String, context: ChatContextRef? = nil, id: UUID = UUID()) {
+        guard !chatTranscript.contains(where: { $0.id == id }) else { return }
+        chatTranscript.append(ChatEntry(id: id, fromAgent: fromAgent, text: text, context: context))
+        writeCache()
+    }
+
+    func appendChat(fromAgent: Bool, text: String, context: ChatContextRef? = nil, id: UUID = UUID()) {
+        guard !chatTranscript.contains(where: { $0.id == id }) else { return }
+        chatTranscript.append(ChatEntry(id: id, fromAgent: fromAgent, text: text, context: context))
         save()
     }
 
@@ -1902,7 +1938,7 @@ final class AppStore {
                      lastVisitAt: lastVisitAt, sites: sites, siteMemory: siteMemory,
                      credentialRefs: credentialRefs, opportunities: opportunities, tasks: tasks,
                      applications: applications, proposals: proposals, accountStates: accountStates,
-                     chatTranscript: chatTranscript, activityEvents: activityEvents,
+                     chatTranscript: chatTranscript.filter { $0.id != pendingConversationMessageID }, activityEvents: activityEvents,
                      beliefs: beliefs, searchEvidence: searchEvidence,
                      feedbackEvents: feedbackEvents)
     }
@@ -1968,15 +2004,16 @@ final class AppStore {
     /// Foreground/launch pull: reconcile durable tasks and chat requests;
     /// calls currently in flight on this device keep their local ownership.
     @discardableResult
-    func pullFromServer() async -> Bool {
+    func pullFromServer(reconcilingConversation: Bool = false) async -> Bool {
         guard isBackendFirst, !isSyncing else { return false }
         isSyncing = true
         defer { isSyncing = false }
-        if pendingProfileEdit { await pushStateNow() }
+        if pendingProfileEdit && !conversationNeedsReconciliation { await pushStateNow() }
         let revisionBeforePull = profileEditRevision
         guard let export = try? await backend.exportState() else { return false }
         guard revisionBeforePull == profileEditRevision else { return false }
         applyServerExport(export)
+        if reconcilingConversation { conversationNeedsReconciliation = false }
         if let remoteRows = try? await backend.setupTaskRows() {
             for row in remoteRows where !runningTaskIDs.contains(row.task.id) {
                 let task = row.task
@@ -2029,7 +2066,9 @@ final class AppStore {
             let localDemo = opportunities.filter { $0.isDemo && !serverIDs.contains($0.id.uuidString.lowercased()) }
             opportunities = serverOpportunities + localDemo
         }
+        let unsent = chatTranscript.first { $0.id == pendingConversationMessageID }
         chatTranscript = export.messages.map(\.data).sorted { $0.createdAt < $1.createdAt }
+        if let unsent, !chatTranscript.contains(where: { $0.id == unsent.id }) { chatTranscript.append(unsent) }
         applications = export.applications.map(\.data)
         proposals = export.proposals.map(\.data)
         accountStates = export.accountStates
@@ -2055,7 +2094,7 @@ final class AppStore {
     }
 
     private func schedulePush() {
-        guard isBackendFirst else { return }
+        guard isBackendFirst, !conversationNeedsReconciliation, pendingConversationMessageID == nil else { return }
         pushTask?.cancel()
         pushTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -2065,6 +2104,7 @@ final class AppStore {
     }
 
     private func pushStateNow() async {
+        guard isBackendFirst, !conversationNeedsReconciliation, pendingConversationMessageID == nil else { return }
         let revision = profileEditRevision
         do {
             let result = try await backend.importState(currentImport())
@@ -2210,6 +2250,9 @@ final class AppStore {
         snapshot.profilePhotoNeedsUpload = profilePhotoNeedsUpload
         snapshot.profilePhotoIsLegacy = profilePhotoIsLegacy
         snapshot.pendingProfileEdit = pendingProfileEdit
+        snapshot.pendingConversationMessageID = pendingConversationMessageID
+        snapshot.pendingConversationGeneration = pendingConversationGeneration
+        snapshot.conversationNeedsReconciliation = conversationNeedsReconciliation
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)
@@ -2234,6 +2277,9 @@ final class AppStore {
         proposals = snapshot.proposals
         accountStates = snapshot.accountStates
         chatTranscript = snapshot.chatTranscript
+        pendingConversationMessageID = snapshot.pendingConversationMessageID
+        pendingConversationGeneration = snapshot.pendingConversationGeneration
+        conversationNeedsReconciliation = snapshot.conversationNeedsReconciliation
         // First run after the badge learned to count unread: treat
         // history as read rather than badging the whole past.
         if UserDefaults.standard.object(forKey: "hygge.chatLastReadAt") == nil { markChatRead() }
