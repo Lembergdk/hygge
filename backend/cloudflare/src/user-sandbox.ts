@@ -111,6 +111,8 @@ type UserBrowser = BrowserRunBrowser | WorkspaceBrowser;
 export class UserSandbox extends DurableObject<Env> {
   private queue: Promise<unknown> = Promise.resolve();
   private userId: string | null = null;
+  private ownerRequests=0;
+  private ownerChatWork=0;
   /// One browser for the life of this object: sessions must survive
   /// across requests, or human takeover and post-check resume have
   /// nothing to return to.
@@ -435,6 +437,7 @@ export class UserSandbox extends DurableObject<Env> {
   private workspace(): WorkspaceExecution {
     if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)!=='retained-v2' || !this.userId) throw new Error('WORKSPACE_MODE_REQUIRED');
     return this.workspaceExecution ??= createWorkspaceExecution({
+      assertOwnerIdle:()=>{if(this.ownerRequests>1||this.ownerChatWork||this.cleanupTask||this.activeMissions.size||this.browserResumes.size)throw Error('WORKSPACE_OWNER_BUSY');},
       owner:bindWorkspaceOwner(this.ctx.storage,this.userId,this.env.HYGGE_ENV,this.ctx.id.toString()),
       env:this.env,storage:this.ctx.storage,container:this.ctx.container!,
       loadTask:id=>this.loadTask(id),projectTask:task=>{this.saveTask(task);recordWorkspaceTaskOutcome(this.chatStore(),task);},
@@ -2007,6 +2010,7 @@ export class UserSandbox extends DurableObject<Env> {
   private cleanupTask?:Promise<void>;
   private scheduleChatCleanup() {
     if(this.cleanupTask)return;
+    if(this.workspaceExecution?.imageUpgrade.locked()){void this.ctx.storage.setAlarm(Date.now()+300_000);return;}
     this.cleanupTask=(async()=>{
       const agent=this.chatAgent();await agent.cleanup();
       if(agent.store.state().cleanupPending)await this.ctx.storage.setAlarm(Date.now()+300_000);
@@ -2016,13 +2020,15 @@ export class UserSandbox extends DurableObject<Env> {
   async alarm() {
     const row=[...this.ctx.storage.sql.exec('SELECT user_id FROM workspace_owner WHERE id=1')][0];
     if(!row)return;this.userId=String(row.user_id);
+    if(workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2'&&this.workspace().imageUpgrade.locked()){await this.ctx.storage.setAlarm(Date.now()+300_000);return;}
     if(this.cleanupTask)await this.cleanupTask;
-    else await this.chatAgent().cleanup();
+    else await this.chatExclusive(()=>this.chatAgent().cleanup());
     if(this.chatStore().state().cleanupPending)await this.ctx.storage.setAlarm(Date.now()+3600_000);
   }
   private async chatExclusive<T>(work:()=>Promise<T>):Promise<T> {
+    this.ownerChatWork++;
     const before=this.chatQueue;let release!:()=>void;this.chatQueue=new Promise<void>(r=>{release=r;});
-    await before;try{return await work();}finally{release();}
+    await before;try{return await work();}finally{release();this.ownerChatWork--;}
   }
 
   private profilePhotoStore(): ProfilePhotoStore {
@@ -2037,7 +2043,10 @@ export class UserSandbox extends DurableObject<Env> {
     };
   }
 
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request:Request):Promise<Response>{
+    this.ownerRequests++;try{return await this.handleOwnerRequest(request);}finally{this.ownerRequests--;}
+  }
+  private async handleOwnerRequest(request: Request): Promise<Response> {
     const verifiedUser = request.headers.get('x-hygge-user-id');
     if (!verifiedUser) return json({error:'Verified owner required'},403);
     try {
@@ -2055,6 +2064,7 @@ export class UserSandbox extends DurableObject<Env> {
     const url = new URL(request.url);
     const path = url.pathname;
     const parts = path.split("/").filter(Boolean);
+    if(workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2'&&path!=='/sandbox/image-upgrade'&&this.workspace().imageUpgrade.locked())return json({error:'Workspace image upgrade is pending'},409);
     // Handle the bounded binary body before the generic JSON parser.
     if (path === "/profile/photo") return handleProfilePhoto(request, this.profilePhotoStore());
     let body:any={};
@@ -2097,6 +2107,26 @@ export class UserSandbox extends DurableObject<Env> {
           return json(await this.chatExclusive(()=>agent.turn(body)));
         }
         return json({error:'Unknown conversation operation'},404);
+      }
+
+      // Explicit authenticated staging-owner maintenance; never a model tool or
+      // a Production route, and never accepts owner IDs, proof objects or scopes.
+      if(path==='/sandbox/image-upgrade/fixture'){
+        if(this.env.HYGGE_ENV!=='staging'||!this.env.HYGGE_WORKSPACE_IMAGE_TRANSITIONS)return json({error:'Not enabled'},404);
+        if(request.method!=='POST'||body.reviewed!==true||typeof body.action!=='string'||typeof body.marker!=='string')return json({error:'Reviewed fixture required'},400);
+        return json(await this.workspace().imageUpgradeFixture(body.action,body.marker));
+      }
+      if(path==='/sandbox/image-upgrade'){
+        if(this.env.HYGGE_ENV!=='staging'||!this.env.HYGGE_WORKSPACE_IMAGE_TRANSITIONS)return json({error:'Image upgrade is not enabled'},404);
+        if(request.method==='GET')return json(await this.workspace().imageUpgrade.status());
+        if(request.method==='POST'){
+          if(body.reviewed!==true||typeof body.operationId!=='string')return json({error:'Explicit reviewed operation is required'},400);
+          if(body.action==='abort')return json(await this.workspace().imageUpgrade.abort(body.operationId));
+          if(typeof body.targetImage!=='string'||!Number.isSafeInteger(body.expectedGeneration))return json({error:'Exact target image and generation are required'},400);
+          const work=this.workspace().imageUpgrade.run({operationId:body.operationId,expectedGeneration:body.expectedGeneration,targetImage:body.targetImage});
+          this.ctx.waitUntil(work.catch(()=>{}));return json(await work);
+        }
+        return json({error:'Method not allowed'},405);
       }
 
       // Sandbox diagnostics

@@ -1,9 +1,12 @@
+import {structuredWorkspaceHash,verifyImageFiles} from './workspace-image-verification.ts';
+import {createWorkspaceImageUpgrade,type ImageUpgrade} from './workspace-image-upgrade.ts';
+import {ownerKey} from './workspace-runtime.ts';
 import type { Env } from './env.ts';
 import type { WorkspaceIdentity, RuntimeLease } from './workspace-contract.ts';
 import type { WorkspaceSqlStorage } from './workspace-runtime.ts';
 import { createWorkspaceFoundation } from './workspace-foundation.ts';
 import { createContainerWorkspace, type WorkspaceContainer } from './workspace-container.ts';
-import { r2WorkspaceObjects, sha256 } from './workspace-capture.ts';
+import { WorkspaceCaptureService, r2WorkspaceObjects, sha256 } from './workspace-capture.ts';
 import { workspaceSecret } from './workspace-owner.ts';
 import { createWorkspaceTaskRunner, type WorkspaceSaveInput } from './workspace-task-runner.ts';
 import { createWorkspaceSkills } from './workspace-skills.ts';
@@ -19,12 +22,16 @@ export interface WorkspaceExecutionOptions {
   loadTask(id:string):any;
   projectTask(task:any):void;
   denyFetcher?:Fetcher;
+  assertOwnerIdle?:()=>void;
 }
 /** Installed once per verified owner DO. All tools stay behind this private broker. */
 export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   const {owner,env,storage}=options;
   if (!env.WORKSPACE_CHECKPOINTS || !env.HYGGE_WORKSPACE_IMAGE || !env.HYGGE_WORKSPACE_NAMESPACE || !options.container) throw new Error('WORKSPACE_DEPLOYMENT_BINDINGS_REQUIRED');
   const objects=r2WorkspaceObjects(env.WORKSPACE_CHECKPOINTS);
+  const transitions:Array<{from:string;to:string;policy:string}>=env.HYGGE_WORKSPACE_IMAGE_TRANSITIONS?JSON.parse(env.HYGGE_WORKSPACE_IMAGE_TRANSITIONS):[];
+  if(!Array.isArray(transitions)||transitions.some(p=>!p||p.policy!=='workspace-filesystem-v1'||p.from===p.to||![p.from,p.to].every(x=>typeof x==='string'&&/@sha256:[a-f0-9]{64}$/.test(x))))throw Error('INVALID_IMAGE_TRANSITION_POLICY');
+  const allowedImages=[env.HYGGE_WORKSPACE_IMAGE,...transitions.flatMap(p=>[p.from,p.to])];
   let initialized:Promise<void>|undefined;
   const lineagePins=new Map<string,RuntimeLease>();
   function assertLineage(expected:RuntimeLease,current:RuntimeLease){
@@ -40,15 +47,21 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   let foundation:ReturnType<typeof createWorkspaceFoundation>;
   // The registry is authoritative even when the container/DO process restarts.
   async function ensure() {
+    if(foundation.persistence.get('image_upgrade_lock','active'))throw Error('WORKSPACE_IMAGE_UPGRADE_PENDING');
     await (initialized ??= initialize().catch(error=>{initialized=undefined;throw error;}));
+    if(foundation.persistence.get('image_upgrade_lock','active'))throw Error('WORKSPACE_IMAGE_UPGRADE_PENDING');
     const binding=await foundation.registry.ensure(owner,owner,'initial_start');
+    if(foundation.persistence.get('image_upgrade_lock','active'))throw Error('WORKSPACE_IMAGE_UPGRADE_PENDING');
     if (binding.lifecycleState!=='ready') throw new Error('WORKSPACE_NOT_READY');
     const lease=await foundation.registry.readLease(owner,owner);
     await bridge.attach(binding);
+    if(foundation.persistence.get('image_upgrade_lock','active'))throw Error('WORKSPACE_IMAGE_UPGRADE_PENDING');
     if(Date.parse(lease.expiresAt)<=Date.now())await foundation.registry.reattachVerified(owner,owner,binding.revision,b=>bridge.attach(b));
     else if (Date.parse(lease.expiresAt)-Date.now()<60_000) await foundation.registry.heartbeat(owner,lease);
   }
-  const bridge=createContainerWorkspace({owner,container:options.container,image:env.HYGGE_WORKSPACE_IMAGE,denyFetcher:options.denyFetcher ?? env.SELF,
+  const imagePolicy={allowedImages,allowIncompleteRestoreRetry:transitions.length>0,authorizeImageRestore:(binding:import('./workspace-contract.ts').WorkspaceBinding,sourceImage:string)=>foundation.registry.assertCompatibleRestore(owner,binding,sourceImage),
+    fenceJournal:{get:(key:string)=>foundation.persistence.get('image_fence',key)?.value,put:(key:string,value:any)=>{const old=foundation.persistence.get('image_fence',key);foundation.persistence.put('image_fence',key,old?.revision??0,value);}}};
+  const bridge=createContainerWorkspace({...imagePolicy,owner,container:options.container,image:env.HYGGE_WORKSPACE_IMAGE,denyFetcher:options.denyFetcher ?? env.SELF,
     rpcSecret:workspaceSecret(storage,'container-rpc'),objects,namespaceId:env.HYGGE_WORKSPACE_NAMESPACE,
     providerWorkspaceId:owner.workspaceId,getLease:async()=>{await ensure();const lease=await foundation.registry.readLease(owner,owner);for(const pin of lineagePins.values())assertSameIncarnation(pin,lease);return lease;}});
   const rules=reviewedCompletionRules(env.HYGGE_WORKSPACE_POSTCONDITIONS);
@@ -143,10 +156,64 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       return !!proof && proof.reviewedBy===owner.userId && proof.taskId===input.taskId && proof.effectId===input.effectId && proof.status===input.status && !!proof.currentSnapshot;
     },
   });
-  return {browser:bridge.browser,foundation,skills,runner,ensure,
-    async saveDocument(path:string,revision:number,bytes:Uint8Array){
+  // This private bridge can work under the maintenance lock; normal runtime RPCs
+  // always pass ensure() and are denied until the verified cutover is complete.
+  const migrationBridge=createContainerWorkspace({...imagePolicy,owner,container:options.container,image:env.HYGGE_WORKSPACE_IMAGE,
+    denyFetcher:options.denyFetcher??env.SELF,rpcSecret:workspaceSecret(storage,'container-rpc'),objects,
+    namespaceId:env.HYGGE_WORKSPACE_NAMESPACE,providerWorkspaceId:owner.workspaceId,
+    getLease:async()=>{if(!foundation.persistence.get('image_upgrade_lock','active'))throw Error('IMAGE_UPGRADE_LOCK_REQUIRED');return foundation.registry.readLease(owner,owner);}});
+  const migrationCapture=new WorkspaceCaptureService(foundation.registry,objects,migrationBridge.captureDriver,Date.now,{maxEntries:8192,maxBytes:16*1024*1024});
+  const images=createWorkspaceImageUpgrade({db:foundation.persistence,
+    allowed:(from,to)=>env.HYGGE_ENV==='staging'&&transitions.some(p=>p.from===from&&p.to===to),
+    prepare:async()=>{await ensure();const status=await bridge.status();if(status.humanControlled||status.frozen)throw Error('WORKSPACE_CAPTURE_OR_HUMAN_PENDING');return foundation.registry.read(owner,owner);},
+    structuredHash:()=>structuredWorkspaceHash(storage),verifyFiles:(source,target)=>verifyImageFiles(objects,owner,source,target),
+    assertIdle(){options.assertOwnerIdle?.();if(lineagePins.size||foundation.persistence.get('runner_owner','active'))throw Error('WORKSPACE_ADMISSION_BUSY');
+      if(foundation.persistence.list<any>('effect').some(e=>['prepared','dispatching','uncertain'].includes(e.value.status)))throw Error('WORKSPACE_HAS_UNRESOLVED_ACTION');},
+    async capture(record,target){
+      const writeId=`${record.operationId}_${target?'target':'source'}`;
+      const prior=await foundation.registry.saved(owner,owner,writeId);if(prior)return foundation.verifyDurability(prior.receipt.receiptId);
+      let binding=await foundation.registry.read(owner,owner);const expected=target?record.target!:record.source;
+      if(binding.lifecycleState!=='ready'||binding.generation!==expected.generation||binding.incarnation!==expected.incarnation||binding.desiredImageDigest!==expected.desiredImageDigest)throw Error('UPGRADE_SOURCE_CHANGED');
+      await migrationBridge.attach(binding);let lease=await foundation.registry.readLease(owner,owner);
+      if(Date.parse(lease.expiresAt)<=Date.now())await foundation.registry.reattachVerified(owner,owner,binding.revision,b=>migrationBridge.attach(b));
+      else if(Date.parse(lease.expiresAt)-Date.now()<60_000)await foundation.registry.heartbeat(owner,lease);
+      lease=await foundation.registry.readLease(owner,owner);
+      const status=await migrationBridge.status();if(status.frozen||status.humanControlled)throw Error('UPGRADE_CAPTURE_RECOVERY_REQUIRED');
+      binding=await foundation.registry.read(owner,owner);
+      let saved=foundation.persistence.get<import('./workspace-capture.ts').CaptureWrite>('image_capture_request',writeId);
+      if(!saved){const request={writeId,expectedRegistryRevision:binding.revision,filesystemRevision:status.nextFilesystemRevision,browserProfileRevision:status.nextBrowserProfileRevision,artifactRefs:await migrationBridge.listArtifacts()};
+        foundation.persistence.put('image_capture_request',writeId,0,request);saved=foundation.persistence.get('image_capture_request',writeId);}
+      return migrationCapture.commit(owner,lease,saved!.value);
+    },
+    async verify(receipt){const verified=await foundation.verifyDurability(receipt.receiptId);if(await digest(verified)!==await digest(receipt))throw Error('UPGRADE_RECEIPT_MISMATCH');},
+    async fence(record){
+      const binding=await foundation.registry.read(owner,owner),receipt=record.sourceReceipt!;
+      if(binding.generation!==record.source.generation||binding.incarnation!==record.source.incarnation||binding.desiredImageDigest!==record.source.desiredImageDigest||binding.recoveryPoint?.checkpointId!==receipt.recoveryPoint.checkpointId)throw Error('UPGRADE_SOURCE_CHANGED');
+      if(binding.lifecycleState==='ready'){
+        await migrationBridge.attach(binding);const status=await migrationBridge.status();
+        if(status.frozen||status.humanControlled||status.filesystemRevision!==receipt.filesystemRevision||status.browserProfileRevision!==receipt.browserProfileRevision)throw Error('UPGRADE_SOURCE_CHANGED');
+      }
+      return foundation.registry.fence(owner,owner,record.source.generation,`${record.operationId}_fence`);
+    },
+    async select(record){await foundation.registry.selectImage(owner,owner,`${record.operationId}_select`,record.fencedRevision!,record.targetImage,async binding=>{
+      const receipt=await foundation.verifyDurability(record.sourceReceipt!.receiptId);
+      const bytes=await objects.get(`hygge-workspaces/v1/${ownerKey(owner)}/manifests/${receipt.recoveryPoint.manifestHash}`);
+      if(!bytes||await sha256(bytes)!==receipt.recoveryPoint.manifestHash)throw Error('MANIFEST_VERIFICATION_FAILED');
+      const manifest=JSON.parse(new TextDecoder().decode(bytes));
+      if(!transitions.some(p=>p.from===manifest.imageDigest&&p.to===record.targetImage)||binding.desiredImageDigest!==manifest.imageDigest)throw Error('UNREVIEWED_IMAGE_TRANSITION');
+      return {receipt,imageDigest:manifest.imageDigest};
+    });},
+    async restore(record){const binding=await foundation.registry.ensure(owner,owner,`${record.operationId}_start`);const status=await migrationBridge.attach(binding);if(binding.desiredImageDigest!==env.HYGGE_WORKSPACE_IMAGE&&status.artifactProtocolVersion!==1)throw Error('UPGRADE_PROTOCOL_MISMATCH');return binding;},
+    current:()=>foundation.registry.read(owner,owner),
+    async abortCheck(record){const binding=await foundation.registry.read(owner,owner);
+      if(binding.lifecycleState!=='ready'||binding.generation!==record.source.generation||binding.incarnation!==record.source.incarnation||binding.desiredImageDigest!==record.source.desiredImageDigest)throw Error('UPGRADE_CANNOT_ABORT_AFTER_FENCE');
+      await migrationBridge.attach(binding);if((await migrationBridge.status()).frozen)throw Error('UPGRADE_CAPTURE_RECOVERY_REQUIRED');
+    },
+  });
+  async function saveDocument(path:string,revision:number,bytes:Uint8Array){
       await ensure();
       return runner.withWorkspaceMutation('document-save',async lease=>{
+        if((await bridge.status()).artifactProtocolVersion!==1)throw Error('ARTIFACT_PROTOCOL_UPGRADE_REQUIRED');
         const pin=crypto.randomUUID();lineagePins.set(pin,lease);
         try{
           const ref=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_${revision}`;
@@ -154,7 +221,52 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
           return await save({expectedLease:lease,task:{id:'document-save',kind:'discover',target_url:'https://invalid.example',status:'running'},runId:'document-save',reason:'pause',evidence:[],requiresBrowserFreeze:true});
         }finally{lineagePins.delete(pin);}
       });
+    }
+  return {browser:bridge.browser,foundation,skills,runner,ensure,
+    imageUpgrade:{run:async(input:{operationId:string;expectedGeneration:number;targetImage:string})=>{if(env.HYGGE_ENV!=='staging'||!transitions.length)throw Error('IMAGE_UPGRADE_DISABLED');if(!transitions.some(p=>p.to===input.targetImage))throw Error('UNREVIEWED_IMAGE_TRANSITION');const account=await env.DB.prepare('SELECT contact_email FROM users WHERE id=?').bind(owner.userId).first<{contact_email:string}>();if(!/^workspace-upgrade-[a-z0-9-]+@example\.invalid$/.test(account?.contact_email??''))throw Error('SYNTHETIC_UPGRADE_ACCOUNT_REQUIRED');return images.run(input);},
+      locked:()=>!!foundation.persistence.get('image_upgrade_lock','active'),
+      abort:(id:string)=>{if(env.HYGGE_ENV!=='staging')throw Error('IMAGE_UPGRADE_DISABLED');return images.abort(id);},
+      async status(){let current=null;try{current=await foundation.registry.read(owner,owner);}catch(error){if(!(error instanceof Error)||error.message!=='WORKSPACE_NOT_INITIALIZED')throw error;}return {current,operations:images.status()};}},
+    /** Synthetic-account route only; no arbitrary URL, script, file or owner input. */
+    async imageUpgradeFixture(action:string,marker:string){
+      if(env.HYGGE_ENV!=='staging'||!transitions.length||!/^[a-f0-9-]{36}$/.test(marker))throw Error('INVALID_UPGRADE_FIXTURE');
+      const account=await env.DB.prepare('SELECT contact_email FROM users WHERE id=?').bind(owner.userId).first<{contact_email:string}>();
+      if(!/^workspace-upgrade-[a-z0-9-]+@example\.invalid$/.test(account?.contact_email??''))throw Error('SYNTHETIC_UPGRADE_ACCOUNT_REQUIRED');
+      const origin='https://hygge-wave4-jobs.lemberg-89a.workers.dev',path=`upgrade-validation/${marker}/source`,latestPath=`upgrade-validation/${marker}/latest`;
+      const source=new TextEncoder().encode(`Source ${marker}`),latest=new TextEncoder().encode(`Latest ${marker}. `.repeat(11000));
+      const sessionId=`upgrade-${marker}`,stored=foundation.persistence.get<{marker:string}>('image_fixture','active');
+      if(stored&&stored.value.marker!==marker)throw Error('FIXTURE_MARKER_CONFLICT');
+      if(action==='seed'){
+        if(stored)throw Error('FIXTURE_ALREADY_SEEDED');
+        await ensure();
+        await bridge.browser.createSession(origin+'/listings',{origin,savedAt:new Date().toISOString(),cookies:[{name:'hygge_upgrade',value:marker,domain:new URL(origin).hostname,path:'/',secure:true,httpOnly:true,expires:Math.floor(Date.now()/1000)+86400}],localStorage:{hygge_upgrade:marker}},sessionId);
+        await runner.withWorkspaceMutation('fixture-seed',async lease=>{
+          const ref=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_1`;await bridge.writeArtifact(ref,source);
+          await save({expectedLease:lease,task:{id:'fixture-seed',kind:'discover',target_url:origin,status:'running'},runId:'fixture-seed',reason:'pause',evidence:[],requiresBrowserFreeze:true});
+        });foundation.persistence.put('image_fixture','active',0,{marker});
+      }else if(!stored)throw Error('FIXTURE_NOT_SEEDED');
+      if(action==='write-latest')await saveDocument(latestPath,1,latest);
+      if(action==='retire'){
+        const receipt=await save({task:{id:'fixture-cleanup',kind:'discover',target_url:origin,status:'running'},runId:'fixture-cleanup',reason:'pause',evidence:[],requiresBrowserFreeze:true});
+        await foundation.verifyDurability(receipt.receiptId);const binding=await foundation.registry.read(owner,owner);
+        const stopped=await foundation.registry.fence(owner,owner,binding.generation,`fixture_${marker}_retire`);return {retired:stopped.lifecycleState==='stopped',receiptId:receipt.receiptId};
+      }
+      if(!['seed','write-latest','check'].includes(action))throw Error('INVALID_FIXTURE_ACTION');
+      await ensure();const state=await bridge.browser.exportState(sessionId),binding=await foundation.registry.read(owner,owner);
+      if(!binding.recoveryPoint)throw Error('FIXTURE_CHECKPOINT_REQUIRED');
+      const manifestBytes=await objects.get(`hygge-workspaces/v1/${ownerKey(owner)}/manifests/${binding.recoveryPoint.manifestHash}`);
+      if(!manifestBytes||await sha256(manifestBytes)!==binding.recoveryPoint.manifestHash)throw Error('FIXTURE_MANIFEST_INVALID');
+      const manifest=JSON.parse(new TextDecoder().decode(manifestBytes));
+      async function artifactMatches(logical:string,expected:Uint8Array){
+        const ref=`file_${(await sha256(new TextEncoder().encode(logical))).slice(0,32)}_1`;
+        const file=manifest.files.find((f:any)=>f.path.endsWith('/'+ref)||f.path===ref);
+        if(!file)return false;const bytes=await objects.get(`hygge-workspaces/v1/${ownerKey(owner)}/blobs/${file.hash}`);
+        return !!bytes&&bytes.length===expected.length&&await sha256(bytes)===await sha256(expected);
+      }
+      return {cookie:!!state?.cookies.some((c:any)=>c.name==='hygge_upgrade'&&c.value===marker),localStorage:state?.localStorage.hygge_upgrade===marker,
+        source:await artifactMatches(path,source),latest:await artifactMatches(latestPath,latest),latestBytes:latest.length,generation:binding.generation,image:binding.desiredImageDigest,sessionId};
     },
+    saveDocument,
     async eraseDocument(path:string,throughRevision:number){
       await ensure();
       return runner.withWorkspaceMutation('document-delete',async lease=>{

@@ -7,6 +7,10 @@ on:
         description: "Check the persistent chat protocol instead of legacy intent"
         type: boolean
         default: false
+      workspace_image_upgrade:
+        description: "Verify populated old/new image upgrade and latest-state rollback (synthetic accounts only)"
+        type: boolean
+        default: false
       deploy_staging:
         description: "Deploy this ref to staging before acceptance (never production)"
         type: boolean
@@ -25,7 +29,7 @@ jobs:
       group: hygge-staging-deployment
       cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     defaults:
       run:
         working-directory: backend/cloudflare
@@ -45,8 +49,11 @@ jobs:
         if: inputs.deploy_staging
         run: npx wrangler deploy -c wrangler.staging.jsonc
       - name: Verify persistent chat with a synthetic staging account
-        if: inputs.persistent_agent
+        if: ${{ inputs.persistent_agent && !inputs.workspace_image_upgrade }}
         run: node scripts/persistent-chat-staging-acceptance.mjs
       - name: Verify model intent using a synthetic staging account
-        if: ${{ !inputs.persistent_agent }}
+        if: ${{ !inputs.persistent_agent && !inputs.workspace_image_upgrade }}
         run: node scripts/chat-staging-acceptance.mjs
+      - name: Verify populated workspace image upgrade and rollback
+        if: inputs.workspace_image_upgrade
+        run: node scripts/workspace-image-staging-acceptance.mjs
