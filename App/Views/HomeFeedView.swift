@@ -300,46 +300,60 @@ struct HomeFeedView: View {
     }
 
     /// Quick hop: his limbs crouch, launch and land (see FlameActor's
-    /// travel hops) while the center animates from an EXPLICIT start —
-    /// measuring the start after mutating placement would read the
-    /// target itself and teleport him. `prepare` (the placement/lift
-    /// writes that move layout to the target) runs INSIDE the pin's
-    /// no-animation transaction, so layout, offset and lift change in
-    /// one render: drawn = target + (start - target) = start, exactly
-    /// where he already is. Clearing the perch lift in a separate
-    /// transaction after the pin let an intermediate frame render
-    /// with mismatched layout/offset/lift — a visible shift before
-    /// the hop even started.
-    private func hop(from start: CGPoint, to target: CGPoint,
-                     prepare: () -> Void = {},
+    /// travel hops) while his center travels to `target` (window
+    /// coordinates). Only `hopOffset` moves during the flight:
+    /// placement and chatLift stay frozen exactly as they are, so the
+    /// first animated frame is where he already sits by construction
+    /// — there is no pin or swap that could shift him first (the
+    /// previous pin-the-offset-while-swapping-placement approach
+    /// still let him drop by the perch amount before departing when
+    /// the keyboard was up). `arrive` performs the placement/lift
+    /// swap on landing inside one no-animation transaction together
+    /// with zeroing the offset; callers define it so the drawn
+    /// position is identical on both sides of that swap.
+    @State private var hopTask: Task<Void, Never>?
+    private func hop(to target: CGPoint,
+                     arrive: @escaping () -> Void,
                      then: @escaping () -> Void) {
+        hopTask?.cancel()
+        let start = flameWindowCenter()
+        let layout = flameLayoutCenter()
+        let liftAtStart = chatLift
+        let placementAtStart = playStore.settings.placement
         let distance = hypot(target.x - start.x, target.y - start.y)
         var instant = Transaction()
         instant.disablesAnimations = true
-        if reduceMotion || distance < 8 {
+        // One-instant landing shared by the short path and arrival:
+        // swap placement/lift and zero the offset together. Skipped
+        // (offset/lift simply zeroed) if the user grabbed him
+        // mid-flight and committed a new placement of their own.
+        let land = {
+            // If he was grabbed and dropped mid-flight, the user's
+            // own placement wins over this hop's destination.
+            let grabbedMidFlight = playStore.settings.placement != placementAtStart
             withTransaction(instant) {
-                prepare()
+                if !grabbedMidFlight { arrive() }
                 hopOffset = .zero
+                if grabbedMidFlight && chatLift == liftAtStart { chatLift = 0 }
             }
+            flameTraveling = false
+        }
+        if reduceMotion || distance < 8 {
+            land()
             then()
             return
         }
         let duration = min(0.85, max(0.45, Double(distance) / 1400 + 0.35))
-        // Pin him to the start with an offset, let that frame land,
-        // then animate the offset home. Interpolating from exactly
-        // where he is drawn now is what keeps the first hop frame
-        // on screen.
-        withTransaction(instant) {
-            prepare()
-            hopOffset = CGSize(width: start.x - target.x,
-                               height: start.y - target.y)
-        }
+        // End offset that puts drawn == target with layout and lift
+        // unchanged: drawn = layout + endOffset + (0, lift).
+        let endOffset = CGSize(width: target.x - layout.x,
+                               height: target.y - layout.y - liftAtStart)
         flameTraveling = true
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(30))
-            withAnimation(.easeInOut(duration: duration)) { hopOffset = .zero }
+        hopTask = Task { @MainActor in
+            withAnimation(.easeInOut(duration: duration)) { hopOffset = endOffset }
             try? await Task.sleep(for: .seconds(duration))
-            flameTraveling = false
+            if Task.isCancelled { return }
+            land()
             then()
         }
     }
@@ -349,10 +363,9 @@ struct HomeFeedView: View {
     private func flameTapped() {
         if showBubbleChat { closeBubble(); return }
         returnPlacement = playStore.settings.placement
-        let start = flameWindowCenter()
         bubbleDragOffset = 0
-        hop(from: start, to: windowCenter(for: nil),
-            prepare: { playStore.settings.placement = nil }) {
+        hop(to: windowCenter(for: nil),
+            arrive: { playStore.settings.placement = nil }) {
             withAnimation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.82)) {
                 showBubbleChat = true
                 chatLift = -chatLiftAmount
@@ -362,7 +375,6 @@ struct HomeFeedView: View {
 
     /// Closing sends him hopping back to wherever he was living before.
     private func closeBubble() {
-        let start = flameWindowCenter()
         withAnimation(reduceMotion ? nil : .easeIn(duration: 0.2)) {
             showBubbleChat = false
         }
@@ -373,13 +385,12 @@ struct HomeFeedView: View {
             return
         }
         returnPlacement = nil
-        // Placement and the perch lift move inside hop's pin
-        // transaction (see hop): one render lands layout on the
-        // target with the offset holding him exactly at `start` —
-        // his perched spot under the bubble — so the hop begins
-        // there, with no shift first.
-        hop(from: start, to: windowCenter(for: back),
-            prepare: {
+        // The hop travels with placement and perch lift frozen (see
+        // hop), departing from exactly where he sits perched under
+        // the bubble; the placement/lift swap happens on landing,
+        // where drawn == target on both sides of it.
+        hop(to: windowCenter(for: back),
+            arrive: {
                 playStore.settings.placement = back
                 chatLift = 0
             }) {}
