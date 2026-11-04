@@ -144,8 +144,9 @@ export interface UpsertResult {
 
 export class StateStore {
   db: StateDb;
-  constructor(db: StateDb) {
-    this.db = db;
+  private allowMessage: (id:string)=>boolean;
+  constructor(db: StateDb, allowMessage: (id:string)=>boolean = ()=>true) {
+    this.db = db;this.allowMessage=allowMessage;
   }
 
   private table(entity: string): string {
@@ -162,6 +163,7 @@ export class StateStore {
   ): UpsertResult {
     const table = this.table(entity);
     const rowId = entity === "profile" ? PROFILE_ROW_ID : normalizeId(id);
+    if(entity === "messages" && !this.allowMessage(rowId)) throw new Error("MESSAGE_DELETED");
     if (!rowId) throw new Error(`${entity} requires an id`);
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       throw new Error(`${entity} payload must be a JSON object`);
@@ -183,6 +185,7 @@ export class StateStore {
 
   get(entity: string, id: string) {
     const rowId = entity === "profile" ? PROFILE_ROW_ID : normalizeId(id);
+    if(entity === "messages" && !this.allowMessage(rowId)) return null;
     const row = this.db.getRow(this.table(entity), rowId);
     return row ? publicRow(row) : null;
   }
@@ -261,7 +264,7 @@ export class StateStore {
 
     for (const msg of [...asArray(snapshot.chatTranscript), ...asArray(snapshot.messages)]) {
       const id = idOf(msg);
-      if (id) this.upsert("messages", id, msg, now);
+      if (id && this.allowMessage(id)) this.upsert("messages", id, msg, now);
     }
     for (const app of asArray(snapshot.applications)) {
       const id = idOf(app);

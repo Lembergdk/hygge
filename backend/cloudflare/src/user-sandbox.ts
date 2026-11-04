@@ -1,3 +1,6 @@
+import { ChatAgent } from './chat-agent.ts';
+import { ChatStore, sqlChatStorage, type ChatDocument } from './chat-store.ts';
+import { chatServices } from './chat-services.ts';
 import { classifyBrowserFailure } from "./browser-failure.ts";
 import { help, applyHelpReply, mobileTask, canResumeWithInboxCode, reconcileEndedSession, rejectTaskHelp } from "./task-help.ts";
 import { bindWorkspaceOwner, workspaceMode } from './workspace-owner.ts';
@@ -22,7 +25,7 @@ import {
   type SharedSkill, type SkillCandidate, type SkillOutcome,
 } from "./skills.ts";
 import {
-  attachEmailToTasks, parseOwnerEmailCommand, takeFreshCode,
+  attachEmailToTasks, parseOwnerEmailCommand, takeFreshCode, addressForUser, d1EmailAddressDb,
   type InboundEmailDelivery,
 } from "./email.ts";
 import {
@@ -227,7 +230,7 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   private stateStore(): StateStore {
-    return new StateStore(createSqliteStateDb(this.ctx.storage.sql));
+    return new StateStore(createSqliteStateDb(this.ctx.storage.sql),id=>!this.chatStore().db.get(`deleted-message:${id}`));
   }
 
   private scanStore(): ScanStore {
@@ -1943,6 +1946,48 @@ export class UserSandbox extends DurableObject<Env> {
 
   // ---- routes ---------------------------------------------------
 
+  private chatQueue: Promise<unknown> = Promise.resolve();
+  private conversationStore?:ChatStore;
+  private chatStore() { return this.conversationStore ??= new ChatStore(sqlChatStorage(this.ctx.storage)); }
+  private chatAgent() {
+    const store=this.chatStore(), state=this.stateStore();
+    const services=chatServices({
+      rows:entity=>state.list(entity), get:(entity,id)=>state.get(entity,id),
+      put:(entity,id,data)=>{const before=entity==='profile'||entity==='sites'?this.reopenSnapshot(state):null;state.upsert(entity,id,data);if(before)this.applyCategoryReopen(before,state);},remove:(entity,id)=>{state.remove(entity,id);},
+      tasks:()=>[...this.ctx.storage.sql.exec('SELECT task FROM tasks ORDER BY created_at')].map(r=>JSON.parse(String(r.task))),
+      saveTask:task=>this.saveTask(task),enqueue:task=>this.enqueueOrRunMission(task),
+      hints:domain=>[...this.ctx.storage.sql.exec('SELECT kind,hints,success_count,failure_count FROM memories WHERE domain=?',domain)].map(r=>({...r,hints:JSON.parse(String(r.hints))})),
+      inbox:()=>[...this.ctx.storage.sql.exec("SELECT id,sender_domain,subject,summary,kind,created_at FROM email_summaries WHERE kind='other' ORDER BY created_at DESC LIMIT 30")],
+      signupContact:async()=>{const address=this.userId?await addressForUser(d1EmailAddressDb(this.env.DB),this.userId,this.env.HYGGE_EMAIL_DOMAIN):null;return address?{email:address.address,choice:'hygge'}:{email:String((state.get('profile','profile')?.data as any)?.profile?.email??''),choice:'own'};},
+      credentialForDomain:domain=>{const r=[...this.ctx.storage.sql.exec('SELECT id FROM credentials WHERE domain=? LIMIT 1',domain)][0];return r?String(r.id):undefined;},
+      plus:async()=>!!this.userId && (await activeTier(d1SubscriptionDb(this.env.DB),this.userId,new Date()))==='plus',
+      mirror:async(doc:ChatDocument)=>{await this.workspace().saveDocument(`${doc.generation}/${doc.path}`,doc.revision,new TextEncoder().encode(doc.content));},
+      erase:async(doc:ChatDocument)=>{await this.workspace().eraseDocument(`${doc.generation}/${doc.path}`);},
+      deletedMessage:id=>Boolean(store.db.get(`deleted-message:${id}`)),
+    });
+    return new ChatAgent(store,new LLMClient(this.llmConfig('hygge-conversation')),services);
+  }
+  private cleanupTask?:Promise<void>;
+  private scheduleChatCleanup() {
+    if(this.cleanupTask)return;
+    this.cleanupTask=(async()=>{
+      const agent=this.chatAgent();await agent.cleanup();
+      if(agent.store.state().cleanupPending)await this.ctx.storage.setAlarm(Date.now()+300_000);
+    })().finally(()=>{this.cleanupTask=undefined;});
+    this.ctx.waitUntil(this.cleanupTask);
+  }
+  async alarm() {
+    const row=[...this.ctx.storage.sql.exec('SELECT user_id FROM workspace_owner WHERE id=1')][0];
+    if(!row)return;this.userId=String(row.user_id);
+    if(this.cleanupTask)await this.cleanupTask;
+    else await this.chatAgent().cleanup();
+    if(this.chatStore().state().cleanupPending)await this.ctx.storage.setAlarm(Date.now()+3600_000);
+  }
+  private async chatExclusive<T>(work:()=>Promise<T>):Promise<T> {
+    const before=this.chatQueue;let release!:()=>void;this.chatQueue=new Promise<void>(r=>{release=r;});
+    await before;try{return await work();}finally{release();}
+  }
+
   private profilePhotoStore(): ProfilePhotoStore {
     const sql = this.ctx.storage.sql;
     return {
@@ -1975,11 +2020,48 @@ export class UserSandbox extends DurableObject<Env> {
     const parts = path.split("/").filter(Boolean);
     // Handle the bounded binary body before the generic JSON parser.
     if (path === "/profile/photo") return handleProfilePhoto(request, this.profilePhotoStore());
-    const body = request.method === "GET" || request.method === "DELETE"
-      ? {}
-      : ((await request.json().catch(() => ({}))) as any);
+    let body:any={};
+    if(request.method!=='GET'&&request.method!=='DELETE'){
+      if(parts[0]==='chat'){
+        const raw=await request.text();if(raw.length>128000)return json({error:'Conversation request too large'},413);
+        try{body=JSON.parse(raw);}catch{return json({error:'Invalid conversation request'},400);}
+        if(!body||typeof body!=='object'||Array.isArray(body))return json({error:'Invalid conversation request'},400);
+      }else body=await request.json().catch(()=>({}));
+    }
 
     try {
+      // New clients use one reasoning/tool loop. Legacy intent/onboarding routes remain isolated.
+      if(parts[0]==='chat') {
+        const agent=this.chatAgent();
+        if(request.method==='GET'&&parts[1]==='state') {
+          return json(await this.chatExclusive(async()=>{agent.importMessages();this.scheduleChatCleanup();return agent.store.state();}));
+        }
+        if(request.method==='POST'&&parts[1]==='reset'){const result=await this.chatExclusive(()=>agent.reset(String(body.generation??'')));this.scheduleChatCleanup();return json(result);}
+        if(request.method==='POST'&&parts[1]==='device-claim')return json(await this.chatExclusive(async()=>agent.claimDevice({generation:String(body.generation??''),proposalId:String(body.proposalId??''),deviceID:String(body.deviceID??'')})));
+        if(request.method==='POST'&&parts[1]==='device-result'){
+          if(typeof body.success!=='boolean'||typeof body.id!=='string'||!/^[0-9a-f-]{36}$/i.test(body.id))return json({error:'Invalid device result'},400);
+          return json(await this.chatExclusive(()=>agent.deviceResult({id:body.id,generation:String(body.generation??''),proposalId:String(body.proposalId??''),success:body.success,deviceID:String(body.deviceID??'')})));
+        }
+        if(request.method==='POST'&&parts[1]==='proposals'&&parts[2]){
+          if(!['approve','reject'].includes(body.decision)||typeof body.id!=='string'||!/^[0-9a-f-]{36}$/i.test(body.id))return json({error:'Invalid decision'},400);
+          return json(await this.chatExclusive(()=>agent.decide({id:body.id,generation:String(body.generation??''),proposalId:parts[2],decision:body.decision})));
+        }
+        if(request.method==='POST'&&parts[1]==='turn'){
+          if(request.headers.get('Accept')?.includes('text/event-stream')){
+            const {readable,writable}=new TransformStream();const writer=writable.getWriter(),encoder=new TextEncoder();
+            let detached=false;const emit=(event:any)=>{if(!detached)void writer.write(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)).catch(()=>{detached=true;});};
+            this.ctx.waitUntil(this.chatExclusive(async()=>{
+              try{const result=await agent.turn(body,emit);emit({type:'final',data:result});}
+              catch{emit({type:'error',message:'The turn was interrupted. Its progress is saved; retry the same message.'});}
+              finally{await writer.close().catch(()=>{});this.scheduleChatCleanup();}
+            }));
+            return new Response(readable,{headers:{'content-type':'text/event-stream','cache-control':'no-cache'}});
+          }
+          return json(await this.chatExclusive(()=>agent.turn(body)));
+        }
+        return json({error:'Unknown conversation operation'},404);
+      }
+
       // Sandbox diagnostics
       if (path.endsWith("/sandbox/verify")) {
         if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2') {
