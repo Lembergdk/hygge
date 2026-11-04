@@ -2208,9 +2208,40 @@ export class UserSandbox extends DurableObject<Env> {
       // Model-led understanding, app-validated: what does this
       // message want done? See onboarding.ts chatIntent.
       if (request.method === "POST" && parts.join("/") === "onboarding/intent") {
+        const intentBody = (body ?? {}) as Record<string, any>;
+        // Candidates the model may offer or the user may confirm:
+        // open proposals first, then the catalog — minus anything
+        // already tracked. The model still reasons freely; this
+        // only grounds names to addresses.
+        const store = this.stateStore();
+        const tracked = new Set(
+          store.list("sites").map((row) => String((row.data as any)?.domain ?? "").toLowerCase()));
+        const candidates: Array<{ name: string; domain: string; siteId: string | null }> = [];
+        const seen = new Set<string>();
+        const pushCandidate = (name: string, domain: string, siteId: string | null) => {
+          const key = domain.toLowerCase();
+          if (!key || seen.has(key) || tracked.has(key)) return;
+          seen.add(key);
+          candidates.push({ name, domain, siteId });
+        };
+        for (const row of store.list("sites")) {
+          const site = scanSiteFromRow(String(row.id), row.data);
+          if (site) pushCandidate(site.name, site.domain, site.siteID);
+        }
+        for (const row of store.list("proposals")) {
+          const data = row.data as any;
+          if (data?.status !== "proposed") continue;
+          const siteID = String(data.siteID ?? "");
+          const site = scanSiteFromRow(siteID, store.get("sites", siteID)?.data);
+          pushCandidate(site?.name ?? siteID, site?.domain ?? siteID, siteID);
+        }
+        for (const list of Object.values(STATIC_PROPOSALS)) {
+          for (const entry of list) pushCandidate(entry.name, domainOf(entry.url), null);
+        }
         return json(await chatIntent({
           client: new LLMClient(this.llmConfig("hygge-onboarding")),
-          ...(body as object),
+          ...intentBody,
+          context: { ...(intentBody.context ?? {}), candidates },
           conversationId: this.ctx.id.toString(),
         }));
       }

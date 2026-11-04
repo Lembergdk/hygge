@@ -316,6 +316,7 @@ struct BackendClient {
 
     private struct ChatIntentResponse: Decodable {
         var action: ChatIntentActionDTO?
+        var actions: [ChatIntentActionDTO]?
         var simulated: Bool?
     }
 
@@ -324,10 +325,21 @@ struct BackendClient {
     /// in the store before anything runs.
     func chatIntent(transcript: [TranscriptLine], profile: EarningsProfile,
                     context: ChatIntentContext) async throws -> ChatIntentActionDTO? {
+        try await chatIntentActions(transcript: transcript, profile: profile, context: context).first
+    }
+
+    /// The model's tool calls for this message: several, one, or
+    /// none. The store validates each against live state and runs
+    /// what survives; consequential kinds still wait for the
+    /// confirmation card.
+    func chatIntentActions(transcript: [TranscriptLine], profile: EarningsProfile,
+                           context: ChatIntentContext) async throws -> [ChatIntentActionDTO] {
         let response: ChatIntentResponse = try await post(
             "onboarding/intent",
             body: ChatIntentBody(transcript: transcript, profile: profile, context: context))
-        return response.action
+        if let actions = response.actions, !actions.isEmpty { return Array(actions.prefix(5)) }
+        if let action = response.action { return [action] }
+        return []
     }
 
     /// The lifelong conversation thread (post-onboarding). Same SSE endpoint,

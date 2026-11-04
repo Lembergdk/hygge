@@ -4,7 +4,7 @@
 // fall back to plain conversation.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chatIntent, validateChatIntent } from "../src/onboarding.ts";
+import { chatIntent, validateChatIntent, validateChatIntentList } from "../src/onboarding.ts";
 
 const CONTEXT = {
   sites: [
@@ -30,6 +30,29 @@ test("validateChatIntent keeps only known kinds with context-bound ids", () => {
   assert.equal(validateChatIntent({ action: { kind: "email", mailId: "nope" } }, CONTEXT), null);
   assert.equal(validateChatIntent({ action: { kind: "wire_money", amount: 5 } }, CONTEXT), null);
   assert.equal(validateChatIntent({ action: { kind: "floor", amount: 50000 } }, CONTEXT), null);
+
+test("validateChatIntentList validates each tool call, drops the bad ones", () => {
+  // "Both" for two named sites: two validated calls.
+  assert.deepEqual(
+    validateChatIntentList({ actions: [
+      { kind: "add", domain: "contra.com" },
+      { kind: "add", domain: "https://www.toptal.com/" },
+    ] }, CONTEXT),
+    [{ kind: "add", domain: "contra.com" }, { kind: "add", domain: "toptal.com" }]);
+  // Unknown ids and junk fall out; the good call survives.
+  assert.deepEqual(
+    validateChatIntentList({ actions: [
+      { kind: "join", siteId: "invented" },
+      { kind: "scan", siteId: "rover" },
+      { kind: "wire_money", amount: 5 },
+    ] }, CONTEXT),
+    [{ kind: "scan", siteId: "rover" }]);
+  // Caps at five; empty or missing reads as none.
+  assert.equal(
+    validateChatIntentList({ actions: [1, 2, 3, 4, 5, 6, 7].map(() => ({ kind: "pause" })) }, CONTEXT)?.length, 5);
+  assert.equal(validateChatIntentList({ actions: [] }, CONTEXT), null);
+  assert.equal(validateChatIntentList({}, CONTEXT), null);
+});
   assert.equal(validateChatIntent({ action: null }, CONTEXT), null);
   assert.equal(validateChatIntent({}, CONTEXT), null);
   assert.equal(validateChatIntent(null, CONTEXT), null);
