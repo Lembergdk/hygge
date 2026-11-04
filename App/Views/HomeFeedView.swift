@@ -573,7 +573,9 @@ struct HomeFeedView: View {
 
     private func proposalCard(_ proposal: ProposedSite) -> some View {
         card(id: "proposal-\(proposal.id)", title: store.siteName(id: proposal.siteID), subtitle: proposal.rationale,
-             icon: "link", style: .invitation, primaryTitle: "Start setup", primaryIcon: "sparkles",
+             icon: "link", style: .invitation,
+             siteDomain: store.siteDomain(id: proposal.siteID), siteName: store.siteName(id: proposal.siteID),
+             primaryTitle: "Start scanning", primaryIcon: "magnifyingglass",
              open: { openFocus(.proposal(proposal)) },
              primary: { store.approveProposal(proposalID: proposal.id, alreadyHasAccount: false) },
              dismiss: {
@@ -588,9 +590,9 @@ struct HomeFeedView: View {
         return card(id: "opportunity-\(opportunity.id)", title: opportunity.title,
              subtitle: blocked ? store.siteName(id: opportunity.siteID)
                 : "\(opportunity.payLabel) · \(opportunity.isRemote ? "Remote" : opportunity.locationLabel)",
-             icon: blocked ? (opportunity.needsYouKind == "login" ? "key" : "hand.raised")
-                : opportunity.category == .creative ? "paintpalette" : "briefcase",
+             icon: blocked ? (opportunity.needsYouKind == "login" ? "key" : "hand.raised") : "sparkle",
              style: .opportunity,
+             siteDomain: store.siteDomain(id: opportunity.siteID), siteName: store.siteName(id: opportunity.siteID),
              primaryTitle: blocked ? (opportunity.needsYouKind == "login" ? "Save login again" : "Open the site") : "Prepare draft",
              primaryIcon: blocked ? "arrow.right" : "square.and.pencil",
              open: { openFocus(.opportunity(opportunity)) },
@@ -624,6 +626,7 @@ struct HomeFeedView: View {
         let approval = task.help?.kind == .approval
         return card(id: taskKey(task), title: taskTitle(task),
                     subtitle: store.siteName(id: task.siteID), icon: taskIcon(task), usesProfilePhoto: task.kind == .buildProfile, style: chat && !approval ? .question : .review,
+                    siteDomain: chat && !approval ? nil : store.siteDomain(id: task.siteID), siteName: store.siteName(id: task.siteID),
                     primaryTitle: chat && !approval ? "Open chat" : "Review", primaryIcon: chat ? "bubble.left" : "doc.text.magnifyingglass",
                     open: { if chat { openChat(task) } else { openFocus(.task(task)) } },
                     primary: { if chat { openChat(task) } else { openFocus(.task(task)) } })
@@ -735,7 +738,8 @@ struct HomeFeedView: View {
         // last thing large type could ever squeeze out.
         card(id: "email-decision-\(mail.senderDomain)", title: "Mail from a new sender",
              subtitle: "\(mail.senderDomain) · \(mail.subject.isEmpty ? "(no subject)" : mail.subject)",
-             icon: "envelope", primaryTitle: "Decide", primaryIcon: "envelope.open",
+             icon: "envelope", siteDomain: mail.senderDomain, siteName: mail.senderDomain,
+             primaryTitle: "Decide", primaryIcon: "envelope.open",
              open: { openFocus(.emailDecision(mail)) },
              primary: { openFocus(.emailDecision(mail)) },
              dismiss: {}, allowsDismissal: false)
@@ -745,8 +749,11 @@ struct HomeFeedView: View {
     /// filing is the default.
     private func emailDecisionDetail(_ mail: FiledEmailSummary) -> some View {
         FeedDetailContent {
-            Text("Mail from \(mail.senderDomain)").font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .center, spacing: 14) {
+                SiteLogoTile(domain: mail.senderDomain, name: mail.senderDomain, size: 52)
+                Text("Mail from \(mail.senderDomain)").font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Text("I filed this for now, and I'll keep filing this sender's mail. If it's work mail, tell me — I'll remember.")
                 .foregroundStyle(HyggeTheme.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -785,11 +792,13 @@ struct HomeFeedView: View {
              primaryTitle: "Details", open: { openFocus(.event(event)) }, primary: { openFocus(.event(event)) })
     }
     private func card(id: String, title: String, subtitle: String, icon: String, asset: String? = nil, usesProfilePhoto: Bool = false, style: FeedCardStyle = .update,
+                      siteDomain: String? = nil, siteName: String? = nil,
                       primaryTitle: String, primaryIcon: String = "arrow.right", open: @escaping () -> Void,
                       primary: @escaping () -> Void, dismiss: (() -> Void)? = nil, allowsDismissal: Bool = true) -> some View {
         SwipeFeedCard(id: id, primaryTitle: primaryTitle, primaryIcon: primaryIcon, openCardID: $openCardID,
                       open: { openCardID = nil; open() }, primary: primary, dismiss: dismiss ?? { archive(id) }, allowsDismissal: allowsDismissal) {
-            FeedVisualCard(style: style, title: title, subtitle: subtitle, icon: icon, asset: asset, usesProfilePhoto: usesProfilePhoto)
+            FeedVisualCard(style: style, title: title, subtitle: subtitle, icon: icon, asset: asset, usesProfilePhoto: usesProfilePhoto,
+                           siteDomain: siteDomain, siteName: siteName)
         }
         .matchedGeometryEffect(id: id, in: focusAnimation, isSource: focus?.id != id)
         .opacity(focus?.id == id ? 0 : 1)

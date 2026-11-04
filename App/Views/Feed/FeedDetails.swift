@@ -8,19 +8,28 @@ struct FeedProposalDetail: View {
     var body: some View {
         FeedDetailContent {
             if let proposal {
-                VStack(alignment: .leading, spacing: 10) {
-                    // Long unbroken site names ("TrustedHousesitters")
-                    // hyphen-break in an icon+title row at large type:
-                    // beside when it fits, icon above when it doesn't.
-                    ViewThatFits(in: .horizontal) {
-                        Label(store.siteName(id: proposal.siteID), systemImage: "link")
-                        VStack(alignment: .leading, spacing: 10) {
-                            Image(systemName: "link").foregroundStyle(HyggeTheme.sageDeep)
-                            Text(store.siteName(id: proposal.siteID))
+                let name = store.siteName(id: proposal.siteID)
+                // Same header language as the card: the site's own
+                // mark, then what saying yes actually sets going.
+                HStack(alignment: .center, spacing: 16) {
+                    SiteLogoTile(domain: store.siteDomain(id: proposal.siteID) ?? "", name: name, size: 64)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("NEW JOB SITE")
+                            .font(.system(.caption2, design: .rounded, weight: .bold)).tracking(1.1)
+                            .foregroundStyle(HyggeTheme.secondary)
+                        Text(name).font(.system(.title2, design: .rounded, weight: .bold))
+                            .foregroundStyle(HyggeTheme.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let domain = store.siteDomain(id: proposal.siteID) {
+                            Text(domain).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
                         }
                     }
-                    .font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                    Text(proposal.rationale).foregroundStyle(HyggeTheme.secondary)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(proposal.rationale).foregroundStyle(HyggeTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Say yes and I'll create your account, then scan \(name) regularly for work that fits you. Matches appear on your Home screen — nothing is applied for without your OK, and you can stop any job site anytime.")
+                        .foregroundStyle(HyggeTheme.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 VStack(spacing: 18) {
@@ -33,12 +42,17 @@ struct FeedProposalDetail: View {
             } else { Text("This suggestion is no longer available.").foregroundStyle(HyggeTheme.secondary) }
         } footer: {
             if let proposal, proposal.status == .proposed {
-                FeedPrimaryButton(title: "Create my account") {
+                // Named for the outcome (scanning), not the
+                // paperwork (account creation) that enables it.
+                FeedPrimaryButton(title: "Start scanning") {
                     store.approveProposal(proposalID: proposalID, alreadyHasAccount: false); close()
                 }
-                Button("I have one") {
+                Button("I already have an account") {
                     store.approveProposal(proposalID: proposalID, alreadyHasAccount: true); close()
                 }.foregroundStyle(HyggeTheme.ink).frame(maxWidth: .infinity, minHeight: 44)
+                Button("Not this site") {
+                    store.dismissProposal(proposalID: proposalID); close()
+                }.font(.subheadline).foregroundStyle(HyggeTheme.secondary).frame(maxWidth: .infinity, minHeight: 40)
             }
         }
     }
@@ -54,10 +68,14 @@ struct FeedOpportunityDetail: View {
     var body: some View {
         FeedDetailContent {
             if let opportunity {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(opportunity.title).font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(store.siteName(id: opportunity.siteID)).font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
+                HStack(alignment: .top, spacing: 14) {
+                    SiteLogoTile(domain: store.siteDomain(id: opportunity.siteID) ?? "",
+                                 name: store.siteName(id: opportunity.siteID), size: 48)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(opportunity.title).font(.system(.title2, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("on \(store.siteName(id: opportunity.siteID))").font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if opportunity.needsYouKind != nil {
                     // A blocked look, not work: the one action is the fix (footer).

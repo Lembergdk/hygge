@@ -277,6 +277,7 @@ final class AppStore {
 
     func site(id: String) -> TargetSite? { sites.first { $0.id == id } }
     func siteName(id: String) -> String { site(id: id)?.name ?? id }
+    func siteDomain(id: String) -> String? { site(id: id)?.domain }
 
     func credential(forDomain domain: String) -> CredentialRef? {
         credentialRefs.first { $0.domain == domain }
@@ -1731,7 +1732,7 @@ final class AppStore {
         }
         let mentionsWork = (mail.highlights ?? []).contains { $0.localizedCaseInsensitiveContains("new work") }
         if mentionsWork, let host = EmailReferenceResolver.linkHosts(in: mail).first {
-            // Adding a brand-new place is a bigger step than reading
+            // Adding a brand-new job site is a bigger step than reading
             // or looking: a bare "check it" reads the mail and
             // offers; "do something about it" goes ahead.
             let lower = askText.lowercased()
