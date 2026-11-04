@@ -17,9 +17,20 @@ enum PermissionService {
         let center = UNUserNotificationCenter.current()
         let granted = (try? await center.requestAuthorization(options: [.alert, .badge, .sound])) ?? false
         if granted {
-            await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
+            await registerForRemoteNotifications()
         }
         return granted
+    }
+
+    /// Ask iOS to (re)deliver the current device token. Safe on
+    /// every foreground once permission is granted: iOS just hands
+    /// back the token. This must not live only behind the primer's
+    /// one request — after sign-out forgets the local token (or a
+    /// reinstall, or a grant via iOS Settings) nothing would ever
+    /// ask again, and the server row stays missing forever.
+    @MainActor
+    static func registerForRemoteNotifications() {
+        UIApplication.shared.registerForRemoteNotifications()
     }
 
     /// The current notification answer, in the primer policy's

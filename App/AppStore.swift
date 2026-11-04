@@ -446,15 +446,23 @@ final class AppStore {
                 UserDefaults.standard.set(token, forKey: Self.pushTokenKey)
             }
         }
-        if isSignedIn, let token = UserDefaults.standard.string(forKey: Self.pushTokenKey) {
+        if isSignedIn {
             switch await PermissionService.notificationAuthorization() {
             case .authorized:
-                await backend.registerDeviceToken(token)
+                // Re-ask iOS for the token even when we hold none
+                // locally (sign-out, reinstall, Settings grant): the
+                // delegate callback is the only token source, and
+                // without this call it never fires again.
+                PermissionService.registerForRemoteNotifications()
+                if let token = UserDefaults.standard.string(forKey: Self.pushTokenKey) {
+                    await backend.registerDeviceToken(token)
+                }
             case .denied:
                 // Permission was taken away: stop sends to this phone.
                 // The local copy is dropped only once the server row
                 // is gone, so a failed unregister retries next launch.
-                if await backend.unregisterDeviceToken(token) {
+                if let token = UserDefaults.standard.string(forKey: Self.pushTokenKey),
+                   await backend.unregisterDeviceToken(token) {
                     UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
                 }
             case .notDetermined:
