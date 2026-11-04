@@ -233,6 +233,50 @@ struct BackendClient {
         var contextSummary: String
     }
 
+    // MARK: - Chat intent (model decides, app validates)
+
+    struct ChatIntentContext: Encodable {
+        struct SiteLine: Encodable { var id: String; var name: String; var domain: String; var state: String }
+        struct MailLine: Encodable {
+            var id: String; var senderDomain: String; var subject: String
+            var summary: String; var highlights: [String]
+        }
+        var sites: [SiteLine]
+        var inbox: [MailLine]
+        var paused: Bool
+    }
+
+    struct ChatIntentActionDTO: Decodable, Equatable {
+        var kind: String
+        var siteId: String?
+        var domain: String?
+        var mailId: String?
+        var act: Bool?
+        var amount: Double?
+    }
+
+    private struct ChatIntentBody: Encodable {
+        var transcript: [TranscriptLine]
+        var profile: EarningsProfile
+        var context: ChatIntentContext
+    }
+
+    private struct ChatIntentResponse: Decodable {
+        var action: ChatIntentActionDTO?
+        var simulated: Bool?
+    }
+
+    /// One short model call before any reply is written: does this
+    /// message want something done? The answer is validated again
+    /// in the store before anything runs.
+    func chatIntent(transcript: [TranscriptLine], profile: EarningsProfile,
+                    context: ChatIntentContext) async throws -> ChatIntentActionDTO? {
+        let response: ChatIntentResponse = try await post(
+            "onboarding/intent",
+            body: ChatIntentBody(transcript: transcript, profile: profile, context: context))
+        return response.action
+    }
+
     /// The lifelong conversation thread (post-onboarding). Same SSE endpoint,
     /// "general" objective, with a plain-language context summary attached.
     func chatStream(transcript: [TranscriptLine], profile: EarningsProfile, contextSummary: String,
