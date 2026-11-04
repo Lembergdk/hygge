@@ -489,7 +489,9 @@ struct HomeFeedView: View {
     }
 
     private var flameState: FlameState {
-        if store.needsYouCount > 0 { return .needsYou(store.needsYouCount) }
+        // The badge only promises what tapping him (the chat) can
+        // resolve; feed decisions never strand it.
+        if store.chatBadgeCount > 0 { return .needsYou(store.chatBadgeCount) }
         return store.isAgentWorking ? .working : .asleep
     }
     private var proposedSites: [ProposedSite] { store.proposals.filter { $0.status == .proposed } }
