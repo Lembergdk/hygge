@@ -93,9 +93,10 @@ for(const status of ['prepared','dispatching','uncertain'])test(`unresolved ${st
  assert.deepEqual(w.foundation.persistence.get('effect','preserved'),before);assert.equal(w.imageUpgrade.locked(),false);assert.equal(f.stats().destroys,0);
 });
 
-test('committed final capture with a lost release request resumes without losing its frozen source',async t=>{
+for(const expired of [false,true])test(`committed final capture with a lost release request resumes with ${expired?'an expired':'a live'} source lease`,async t=>{
  const f=await fixture(t);let w=f.make();await w.ensure();await w.saveDocument('notes/sentinel',1,new TextEncoder().encode('keep'));
  const source=await w.foundation.registry.read(owner,owner),input={operationId:'release_loss',expectedGeneration:source.generation,targetImage:newImage};f.loseCaptureRelease();
  await assert.rejects(w.imageUpgrade.run(input),/CAPTURE_RELEASE_LOST/);assert.equal(f.stats().destroys,0);await assert.rejects(w.ensure(),/UPGRADE_PENDING/);
+ if(expired){const row=[...f.storage.sql.exec("SELECT key,value FROM workspace_registry WHERE key LIKE 'workspace/%'")][0],record=JSON.parse(String(row.value));record.lease.expiresAt=new Date(Date.now()-1).toISOString();record.binding.leaseExpiresAt=record.lease.expiresAt;f.storage.sql.exec('UPDATE workspace_registry SET value=? WHERE key=?',JSON.stringify(record),String(row.key));}
  w=f.make();const result=await w.imageUpgrade.run(input);assert.equal(result.operation.phase,'verified');assert.equal(f.stats().destroys,1);await w.foundation.verifyDurability(result.operation.sourceReceipt!.receiptId);
 });
