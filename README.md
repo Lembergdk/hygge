@@ -244,7 +244,7 @@ LLM traffic runs through Cloudflare AI Gateway with a custom Meta provider: the 
 | Sign in with Apple, magic links, optional passwords | **Live.** Universal Links verified against origin and Apple CDN records. |
 | Scheduled scanning (3×/day) | **Built and configured** (cron triggers committed in both wrangler configs; the sweeper runs the same mission path as manual discovery). Per-user ticks are testable without a deployed clock. |
 | `@usehygge.cc` receive-only email | **Pipeline built; DNS live** (MX records resolve to Cloudflare Email Routing). First live delivery checks are documented in [docs/email-usehygge-cc.md](docs/email-usehygge-cc.md). |
-| Push notifications | **Pipeline built.** Sends only when an APNs key is configured; otherwise each event is logged as an `unconfigured` no-op, never a fake success. |
+| Push notifications | **Live, verified on device.** APNs key `P7AKJ8SZL4` is configured in both workers; a production test alert returned APNs 200 and was received on the TestFlight device. Unconfigured environments still log an `unconfigured` no-op, never a fake success. |
 | Profile learning / ranking | **Live.** Threshold filters server-side; the Home feed orders listings and site proposals by the server `rankScore` they carry. |
 | Retained-workspace V2 + shared skills V2 | **Activated; acceptance pending.** `retained-v2` is set for staging and production. Populated legacy browser users fail closed pending adoption; production has no reviewed registry/postconditions yet. |
 | Fresh-install sample content | **Labelled demo data** (`isDemo`), local only, never uploaded, hidden as soon as real work arrives. |
