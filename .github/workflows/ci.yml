@@ -137,6 +137,9 @@ jobs:
         run: curl -fsS https://api-staging.usehygge.app/health
 
   deploy-production:
+    concurrency:
+      group: hygge-production-deployment
+      cancel-in-progress: false
     needs: [core-tests, backend-tests]
     if: github.event_name == 'workflow_dispatch' && inputs.deploy_production
     runs-on: ubuntu-latest

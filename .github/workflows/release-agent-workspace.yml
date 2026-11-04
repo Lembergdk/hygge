@@ -1,0 +1,69 @@
+name: Release agent workspace
+
+# The user's manual merge is the release boundary. Only this approved release PR
+# triggers the initial automatic release; later recovery is an explicit dispatch.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: hygge-production-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'codex/verified-workspace-image-rollout')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    concurrency:
+      group: hygge-production-deployment
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Require merged main CI to pass
+        run: node scripts/wait-release-workflow.mjs ci
+      - run: npm ci
+        working-directory: backend/cloudflare
+      - name: Ensure existing production prerequisites
+        working-directory: backend/cloudflare
+        run: |
+          npx wrangler d1 execute hygge-production -c wrangler.production.jsonc --remote --file migrations/0007_password_confirmations.sql
+          npx wrangler d1 execute hygge-production -c wrangler.production.jsonc --remote --file migrations/0008_shared_skills_v2.sql
+          npx wrangler r2 bucket info hygge-workspace-checkpoints-production >/dev/null 2>&1 || npx wrangler r2 bucket create hygge-workspace-checkpoints-production
+          for q in hygge-missions-production hygge-missions-production-dlq; do
+            npx wrangler queues list | grep -qw "$q" || npx wrangler queues create "$q"
+          done
+      - name: Deploy production with the published immutable image
+        working-directory: backend/cloudflare
+        run: npx wrangler deploy -c wrangler.production.jsonc
+      - name: Verify production health
+        run: curl --retry 3 --retry-delay 5 -fsS https://api.usehygge.app/health
+      - name: Upgrade eligible existing workspaces without resetting state
+        working-directory: backend/cloudflare
+        run: node scripts/upgrade-production-workspaces.mjs
+      - name: Build, upload and verify TestFlight processing
+        run: node scripts/wait-release-workflow.mjs testflight
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-workspace-release
+          path: backend/cloudflare/production-workspace-release.json
+          if-no-files-found: ignore

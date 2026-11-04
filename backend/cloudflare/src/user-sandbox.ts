@@ -1,3 +1,4 @@
+import {imageReleaseEnabled} from './workspace-image-release.ts';
 import { readEmailHistory } from "./email-history.ts";
 import { EmailOwnerAddresses, normalizeOwnEmail } from "./email-owner-addresses.ts";
 import { recordWorkspaceTaskOutcome } from './chat-task-outcomes.ts';
@@ -2109,15 +2110,15 @@ export class UserSandbox extends DurableObject<Env> {
         return json({error:'Unknown conversation operation'},404);
       }
 
-      // Explicit authenticated staging-owner maintenance; never a model tool or
-      // a Production route, and never accepts owner IDs, proof objects or scopes.
+      // Explicit authenticated owner maintenance; never a model tool and never
+      // accepts owner IDs, proof objects or scopes. Fixtures remain staging-only.
       if(path==='/sandbox/image-upgrade/fixture'){
         if(this.env.HYGGE_ENV!=='staging'||!this.env.HYGGE_WORKSPACE_IMAGE_TRANSITIONS)return json({error:'Not enabled'},404);
         if(request.method!=='POST'||body.reviewed!==true||typeof body.action!=='string'||typeof body.marker!=='string')return json({error:'Reviewed fixture required'},400);
         return json(await this.workspace().imageUpgradeFixture(body.action,body.marker));
       }
       if(path==='/sandbox/image-upgrade'){
-        if(this.env.HYGGE_ENV!=='staging'||!this.env.HYGGE_WORKSPACE_IMAGE_TRANSITIONS)return json({error:'Image upgrade is not enabled'},404);
+        if(!imageReleaseEnabled(this.env)||!this.env.HYGGE_WORKSPACE_IMAGE_TRANSITIONS)return json({error:'Image upgrade is not enabled'},404);
         if(request.method==='GET')return json(await this.workspace().imageUpgrade.status());
         if(request.method==='POST'){
           if(body.reviewed!==true||typeof body.operationId!=='string')return json({error:'Explicit reviewed operation is required'},400);

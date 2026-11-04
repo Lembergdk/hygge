@@ -1,3 +1,4 @@
+import {imageReleaseEnabled,imageReleaseOwnerAllowed} from './workspace-image-release.ts';
 import {structuredWorkspaceHash,verifyImageFiles} from './workspace-image-verification.ts';
 import {createWorkspaceImageUpgrade,type ImageUpgrade} from './workspace-image-upgrade.ts';
 import {ownerKey} from './workspace-runtime.ts';
@@ -164,7 +165,7 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     getLease:async()=>{if(!foundation.persistence.get('image_upgrade_lock','active'))throw Error('IMAGE_UPGRADE_LOCK_REQUIRED');return foundation.registry.readLease(owner,owner);}});
   const migrationCapture=new WorkspaceCaptureService(foundation.registry,objects,migrationBridge.captureDriver,Date.now,{maxEntries:8192,maxBytes:16*1024*1024});
   const images=createWorkspaceImageUpgrade({db:foundation.persistence,
-    allowed:(from,to)=>env.HYGGE_ENV==='staging'&&transitions.some(p=>p.from===from&&p.to===to),
+    allowed:(from,to)=>imageReleaseEnabled(env)&&transitions.some(p=>p.from===from&&p.to===to),
     prepare:async()=>{await ensure();const status=await bridge.status();if(status.humanControlled||status.frozen)throw Error('WORKSPACE_CAPTURE_OR_HUMAN_PENDING');return foundation.registry.read(owner,owner);},
     structuredHash:()=>structuredWorkspaceHash(storage),verifyFiles:(source,target)=>verifyImageFiles(objects,owner,source,target),
     assertIdle(){options.assertOwnerIdle?.();if(lineagePins.size||foundation.persistence.get('runner_owner','active'))throw Error('WORKSPACE_ADMISSION_BUSY');
@@ -206,7 +207,7 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       if(!transitions.some(p=>p.from===manifest.imageDigest&&p.to===record.targetImage)||binding.desiredImageDigest!==manifest.imageDigest)throw Error('UNREVIEWED_IMAGE_TRANSITION');
       return {receipt,imageDigest:manifest.imageDigest};
     });},
-    async restore(record){const binding=await foundation.registry.ensure(owner,owner,`${record.operationId}_start`);const status=await migrationBridge.attach(binding);if(binding.desiredImageDigest!==env.HYGGE_WORKSPACE_IMAGE&&status.artifactProtocolVersion!==1)throw Error('UPGRADE_PROTOCOL_MISMATCH');return binding;},
+    async restore(record){const binding=await foundation.registry.ensure(owner,owner,`${record.operationId}_start`);const status=await migrationBridge.attach(binding);if((env.HYGGE_ENV==='production'||binding.desiredImageDigest!==env.HYGGE_WORKSPACE_IMAGE)&&status.artifactProtocolVersion!==1)throw Error('UPGRADE_PROTOCOL_MISMATCH');return binding;},
     current:()=>foundation.registry.read(owner,owner),
     async abortCheck(record){const binding=await foundation.registry.read(owner,owner);
       if(binding.lifecycleState!=='ready'||binding.generation!==record.source.generation||binding.incarnation!==record.source.incarnation||binding.desiredImageDigest!==record.source.desiredImageDigest)throw Error('UPGRADE_CANNOT_ABORT_AFTER_FENCE');
@@ -226,9 +227,9 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       });
     }
   return {browser:bridge.browser,foundation,skills,runner,ensure,
-    imageUpgrade:{run:async(input:{operationId:string;expectedGeneration:number;targetImage:string})=>{if(env.HYGGE_ENV!=='staging'||!transitions.length)throw Error('IMAGE_UPGRADE_DISABLED');if(!transitions.some(p=>p.to===input.targetImage))throw Error('UNREVIEWED_IMAGE_TRANSITION');const account=await env.DB.prepare('SELECT contact_email FROM users WHERE id=?').bind(owner.userId).first<{contact_email:string}>();if(!/^workspace-upgrade-[a-z0-9-]+@example\.invalid$/.test(account?.contact_email??''))throw Error('SYNTHETIC_UPGRADE_ACCOUNT_REQUIRED');return images.run(input);},
+    imageUpgrade:{run:async(input:{operationId:string;expectedGeneration:number;targetImage:string})=>{if(!imageReleaseEnabled(env)||!transitions.length)throw Error('IMAGE_UPGRADE_DISABLED');if(!transitions.some(p=>p.to===input.targetImage))throw Error('UNREVIEWED_IMAGE_TRANSITION');const account=await env.DB.prepare('SELECT contact_email FROM users WHERE id=?').bind(owner.userId).first<{contact_email:string}>();if(!imageReleaseOwnerAllowed(env,input.targetImage,account?.contact_email??''))throw Error('IMAGE_UPGRADE_NOT_AUTHORIZED');return images.run(input);},
       locked:()=>!!foundation.persistence.get('image_upgrade_lock','active'),
-      abort:(id:string)=>{if(env.HYGGE_ENV!=='staging')throw Error('IMAGE_UPGRADE_DISABLED');return images.abort(id);},
+      abort:(id:string)=>{if(!imageReleaseEnabled(env))throw Error('IMAGE_UPGRADE_DISABLED');return images.abort(id);},
       async status(){let current=null;try{current=await foundation.registry.read(owner,owner);}catch(error){if(!(error instanceof Error)||error.message!=='WORKSPACE_NOT_INITIALIZED')throw error;}return {current,operations:images.status(),fixtureMarker:foundation.persistence.get<{marker:string}>('image_fixture','active')?.value.marker??null};}},
     /** Synthetic-account route only; no arbitrary URL, script, file or owner input. */
     async imageUpgradeFixture(action:string,marker:string){
