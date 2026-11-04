@@ -115,3 +115,6 @@ jobs:
           xcrun altool --upload-app
           -f /tmp/HyggeExport/Hygge.ipa -t ios
           --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER"
+
+      - name: Verify Apple processing and internal distribution readback
+        run: node scripts/wait-testflight-processing.mjs

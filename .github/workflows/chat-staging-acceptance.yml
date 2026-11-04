@@ -7,6 +7,18 @@ on:
         description: "Check the persistent chat protocol instead of legacy intent"
         type: boolean
         default: false
+      finish_upgrade_fixture:
+        description: "Finish file/isolation/cleanup checks on the existing upgraded synthetic fixture"
+        type: boolean
+        default: false
+      recover_image_fixture:
+        description: "Inspect and remove login access for the preserved image-test fixture"
+        type: boolean
+        default: false
+      workspace_image_upgrade:
+        description: "Verify populated old/new image upgrade and latest-state rollback (synthetic accounts only)"
+        type: boolean
+        default: false
       deploy_staging:
         description: "Deploy this ref to staging before acceptance (never production)"
         type: boolean
@@ -25,7 +37,7 @@ jobs:
       group: hygge-staging-deployment
       cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     defaults:
       run:
         working-directory: backend/cloudflare
@@ -45,8 +57,17 @@ jobs:
         if: inputs.deploy_staging
         run: npx wrangler deploy -c wrangler.staging.jsonc
       - name: Verify persistent chat with a synthetic staging account
-        if: inputs.persistent_agent
+        if: ${{ inputs.persistent_agent && !inputs.workspace_image_upgrade && !inputs.recover_image_fixture && !inputs.finish_upgrade_fixture }}
         run: node scripts/persistent-chat-staging-acceptance.mjs
       - name: Verify model intent using a synthetic staging account
-        if: ${{ !inputs.persistent_agent }}
+        if: ${{ !inputs.persistent_agent && !inputs.workspace_image_upgrade && !inputs.recover_image_fixture && !inputs.finish_upgrade_fixture }}
         run: node scripts/chat-staging-acceptance.mjs
+      - name: Verify populated workspace image upgrade and rollback
+        if: ${{ inputs.workspace_image_upgrade && !inputs.recover_image_fixture && !inputs.finish_upgrade_fixture }}
+        run: node scripts/workspace-image-staging-acceptance.mjs
+      - name: Inspect preserved fixture and remove temporary login access
+        if: ${{ always() && (inputs.recover_image_fixture || inputs.workspace_image_upgrade) }}
+        run: node scripts/workspace-image-fixture-recovery.mjs
+      - name: Finish existing upgrade fixture without repeating migration
+        if: inputs.finish_upgrade_fixture
+        run: node scripts/workspace-image-finish-fixture.mjs

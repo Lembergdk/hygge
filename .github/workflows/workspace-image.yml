@@ -2,8 +2,8 @@ name: Publish workspace image
 
 # Manual only. This publishes a new immutable workspace image and
 # reports its digest; it never changes Wrangler config or deploys a
-# worker. Updating both pinned references remains a separate,
-# reviewed image-upgrade change.
+# worker. Changing an environment or owner image policy remains a
+# separate reviewed image-upgrade change.
 on:
   workflow_dispatch:
     inputs:
@@ -12,11 +12,21 @@ on:
         required: true
         type: string
 
+      verify_source_image:
+        description: "Optional exact source image for verification-only mode"
+        required: false
+        type: string
+      verify_target_image:
+        description: "Optional exact target image; verifies the pair without publishing"
+        required: false
+        type: string
+
 permissions:
   contents: read
 
 jobs:
   publish:
+    if: ${{ inputs.verify_target_image == '' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -54,9 +64,34 @@ jobs:
             echo
             echo "\`$digest_ref\`"
             echo
-            echo "Pin this exact reference in both Wrangler configs in a separate image-upgrade PR."
+            echo "Use this exact reference only through a separately reviewed environment image-upgrade policy."
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: workspace-image-ref
           path: backend/cloudflare/workspace-image-ref.txt
+
+  verify-pair:
+    if: ${{ inputs.verify_target_image != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend/cloudflare
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SOURCE_IMAGE: ${{ inputs.verify_source_image }}
+      TARGET_IMAGE: ${{ inputs.verify_target_image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Prove isolated upgrade and latest-state rollback without publishing
+        run: node container/scripts/registry-image-proof.mjs "$SOURCE_IMAGE" "$TARGET_IMAGE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace-image-upgrade-proof
+          path: backend/cloudflare/workspace-image-upgrade-proof.json

@@ -18,7 +18,7 @@
   // coordinator deploys after confirming cron quota on the account.
   "triggers": { "crons": ["0 7 * * *", "0 13 * * *", "0 19 * * *"] },
   "containers": [
-    { "class_name": "UserSandbox", "scheduling_policy": "durable_object", "images": { "base": { "image": "registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:ae26f5d92b203d94f18bc13f1c121975459053c3b34d9ee2ea664d68f01d55ff" } } }
+    { "class_name": "UserSandbox", "scheduling_policy": "durable_object", "images": { "base": { "image": "registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:ae26f5d92b203d94f18bc13f1c121975459053c3b34d9ee2ea664d68f01d55ff" }, "recovery_v1": { "image": "registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:1c7dcb73cd6ddd7bf9bea12fdbb8b4a7d6498bf87d95a772434797562f95b5f9" } } }
   ],
   "durable_objects": {
     "bindings": [
@@ -47,6 +47,7 @@
     // image and must change only as a deliberate image upgrade.
     "HYGGE_WORKSPACE_MODE": "retained-v2",
     "HYGGE_WORKSPACE_NAMESPACE": "hygge-staging",
+    "HYGGE_WORKSPACE_IMAGE_TRANSITIONS": "[{\"from\":\"registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:ae26f5d92b203d94f18bc13f1c121975459053c3b34d9ee2ea664d68f01d55ff\",\"to\":\"registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:1c7dcb73cd6ddd7bf9bea12fdbb8b4a7d6498bf87d95a772434797562f95b5f9\",\"policy\":\"workspace-filesystem-v1\"},{\"from\":\"registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:1c7dcb73cd6ddd7bf9bea12fdbb8b4a7d6498bf87d95a772434797562f95b5f9\",\"to\":\"registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:ae26f5d92b203d94f18bc13f1c121975459053c3b34d9ee2ea664d68f01d55ff\",\"policy\":\"workspace-filesystem-v1\"}]",
     "HYGGE_WORKSPACE_IMAGE": "registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:ae26f5d92b203d94f18bc13f1c121975459053c3b34d9ee2ea664d68f01d55ff",
     "HYGGE_SKILL_REGISTRY": "{\"schemaVersion\":1,\"sites\":[{\"siteId\":\"wave4-jobs\",\"origin\":\"https://hygge-wave4-jobs.lemberg-89a.workers.dev\",\"routes\":{\"home\":\"/\",\"listings\":\"/listings\",\"apply\":\"/apply\",\"login\":\"/login\"},\"controls\":[\"Search\",\"Apply\",\"Submit\",\"Cover\"],\"fieldSets\":[\"listings\"],\"pitfalls\":[],\"review\":{\"policyVersion\":\"hygge-public-skills-v2.1\",\"reviewedRevision\":\"wave4-2026-11-03\",\"source\":\"developer_review\"}}]}",
     "HYGGE_WORKSPACE_POSTCONDITIONS": "[{\"origin\":\"https://hygge-wave4-jobs.lemberg-89a.workers.dev\",\"outcome\":\"apply\",\"pathname\":\"/apply/success\",\"requiredLabels\":[\"Application received\"],\"reviewedRevision\":\"wave4-2026-11-03\"}]",

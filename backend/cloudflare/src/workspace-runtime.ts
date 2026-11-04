@@ -57,7 +57,7 @@ export function assertLease(binding: WorkspaceBinding, lease: RuntimeLease, now:
   if (binding.lifecycleState !== 'ready' || binding.generation !== lease.generation || binding.incarnation !== lease.incarnation || binding.runtimeId !== lease.runtimeId) throw new Error('STALE_GENERATION');
   if (!Number.isFinite(Date.parse(lease.expiresAt)) || Date.parse(lease.expiresAt) <= now || !binding.leaseExpiresAt || Date.parse(binding.leaseExpiresAt) <= now) throw new Error('LEASE_EXPIRED');
 }
-interface RegistryRecord { binding: WorkspaceBinding; lease?: RuntimeLease; pending?: { id: string; kind: 'start' | 'fence' }; completed: Record<string, { kind: 'start' | 'fence'; generation: number }> }
+interface RegistryRecord { binding: WorkspaceBinding; lease?: RuntimeLease; pending?: { id: string; kind: 'start' | 'fence' }; completed: Record<string, { kind: 'start' | 'fence' | 'image'; generation: number }> }
 export interface StoredWorkspaceReceipt { digest: string; receipt: WorkspaceDurabilityReceipt; manifestKey: string }
 export class WorkspaceRegistry {
   readonly storage: WorkspaceStorage; readonly provider: RuntimeProvider; readonly now: () => number; readonly leaseDurationMs: number;
@@ -195,6 +195,41 @@ export class WorkspaceRegistry {
       if (point.sequence !== (r.binding.recoveryPoint?.sequence ?? 0) + 1 || point.sourceIncarnation !== lease.incarnation || point.sourceGeneration !== lease.generation || value.receipt.incarnation !== lease.incarnation || value.receipt.generation !== lease.generation) throw new Error('INVALID_RECOVERY_LINEAGE');
       r.binding = { ...r.binding, recoveryPoint: point, revision: r.binding.revision + 1 };
       tx.put(key, value); tx.put(this.key(lease), r); return value.receipt;
+    });
+  }
+  /** Root-only compatible-image selection. A current, independently verified checkpoint and
+   * exact retirement are required; ordinary recovery keeps its exact-image invariant. */
+  async selectImage(actor:WorkspaceIdentity,owner:WorkspaceIdentity,operationId:string,expectedRevision:number,targetImage:string,
+    verify:(binding:WorkspaceBinding)=>Promise<{receipt:WorkspaceDurabilityReceipt;imageDigest:string}>):Promise<WorkspaceBinding>{
+    assertOwner(actor,owner);this.operationId(operationId);
+    if(!/@sha256:[a-f0-9]{64}$/.test(targetImage)||typeof verify!=='function')throw Error('IMAGE_TRANSITION_UNVERIFIED');
+    const prior=await this.storage.transaction(tx=>tx.get<any>(`image-selection/${ownerKey(owner)}/${operationId}`));
+    if(prior){if(prior.targetImage!==targetImage||prior.expectedRevision!==expectedRevision)throw Error('IDEMPOTENCY_CONFLICT');return this.read(actor,owner);}
+    const before=await this.read(actor,owner);
+    if(before.lifecycleState!=='stopped'||before.revision!==expectedRevision||!before.recoveryPoint)throw Error('IMAGE_TRANSITION_REQUIRES_FENCED_CHECKPOINT');
+    const proof=await verify(structuredClone(before));assertOwner(owner,proof.receipt);
+    if(proof.imageDigest!==before.desiredImageDigest||JSON.stringify(proof.receipt.recoveryPoint)!==JSON.stringify(before.recoveryPoint)
+      ||proof.receipt.incarnation!==before.incarnation||proof.receipt.generation!==before.generation)throw Error('IMAGE_TRANSITION_UNVERIFIED');
+    return this.storage.transaction(tx=>{
+      const r=this.record(tx,owner),key=`image-selection/${ownerKey(owner)}/${operationId}`,existing=tx.get<any>(key);
+      if(existing){if(existing.targetImage!==targetImage||existing.expectedRevision!==expectedRevision)throw Error('IDEMPOTENCY_CONFLICT');return r.binding;}
+      if(r.pending||r.lease||r.binding.lifecycleState!=='stopped'||r.binding.revision!==expectedRevision||r.binding.desiredImageDigest!==before.desiredImageDigest
+        ||r.binding.recoveryPoint?.checkpointId!==before.recoveryPoint!.checkpointId)throw Error('REVISION_CONFLICT');
+      if(r.completed['op:'+operationId])throw Error('IDEMPOTENCY_CONFLICT');
+      const grant={sourceImage:proof.imageDigest,targetImage,expectedRevision,checkpointId:before.recoveryPoint!.checkpointId,sourceGeneration:before.generation,operationId};
+      tx.put(key,grant);tx.put(`image-restore/${ownerKey(owner)}/${before.recoveryPoint!.checkpointId}/${targetImage}`,grant);
+      r.binding={...r.binding,desiredImageDigest:targetImage,revision:r.binding.revision+1};
+      r.completed['op:'+operationId]={kind:'image',generation:r.binding.generation};tx.put(this.key(owner),r);return r.binding;
+    });
+  }
+  async assertCompatibleRestore(actor:WorkspaceIdentity,binding:WorkspaceBinding,sourceImage:string):Promise<void>{
+    assertOwner(actor,binding);
+    await this.storage.transaction(tx=>{
+      const r=this.record(tx,binding),point=binding.recoveryPoint;
+      const grant=point?tx.get<any>(`image-restore/${ownerKey(binding)}/${point.checkpointId}/${binding.desiredImageDigest}`):undefined;
+      if(!grant||grant.sourceImage!==sourceImage||grant.targetImage!==binding.desiredImageDigest||grant.sourceGeneration+1!==binding.generation
+        ||r.binding.generation!==binding.generation||r.binding.desiredImageDigest!==binding.desiredImageDigest
+        ||r.binding.recoveryPoint?.checkpointId!==point?.checkpointId)throw Error('RECOVERY_IMAGE_OR_LINEAGE_MISMATCH');
     });
   }
   private operationId(id: string) { if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('INVALID_OPERATION_ID'); }

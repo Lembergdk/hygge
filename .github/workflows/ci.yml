@@ -60,6 +60,10 @@ jobs:
         run: npx wrangler deploy --dry-run -c wrangler.staging.jsonc --outdir /tmp/hygge-browser-test-bundle
       - name: Install retained-container test dependencies
         run: npm --prefix container ci --ignore-scripts
+      - name: Build and smoke-test packaged workspace image
+        run: |
+          docker build --platform linux/amd64 -f container/Dockerfile -t hygge-workspace:ci .
+          docker run --rm -i --network none --entrypoint node hygge-workspace:ci --experimental-strip-types --input-type=module - < container/scripts/image-smoke.mjs
       - name: Retained-container artifact and RPC tests
         timeout-minutes: 10
         run: npm --prefix container test
@@ -133,6 +137,9 @@ jobs:
         run: curl -fsS https://api-staging.usehygge.app/health
 
   deploy-production:
+    concurrency:
+      group: hygge-production-deployment
+      cancel-in-progress: false
     needs: [core-tests, backend-tests]
     if: github.event_name == 'workflow_dispatch' && inputs.deploy_production
     runs-on: ubuntu-latest

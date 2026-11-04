@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { loadReviewedSkillRegistry } from "../src/skill-registry.ts";
 import { reviewedCompletionRules } from "../src/workspace-postconditions.ts";
 
+const NEW_IMAGE = "registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:1c7dcb73cd6ddd7bf9bea12fdbb8b4a7d6498bf87d95a772434797562f95b5f9";
 const IMAGE = "registry.cloudflare.com/89a95a21e6a6b7c15bbd8e148a6c6242/hygge-workspace@sha256:ae26f5d92b203d94f18bc13f1c121975459053c3b34d9ee2ea664d68f01d55ff";
 
 function config(name: string): string {
@@ -28,7 +29,8 @@ test("staging and production activate retained V2 with isolated pinned bindings"
     const text = config(file);
     assert.equal(value(text, "HYGGE_WORKSPACE_MODE"), "retained-v2", file);
     assert.equal(value(text, "HYGGE_WORKSPACE_NAMESPACE"), namespace, file);
-    assert.equal(value(text, "HYGGE_WORKSPACE_IMAGE"), IMAGE, file);
+    assert.equal(value(text, "HYGGE_WORKSPACE_IMAGE"), namespace === "hygge-production" ? NEW_IMAGE : IMAGE, file);
+    if(namespace === "hygge-production"){assert.equal(value(text,"HYGGE_WORKSPACE_UPGRADE_ENABLED"),"1");assert.deepEqual(JSON.parse(encodedJsonValue(text,"HYGGE_WORKSPACE_IMAGE_TRANSITIONS")),[{from:IMAGE,to:NEW_IMAGE,policy:"workspace-filesystem-v1"}]);}
     assert.match(text, new RegExp(`"images":\\s*\\{\\s*"base":\\s*\\{\\s*"image":\\s*"${IMAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`), file);
     assert.match(text, new RegExp(`\\{\\s*"binding":\\s*"WORKSPACE_CHECKPOINTS",\\s*"bucket_name":\\s*"${bucket}"\\s*\\}`), file);
   }

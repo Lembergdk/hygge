@@ -149,7 +149,7 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
     };
     db.storage.transactionSync(()=>{
       f.checkpoints.authority.assertCurrent(anchoredLease);
-      if(db.get('runner_owner','active'))fail('WORKSPACE_ADMISSION_BUSY');
+      if(db.get('image_upgrade_lock','active'))fail('WORKSPACE_IMAGE_UPGRADE_PENDING');if(db.get('runner_owner','active'))fail('WORKSPACE_ADMISSION_BUSY');
       db.put('runner_owner','active',0,{instanceId,executionId,taskId:input.task.id,runtimeId:anchoredLease.runtimeId,incarnation:anchoredLease.incarnation,generation:anchoredLease.generation,leaseId:anchoredLease.leaseId});
     });
     function atomicExecution<T>(operation:()=>T):T{return db.storage.transactionSync(()=>{guard.assertCurrent();return operation();});}
@@ -297,11 +297,12 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
     deliveryFailed,
     /** Background document work shares admission and fails fast while missions/review own the workspace. */
     withWorkspaceMutation<T>(taskId:string,work:(lease:RuntimeLease)=>Promise<T>):Promise<T>{
+      if(db.get('image_upgrade_lock','active'))return Promise.reject(Error('WORKSPACE_IMAGE_UPGRADE_PENDING'));
       if(pendingOperations||db.get('runner_owner','active'))return Promise.reject(Error('WORKSPACE_ADMISSION_BUSY'));
       return serialized(async()=>{
         const lease=await f.registry.readLease(owner,owner),executionId=crypto.randomUUID();
         db.storage.transactionSync(()=>{
-          f.checkpoints.authority.assertCurrent(lease);if(db.get('runner_owner','active'))fail('WORKSPACE_ADMISSION_BUSY');
+          f.checkpoints.authority.assertCurrent(lease);if(db.get('image_upgrade_lock','active'))fail('WORKSPACE_IMAGE_UPGRADE_PENDING');if(db.get('runner_owner','active'))fail('WORKSPACE_ADMISSION_BUSY');
           db.put('runner_owner','active',0,{instanceId,taskId,executionId,runtimeId:lease.runtimeId,incarnation:lease.incarnation,generation:lease.generation,leaseId:lease.leaseId});
         });
         try{return await work(lease);}finally{db.storage.transactionSync(()=>{

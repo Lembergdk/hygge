@@ -28,6 +28,8 @@ export interface Env {
   HYGGE_WORKSPACE_MODE?: 'legacy' | 'retained-v2';
   WORKSPACE_CHECKPOINTS?: R2Bucket;
   SELF?: Fetcher;
+  HYGGE_WORKSPACE_IMAGE_TRANSITIONS?: string; // reviewed immutable from/to pairs
+  HYGGE_WORKSPACE_UPGRADE_ENABLED?: string; // explicit production forward-upgrade switch
   HYGGE_WORKSPACE_IMAGE?: string; // immutable image@sha256 reference
   HYGGE_WORKSPACE_NAMESPACE?: string;
   HYGGE_SKILL_REGISTRY?: string; // reviewed configuration, never request/model input
