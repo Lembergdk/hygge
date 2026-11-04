@@ -73,6 +73,31 @@ public struct SearchEvidence: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// The feed's one ordering contract (Brief 06): server `rankScore`
+/// descends, items the server ranker never scored go last (a real
+/// 0.0 still outranks "no score"), ties keep their incoming order,
+/// and a deliberately highlighted item — the one a push tap landed
+/// on — leads regardless of score. Every feed surface that shows
+/// ranked work sorts through here so there is exactly one ordering
+/// truth on the consumer side, mirroring the one server ranker.
+public enum FeedRankOrdering {
+    public static func sorted<T>(_ items: [T], rankScore: (T) -> Double?,
+                                   isHighlighted: (T) -> Bool = { _ in false }) -> [T] {
+        items.enumerated()
+            .sorted { a, b in
+                let ha = isHighlighted(a.element), hb = isHighlighted(b.element)
+                if ha != hb { return ha }
+                switch (rankScore(a.element), rankScore(b.element)) {
+                case let (sa?, sb?): return sa != sb ? sa > sb : a.offset < b.offset
+                case (_?, nil): return true
+                case (nil, _?): return false
+                case (nil, nil): return a.offset < b.offset
+                }
+            }
+            .map(\.element)
+    }
+}
+
 /// Display evidence only (Brief 06). What surfaces, and in what order,
 /// is decided by the ONE server ranker (backend/cloudflare/src/
 /// learning.ts, seeded from these weights: 0.35 category, 0.35 skills,
@@ -154,12 +179,8 @@ public enum MatchEngine {
     /// display-evidence result. Deliberately does NOT sort by the
     /// local score — there is exactly one ranking truth (Brief 06).
     public static func inServerRankOrder(profile: EarningsProfile, opportunities: [Opportunity]) -> [(Opportunity, MatchResult)] {
-        opportunities.enumerated()
-            .sorted { a, b in
-                let sa = a.element.rankScore ?? -1, sb = b.element.rankScore ?? -1
-                return sa != sb ? sa > sb : a.offset < b.offset
-            }
-            .map { ($0.element, evaluate(profile: profile, opportunity: $0.element)) }
+        FeedRankOrdering.sorted(opportunities, rankScore: \.rankScore)
+            .map { ($0, evaluate(profile: profile, opportunity: $0)) }
     }
 
     /// Below this confidence Hygge shows evidence but makes NO recommendation.

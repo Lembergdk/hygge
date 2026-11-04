@@ -19,11 +19,17 @@ public struct ProposedSite: Codable, Identifiable, Equatable, Sendable {
     /// domain it came from, so dismissing the place can also
     /// answer that sender ("just file it") in one motion.
     public var sourceMailDomain: String?
+    /// Brief 06: score from the one server ranker when this site was
+    /// proposed by the backend. Feed order follows this score; nil
+    /// for suggestions generated on-device (no server rank) or
+    /// payloads stored before proposals carried one.
+    public var rankScore: Double?
     public init(id: UUID = UUID(), siteID: String, rationale: String,
                 payPattern: String = "Paid per job, rates vary by listing",
                 dataShared: String = "Your name, photo and profile text",
                 verification: String = "Email confirmation; a bot check may need you",
-                status: ProposalStatus = .proposed, sourceMailDomain: String? = nil) {
+                status: ProposalStatus = .proposed, sourceMailDomain: String? = nil,
+                rankScore: Double? = nil) {
         self.id = id
         self.siteID = siteID
         self.rationale = rationale
@@ -32,6 +38,7 @@ public struct ProposedSite: Codable, Identifiable, Equatable, Sendable {
         self.verification = verification
         self.status = status
         self.sourceMailDomain = sourceMailDomain
+        self.rankScore = rankScore
     }
 }
 
