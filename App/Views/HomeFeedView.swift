@@ -754,7 +754,6 @@ struct HomeFeedView: View {
     private func dismissPresented() {
         showConversation = false
         showProfile = false
-        showYourWork = false
         showNotifications = false
         if showBubbleChat { closeBubble() }
         if focus != nil { closeFocus() }
