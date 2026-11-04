@@ -1,6 +1,6 @@
 # Runtime evidence and recovery repair
 
-This change is stacked on the persistent-agent implementation in PR #79 (the work approved in the Codex chat “Review Hygge PR 75”), initially integrated at `891a290`. It reuses the one conversational reasoning loop, native tool results, owner-private ChatStore, asynchronous document mirror, existing mission queue, effect ledger and workspace registry. It introduces no classifier, new conversation engine, approval bypass or shared personal memory. The shared generic skill repository and its privacy checks are unchanged.
+This change is stacked on the persistent-agent implementation in PR #79 (the work approved in the Codex chat “Review Hygge PR 75”), integrated through `0ad2343`. It reuses the one conversational reasoning loop, native tool results, owner-private ChatStore, asynchronous document mirror, existing mission queue, effect ledger and workspace registry. It introduces no classifier, new conversation engine, approval bypass or shared personal memory. The shared generic skill repository and its privacy checks are unchanged.
 
 ## Implemented behavior
 

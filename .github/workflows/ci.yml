@@ -61,6 +61,7 @@ jobs:
       - name: Install retained-container test dependencies
         run: npm --prefix container ci --ignore-scripts
       - name: Retained-container artifact and RPC tests
+        timeout-minutes: 10
         run: npm --prefix container test
         env:
           HYGGE_TEST_CHROME: /usr/bin/google-chrome
