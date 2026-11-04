@@ -10,6 +10,10 @@ on:
         description: "Run synthetic Responses checks through the staging gateway (no deploy)"
         type: boolean
         default: false
+      agent_evaluation:
+        description: "Run synthetic persistent conversations through staging gateway (no deploy)"
+        type: boolean
+        default: false
       deploy_production:
         description: "Also deploy production after tests pass"
         type: boolean
@@ -142,3 +146,20 @@ jobs:
           node-version: 22
       - name: Test text, vision, streaming and synthetic tools through staging gateway
         run: node --experimental-strip-types scripts/responses-gateway-smoke.mts
+
+  persistent-agent-evaluation:
+    if: github.event_name == 'workflow_dispatch' && inputs.agent_evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Synthetic reasoning, continuity, memory and cleanup checks
+        working-directory: backend/cloudflare
+        run: node --experimental-strip-types scripts/persistent-agent-evaluation.mts

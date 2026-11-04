@@ -243,6 +243,63 @@ export class LLMClient {
     if (logId) span.setAttribute("cloudflare.ai_gateway.log.id", logId.slice(0, 256));
   }
 
+  /** Native conversation turn. Persisted call IDs/results are managed by ChatAgent. */
+  async agentTurn(args: { model: string; instructions: string; input: any[]; previousResponseId?: string;
+    tools?: any[]; onDelta?: (text: string) => void; onResponseCreated?: (id:string)=>void }): Promise<{ id: string; text: string; calls: Array<{callId:string;name:string;arguments:any}>; inputTokens:number }> {
+    return withSpan(`chat ${args.model}`, this.chatAttrs(args.model), async span => {
+      const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, '')}/responses`, {
+        method:'POST', headers:llmRequestHeaders(this.cfg,args.model), signal:AbortSignal.timeout(120000),
+        body:JSON.stringify({model:args.model,instructions:args.instructions,input:args.input,store:true,
+          ...(args.previousResponseId ? {previous_response_id:args.previousResponseId} : {}),
+          ...(args.tools?.length ? {tools:args.tools} : {}),stream:Boolean(args.onDelta)}),
+      });
+      if(!res.ok) {
+        const body:any=await res.json().catch(()=>({}));
+        const error=llmHttpError(args.model,res.status) as any;
+        // Classify context/expired-chain failures without retaining error payloads.
+        const code=String(body?.error?.code??''); const message=String(body?.error?.message??'');
+        error.contextExceeded=code==='context_length_exceeded' || /context (?:window|length)|maximum context|too many tokens/i.test(message);
+        error.chainExpired=Boolean(args.previousResponseId) && (['response_not_found','previous_response_not_found'].includes(code) || /previous_response_id.*(?:expired|not found)|previous response.*(?:expired|not found)/i.test(message));
+        throw error;
+      }
+      this.gatewayLogAttr(span,res);
+      let data:any;
+      if(!args.onDelta) data=await res.json();
+      else {
+        if(!res.body)throw new Error('Missing agent response stream');
+        const reader=res.body.getReader(), decoder=new TextDecoder();let buffer='';
+        const line=(value:string)=>{
+          if(!value.startsWith('data:'))return;
+          const raw=value.slice(5).trim();if(!raw||raw==='[DONE]')return;
+          const e=JSON.parse(raw);
+          if(e.type==='response.created'&&typeof e.response?.id==='string')args.onResponseCreated?.(e.response.id);
+          if(e.type==='response.output_text.delta'&&typeof e.delta==='string')args.onDelta!(e.delta);
+          if(e.type==='response.completed')data=e.response;
+          if(['error','response.failed','response.incomplete','response.cancelled'].includes(e.type))throw new Error('Agent response interrupted');
+        };
+        try { for(;;){const part=await reader.read();if(part.done)break;buffer+=decoder.decode(part.value,{stream:true});const lines=buffer.split('\n');buffer=lines.pop()??'';lines.forEach(line);}buffer+=decoder.decode();if(buffer.trim())line(buffer); }
+        finally {await reader.cancel().catch(()=>{});reader.releaseLock();}
+      }
+      if(!data||data.status!=='completed'||typeof data.id!=='string')throw new Error('Agent response did not complete');
+      this.usageAttrs(span,data.usage);
+      const calls=(Array.isArray(data.output)?data.output:[]).filter((v:any)=>v.type==='function_call').map((v:any)=>{
+        let parsed:any=null;try {parsed=JSON.parse(v.arguments);}catch{}
+        if(typeof v.call_id!=='string'||typeof v.name!=='string')throw new Error('Invalid native call identity');
+        return {callId:v.call_id,name:v.name,arguments:parsed};
+      });
+      return {id:data.id,text:extractResponsesText(data),calls,inputTokens:Number(data.usage?.input_tokens??0)};
+    });
+  }
+
+  async deleteAgentResponse(id:string):Promise<void> {
+    const res=await fetch(`${this.cfg.baseUrl.replace(/\/$/,'')}/responses/${encodeURIComponent(id)}`, {
+      method:'DELETE',headers:llmRequestHeaders(this.cfg,this.cfg.modelStrong),signal:AbortSignal.timeout(15000)});
+    if(res.ok)return;
+    const body:any=await res.json().catch(()=>({}));
+    if(res.status===404&&(['response_not_found','not_found'].includes(String(body?.error?.code??''))||/response.*(?:deleted|not found)/i.test(String(body?.error?.message??''))))return;
+    throw llmHttpError(this.cfg.modelStrong,res.status);
+  }
+
   /// Stateless Responses call. The caller supplies the current snapshot or
   /// canonical app transcript, including actual action outcomes. No provider
   /// conversation state is retained by this transport migration.

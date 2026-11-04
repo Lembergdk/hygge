@@ -352,6 +352,45 @@ struct BackendClient {
                          onDelta: onDelta)
     }
 
+    // New chat uses one persistent native-tool conversation; no intent preflight.
+    func conversationState() async throws -> PersistentConversationState {
+        try await get("chat/state")
+    }
+    func conversationDecision(generation: String, proposalID: String, approve: Bool) async throws -> PersistentConversationState {
+        try await post("chat/proposals/\(proposalID)", body: ["generation": generation,
+            "decision": approve ? "approve" : "reject", "id": UUID().uuidString.lowercased()])
+    }
+    func conversationDeviceResult(generation: String, proposalID: String, success: Bool) async throws -> PersistentConversationState {
+        struct Body: Encodable { var generation: String; var proposalId: String; var id: String; var success: Bool }
+        return try await post("chat/device-result", body: Body(generation: generation, proposalId: proposalID,
+            id: UUID().uuidString.lowercased(), success: success))
+    }
+    func resetConversation(generation: String) async throws -> PersistentConversationState {
+        try await post("chat/reset", body: ["generation": generation])
+    }
+    func conversationTurn(id: String, generation: String, text: String?, focus: PersistentChatFocus? = nil,
+                          onDelta: @escaping @MainActor (String) -> Void) async throws -> PersistentConversationState {
+        struct Body: Encodable { var id: String; var generation: String; var text: String?; var focus: PersistentChatFocus? }
+        struct Event: Decodable { var type: String; var text: String?; var data: PersistentConversationState? }
+        var request = URLRequest(url: baseURL.appendingPathComponent("chat/turn"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 240
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        request.httpBody = try JSONEncoder().encode(Body(id: id, generation: generation, text: text, focus: focus))
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { throw URLError(.badServerResponse) }
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data:"), let data = line.dropFirst(5).data(using: .utf8),
+                  let event = try? JSONDecoder().decode(Event.self, from: data) else { continue }
+            if event.type == "reply-delta", let text = event.text { await onDelta(text) }
+            if event.type == "final", let state = event.data { return state }
+            if event.type == "error" { throw URLError(.networkConnectionLost) }
+        }
+        throw URLError(.cannotParseResponse)
+    }
+
     /// Deletes a saved login. The trusted sign-in for the site is a
     /// separate thing and is deliberately left alone (and vice versa).
     @discardableResult
@@ -929,7 +968,7 @@ struct BackendClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
-        request.timeoutInterval = path.hasPrefix("tasks/") ? 180 : 20
+        request.timeoutInterval = (path.hasPrefix("tasks/") || path.hasPrefix("chat/")) ? 240 : 20
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {

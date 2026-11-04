@@ -144,6 +144,15 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     },
   });
   return {browser:bridge.browser,foundation,skills,runner,ensure,
+    async saveDocument(path:string,revision:number,bytes:Uint8Array){
+      await ensure(); const ref=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_${revision}`;
+      await bridge.writeArtifact(ref,bytes); return save({task:{id:'document-save',kind:'discover',target_url:'https://invalid.example',status:'running'},runId:'document-save',reason:'pause',evidence:[],requiresBrowserFreeze:true});
+    },
+    async eraseDocument(path:string){
+      await ensure();const prefix=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_`;
+      for(const ref of (await bridge.listArtifacts()).filter(ref=>ref.startsWith(prefix)))await bridge.writeArtifact(ref,new Uint8Array());
+      return save({task:{id:'document-delete',kind:'discover',target_url:'https://invalid.example',status:'running'},runId:'document-delete',reason:'pause',evidence:[],requiresBrowserFreeze:true});
+    },
     /** Maintainer-only shared-library kill switch; secret-gated, never agent-callable. */
     async quarantineSkill(token:string,input:{operationId:string;skillId:string;reason:'privacy'|'unsafe_guidance'|'integrity'}){return skills.quarantine(token,input);},
     /** Called only by the already verified owner route. The person's review

@@ -187,3 +187,46 @@ test("stream accepts a completed final event without a trailing newline and send
     assert.equal(await client().completeStream({ model: "m-fast", system: "s", user: "u" }, () => {}), "ok");
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test('native agent transport persists chains and forwards native results without rewriting call IDs', async()=>{
+ const previous=globalThis.fetch;const seen:any[]=[];
+ globalThis.fetch=(async(_url:any,init:any)=>{seen.push(JSON.parse(init.body));return jsonResponse({...responsesBody(''),output:[{type:'function_call',call_id:'native-call',name:'read_profile',arguments:'{}'}]});}) as any;
+ try {
+  const result=await client().agentTurn({model:'m-strong',instructions:'policy',previousResponseId:'older',input:[{type:'function_call_output',call_id:'prior-call',output:'{"status":"saved"}'}],tools:[{type:'function',name:'read_profile'}]});
+  assert.equal(seen[0].store,true);assert.equal(seen[0].previous_response_id,'older');assert.equal(seen[0].input[0].call_id,'prior-call');
+  assert.deepEqual(result.calls,[{callId:'native-call',name:'read_profile',arguments:{}}]);
+ } finally {globalThis.fetch=previous;}
+});
+
+test('native stream records early response identity but never returns partial tool arguments',async()=>{
+ const previous=globalThis.fetch;const created:string[]=[];
+ globalThis.fetch=(async()=>sseResponse([
+  {type:'response.created',response:{id:'early'}},
+  {type:'response.function_call_arguments.delta',delta:'{"domain":'},
+  {type:'response.incomplete',response:{id:'early',status:'incomplete'}}
+ ].map(e=>`data: ${JSON.stringify(e)}\n\n`))) as any;
+ try {await assert.rejects(client().agentTurn({model:'m-strong',instructions:'policy',input:[],onDelta:()=>{},onResponseCreated:id=>created.push(id)}),/interrupted/);assert.deepEqual(created,['early']);}
+ finally {globalThis.fetch=previous;}
+});
+
+test('native transport distinguishes expired chain, context exhaustion, and unrelated HTTP 400',async()=>{
+ const previous=globalThis.fetch;
+ try {for(const [body,expired,context] of [
+  [{error:{code:'previous_response_not_found'}},true,false],
+  [{error:{code:'context_length_exceeded'}},false,true],
+  [{error:{code:'invalid_tool_schema'}},false,false],
+ ] as any[]){globalThis.fetch=(async()=>jsonResponse(body,400)) as any;
+  await assert.rejects(client().agentTurn({model:'m-strong',instructions:'policy',input:[],previousResponseId:'old'}),(e:any)=>e.chainExpired===expired&&e.contextExceeded===context);
+ }}finally{globalThis.fetch=previous;}
+});
+
+test('provider cleanup retries generic route failures but accepts an already deleted response',async()=>{
+ const previous=globalThis.fetch;let url='',method='';
+ try {
+  globalThis.fetch=(async(u:any,i:any)=>{url=String(u);method=i.method;return jsonResponse({error:{message:'Route not found'}},404);}) as any;
+  await assert.rejects(client().deleteAgentResponse('resp/test'));
+  assert.ok(url.endsWith('/responses/resp%2Ftest'));assert.equal(method,'DELETE');
+  globalThis.fetch=(async()=>jsonResponse({error:{code:'response_not_found'}},404)) as any;
+  await client().deleteAgentResponse('old');
+ }finally{globalThis.fetch=previous;}
+});
