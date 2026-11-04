@@ -244,7 +244,7 @@ LLM traffic runs through Cloudflare AI Gateway with a custom Meta provider: the 
 | Sign in with Apple, magic links, optional passwords | **Live.** Universal Links verified against origin and Apple CDN records. |
 | Scheduled scanning (3×/day) | **Built and configured** (cron triggers committed in both wrangler configs; the sweeper runs the same mission path as manual discovery). Per-user ticks are testable without a deployed clock. |
 | `@usehygge.cc` receive-only email | **Pipeline built; DNS live** (MX records resolve to Cloudflare Email Routing). First live delivery checks are documented in [docs/email-usehygge-cc.md](docs/email-usehygge-cc.md). |
-| Push notifications | **Pipeline built.** Sends only when an APNs key is configured; otherwise each event is logged as an honest `unconfigured` no-op, never a fake success. |
+| Push notifications | **Pipeline built.** Sends only when an APNs key is configured; otherwise each event is logged as an `unconfigured` no-op, never a fake success. |
 | Profile learning / ranking | **Threshold live server-side;** ranked feed ordering is wired but not yet user-visible. |
 | Retained-workspace V2 + shared skills V2 | **Dormant foundation.** Tested code, no production activation (`HYGGE_WORKSPACE_MODE` stays unset). |
 | Fresh-install sample content | **Labelled demo data** (`isDemo`), local only, never uploaded, hidden as soon as real work arrives. |
@@ -409,7 +409,7 @@ iOS build settings that matter: `HYGGE_REQUIRE_CLOUD` (`NO` in Debug, `YES` in R
 - **Staging** deploys automatically from `main` after tests pass, followed by a `/health` check. **Production** deploys only on manual workflow dispatch, health-checked the same way.
 - **TestFlight** ([testflight.yml](.github/workflows/testflight.yml)) is manual-dispatch: it archives with the newest Xcode, verifies the signed IPA actually carries the Associated Domains / Push / Sign in with Apple capabilities, and only then uploads.
 
-## Known limits and honest edges
+## Known limits
 
 - **Site reliability varies.** Some sites prohibit automated access in their terms and actively detect bots, so expect per-site reliability to differ. Use Hygge only on sites and accounts where you are allowed to do so, and respect each site's terms.
 - **Ranked ordering isn't visible yet.** The learning ranker filters what surfaces (threshold), but the feed does not yet order by score. The ready-made ordering ships with the feed consumer work.
