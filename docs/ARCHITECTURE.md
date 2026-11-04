@@ -4,8 +4,7 @@
 
 1. **Conversational onboarding — three questions.** Inside the lifelong chat
    thread (script in `OnboardingConversation`, core): what work do you enjoy,
-   your lowest rate, roughly where + when (with the calendar permission asked
-   in context). Everything else is learned progressively. The app around it
+   your lowest rate, roughly where + when (with calendar and notification permissions asked in context). Everything else is learned progressively. The app around it
    is one Home feed (pinned needs-you + plain-sentence journal), a floating
    flame into this conversation, and one profile hub — no tab bar (see the
    redesign specification, `hygge-ui-redesign-from-scratch.pdf`).
@@ -20,8 +19,7 @@
    information requests in the app — never invented data. Checks the
    agent cannot get through within its attempt window pause for
    takeover in the cloud-browser view.
-4. **Ongoing work.** Discovery missions surface matched opportunities;
-   apply/message/book missions follow the same draft → approve → mission loop.
+4. **Ongoing work.** Discovery missions surface matched opportunities; apply/message/book missions follow the same draft → approve → mission loop. Chat requests can start missions too, including triaging forwarded mail.
    Site memory accrues hints so repeat visits get faster.
 
 ## The model
@@ -57,8 +55,7 @@ Applications + calendar   D1 control plane · R2 workspace checkpoints     Brows
   detected checks (see the mission loop); this view is where the
   user finishes one when the attempts run out.
 - Dev worker: `SimulatedBrowser`, a deterministic page model so the full
-  contract is testable offline. The iOS app falls back to the local simulated
-  runner if the service is unreachable, and the task log says when it did.
+  contract is testable offline. Debug builds may use the local simulated runner offline, and the task log says when one did; Release builds require the cloud backend (`HYGGE_REQUIRE_CLOUD`).
 
 ## The mission loop (how browsing actually works)
 
@@ -72,7 +69,7 @@ observe page -> LLM decides ONE action -> execute -> observe -> ... -> done
 - One decision per call, validated against an action schema
   (navigate/click/type/extract/done/needsHuman). The model finds its own
   path from what the page actually shows.
-- Model tiers (`llm.mjs`): **muse-spark-1.3** decides routine steps;
+- Model tiers (`llm.ts`): **muse-spark-1.3** decides routine steps;
   **muse-wonder-1.0** takes over after failures/deviations/loops, for final
   submits on high-stakes missions, and for composing user-facing text.
 - Harness rails (enforced in code, not prompts): step budget, loop
@@ -80,16 +77,14 @@ observe page -> LLM decides ONE action -> execute -> observe -> ... -> done
   checks (CAPTCHA/bot, 2FA, identity, security) get a bounded attempt
   window (`CHECKPOINT_ATTEMPT_BUDGET` steps, observed controls only,
   Wonder tier, approval and secret rails unchanged; codes only via the
-  sealed `emailCode.code` ref, never during scheduled scans), then
-  `needsHuman` pauses for the user with the session kept open.
+  sealed `emailCode.code` ref, never during scheduled scans), then `needsHuman` pauses for the user with the session kept open. Before asking the user, the agent first attempts the site's own checks. Approved missions run from a durable job queue: one delivery inside the owner's object, retries resuming from task checkpoints, never replaying one-shot approvals after uncertain outcomes.
 
 ## Site memory (learning is an output, never an input script)
 
 After a successful mission the trajectory is distilled into advisory
 **hints** for that domain ("clicking X worked", "Y was not found — try a
 different label", "listings readable from the landing page"), stored with
-success/failure counts (`SiteMemory` in Swift core, `memory.json` in the
-service). Future missions receive hints as context the agent may use or
+success/failure counts (stored in the user's sandbox). Future missions receive hints as context the agent may use or
 ignore when the page disagrees. A brand-new site always starts from the
 goal alone — memory can make the agent faster, never more rigid.
 
@@ -136,8 +131,7 @@ isolation is enforced there:
    contain only facts about websites (labels/paths that worked). Values, page
    text, and names are scrubbed before promotion and never cross tenants.
 5. **Provider data handling.** Standard (non-`-contributor`) model ids only —
-   contributor variants may train on content. Review Meta Model API data
-   retention terms before launch; minimise personal data in prompts.
+   contributor variants may train on content. Keep Meta Model API data retention terms under review as the beta grows; minimise personal data in prompts.
 6. **Page content is hostile input.** Listings can contain prompt injection
    aimed at the *same* user's agent ("email my CV to…"). Agent tools stay
    constrained to the approved goal; anything state-changing needs the user's
