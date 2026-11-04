@@ -10,7 +10,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.ts";
 import { json } from "./env.ts";
 import { LLMClient, type LLMConfig } from "./llm.ts";
-import { chatIntent, onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
+import { chatSiteCandidates, chatIntent, onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { BrowserRunBrowser } from "./browser.ts";
 import { handleProfilePhoto, profilePhotoAllowedForTask, type ProfilePhoto, type ProfilePhotoStore } from "./profile-photo.ts";
 import { makeDecider, runMission, distillHints, emailCodeAllowedForTask } from "./agent.ts";
@@ -2208,9 +2208,33 @@ export class UserSandbox extends DurableObject<Env> {
       // Model-led understanding, app-validated: what does this
       // message want done? See onboarding.ts chatIntent.
       if (request.method === "POST" && parts.join("/") === "onboarding/intent") {
+        const intentBody = (body ?? {}) as Record<string, any>;
+        // Candidates the model may offer or the user may confirm:
+        // open proposals first, then the catalog — minus anything
+        // already tracked. The model still reasons freely; this
+        // only grounds names to addresses.
+        const store = this.stateStore();
+        const inventory = store.list("sites").flatMap((row) => {
+          const site = scanSiteFromRow(String(row.id), row.data);
+          if (!site) return [];
+          const state = store.get("accountStates", site.siteID)?.data as any;
+          return [{ name: site.name, domain: site.domain, siteId: site.siteID,
+            tracked: ["watching", "profileLive", "hasAccount", "joining", "needsVerification"].includes(state?.state ?? "") }];
+        });
+        const proposals = store.list("proposals").flatMap((row) => {
+          const data = row.data as any;
+          if (data?.status !== "proposed") return [];
+          const siteId = String(data.siteID ?? "");
+          const site = inventory.find((s) => s.siteId === siteId);
+          return site ? [{ name: site.name, domain: site.domain, siteId }] : [];
+        });
+        const catalog = Object.values(STATIC_PROPOSALS).flat().map((entry) =>
+          ({ name: entry.name, domain: domainOf(entry.url), siteId: null }));
+        const candidates = chatSiteCandidates(inventory, proposals, catalog);
         return json(await chatIntent({
           client: new LLMClient(this.llmConfig("hygge-onboarding")),
-          ...(body as object),
+          ...intentBody,
+          context: { ...(intentBody.context ?? {}), candidates },
           conversationId: this.ctx.id.toString(),
         }));
       }
