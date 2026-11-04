@@ -201,6 +201,9 @@ export default {
         // approved work is submitted to the mission queue,
         // "inline" for the legacy request-driven fallback.
         jobs: env.MISSION_QUEUE ? "queued" : "inline",
+        // Configured workspace generation; raw value on purpose so
+        // health remains available to diagnose an invalid setting.
+        workspace: env.HYGGE_WORKSPACE_MODE ?? "legacy",
       });
     }
 

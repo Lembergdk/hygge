@@ -1,6 +1,6 @@
 # Wave 2: retained private workspace integration
 
-Implemented locally with runtime, recovery and skill sub-agent lanes. Existing staging/production configurations remain inactive. No cloud project, bucket, IAM policy, secret, deployed service or user data was changed. Source is uncommitted on the existing application branch.
+Implemented locally with runtime, recovery and skill sub-agent lanes. This document records that delivery-time state; staging/production activation is now tracked separately in [workspace-v2-activation.md](workspace-v2-activation.md), including the populated-user adoption blocker and acceptance gates.
 
 ## Application path
 
@@ -22,7 +22,11 @@ Shared guidance is advisory. Selection is pinned to the actual run, each effect 
 
 ## Configuration prepared for later deployment
 
-The existing Wrangler files deliberately have none of these activated:
+This was the delivery-time contract. The staging/production
+activation values now live in their Wrangler files; see
+[workspace-v2-activation.md](workspace-v2-activation.md) for the
+current per-environment state and gates. The required sources
+remain:
 
 | Setting | Required source |
 |---|---|

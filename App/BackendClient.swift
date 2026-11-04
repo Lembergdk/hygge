@@ -5,11 +5,18 @@ enum AuthClientError: LocalizedError {
     case message(String)
     case unavailable
     case reauthenticationRequired
+    /// The stored session token is no longer accepted (revoked —
+    /// e.g. a password confirmation elsewhere revokes every
+    /// session — or expired). Retrying cannot help; the only fix
+    /// is signing in again, so callers must be able to tell this
+    /// apart from connectivity/server trouble.
+    case unauthorized
 
     var errorDescription: String? {
         switch self {
         case .message(let message): return message
         case .reauthenticationRequired: return "Confirm it’s you with an email link, then try again."
+        case .unauthorized: return "You’re signed out on this phone."
         case .unavailable: return "Sign-in is unavailable just now. Try again in a moment."
         }
     }
@@ -865,9 +872,11 @@ struct BackendClient {
         guard (200...299).contains(http.statusCode) else {
             if let decoded = try? JSONDecoder().decode(AuthErrorBody.self, from: data),
                let message = decoded.message, !message.isEmpty {
+                if decoded.error == "unauthorized" { throw AuthClientError.unauthorized }
                 if decoded.error == "reauthentication_required" { throw AuthClientError.reauthenticationRequired }
                 throw AuthClientError.message(message)
             }
+            if http.statusCode == 401 { throw AuthClientError.unauthorized }
             throw AuthClientError.unavailable
         }
         return try JSONDecoder().decode(Response.self, from: data)
