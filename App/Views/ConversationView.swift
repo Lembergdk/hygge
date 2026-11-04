@@ -388,6 +388,8 @@ struct ConversationView: View {
     private func finishDeviceAction(_ proposal: PersistentChatProposal, generation: String) async {
         guard let payload = proposal.result?.payload else { return }
         await store.beginConversationRequest()
+        do { try await store.backend.claimConversationDeviceAction(generation: generation, proposalID: proposal.id) }
+        catch { agentError = "This calendar action may be in progress on another device. Check its outcome before continuing."; return }
         let success = await CalendarService.book(payload: payload, operationID: proposal.id)
         do { await applyConversation(try await store.backend.conversationDeviceResult(generation: generation, proposalID: proposal.id, success: success)) }
         catch { agentError = "I couldn't report the calendar result. Retrying this saved action will check for an existing event first." }

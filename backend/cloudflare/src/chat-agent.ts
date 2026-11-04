@@ -260,12 +260,24 @@ export class ChatAgent {
     this.store.append('system',{proposalId:p.id,decision:input.decision,result:p.result});
     return this.turn({id:input.id,generation:meta.generation,text:message});
   }
-  async deviceResult(input:{generation:string;proposalId:string;id:string;success:boolean}){
+  claimDevice(input:{generation:string;proposalId:string;deviceID:string}){
+    const meta=this.store.meta();if(input.generation!==meta.generation)throw new Error('CONVERSATION_CHANGED');
+    if(!/^[0-9a-f-]{36}$/i.test(input.deviceID))throw new Error('INVALID_DEVICE_ID');
+    const p=this.store.proposal(input.proposalId);
+    if(!p||p.generation!==meta.generation||p.status!=='completed'||p.result?.status!=='device_required')throw new Error('DEVICE_ACTION_NOT_APPROVED');
+    const claimed=p.result.claimDeviceID;
+    if(claimed&&claimed!==input.deviceID)throw new Error('DEVICE_ACTION_CLAIMED_ELSEWHERE');
+    p.result.claimDeviceID=input.deviceID;this.store.db.put(`proposal:${p.id}`,p);return {claimed:true};
+  }
+  async deviceResult(input:{generation:string;proposalId:string;id:string;success:boolean;deviceID:string}){
     if(typeof input.id!=='string'||!/^[0-9a-f-]{36}$/i.test(input.id))throw new Error('INVALID_MESSAGE_ID');
     const meta=this.store.meta();if(input.generation!==meta.generation)throw new Error('CONVERSATION_CHANGED');if(meta.activeTurn)throw new Error('TURN_PENDING');
     const prior=this.store.db.get<any>(`device-receipt:${input.id}`);if(prior)return prior;
     const proposal=this.store.proposal(input.proposalId);
     if(!proposal||proposal.generation!==meta.generation||proposal.status!=='completed'||proposal.result?.status!=='device_required')throw new Error('DEVICE_ACTION_NOT_APPROVED');
+    if(proposal.result.claimDeviceID!==input.deviceID)throw new Error('DEVICE_ACTION_NOT_CLAIMED');
+    // Record the authenticated device outcome before applying its idempotent task projection.
+    this.store.append('system',{proposalId:proposal.id,source:'device_reported',success:input.success},`device-report:${input.id}`);
     await this.services.deviceResult?.(proposal,input.success);
     if(input.success)proposal.result={status:'succeeded',source:'device_reported',taskId:proposal.args.taskId};
     this.store.db.put(`proposal:${proposal.id}`,proposal);

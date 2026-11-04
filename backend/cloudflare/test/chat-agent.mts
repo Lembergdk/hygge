@@ -160,3 +160,17 @@ test('tool budget survives retry and deferred calls get explicit results',async(
  await s.agent.turn({id,generation:s.store.meta().generation});assert.equal(s.executed.length,12);
  assert.equal(s.store.events().filter(e=>e.kind==='result'&&e.value.result.status==='deferred_budget').length,2);
 });
+
+test('calendar approval is claimed by one device and requires its authenticated outcome',async()=>{
+ let projections=0;const s=setup((_a,n)=>n===1?calls('r1',[{name:'propose_action',args:{operation:'book_task',taskId:'calendar-task'}}]):answer(`r${n}`),undefined,{confirm:async()=>({status:'device_required',taskId:'calendar-task',payload:{eventTitle:'Synthetic',eventStartISO8601:'2026-11-10T10:00:00Z'}}),deviceResult:async()=>{projections++;}});
+ await turn(s);const proposal=s.store.proposals()[0],generation=s.store.meta().generation;
+ await s.agent.decide({generation,proposalId:proposal.id,decision:'approve',id:crypto.randomUUID()});
+ const deviceID=crypto.randomUUID(),other=crypto.randomUUID();
+ assert.equal(s.agent.claimDevice({generation,proposalId:proposal.id,deviceID}).claimed,true);
+ assert.throws(()=>s.agent.claimDevice({generation,proposalId:proposal.id,deviceID:other}),/CLAIMED_ELSEWHERE/);
+ await assert.rejects(s.agent.deviceResult({generation,proposalId:proposal.id,id:crypto.randomUUID(),success:true,deviceID:other}),/NOT_CLAIMED/);
+ assert.equal(projections,0);const id=crypto.randomUUID();
+ const result=await s.agent.deviceResult({generation,proposalId:proposal.id,id,success:true,deviceID});
+ assert.equal(projections,1);assert.equal(s.store.proposal(proposal.id)?.result.status,'succeeded');
+ assert.deepEqual(await s.agent.deviceResult({generation,proposalId:proposal.id,id,success:true,deviceID}),result);assert.equal(projections,1);
+});

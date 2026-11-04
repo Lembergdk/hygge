@@ -259,7 +259,7 @@ export class LLMClient {
         // Classify context/expired-chain failures without retaining error payloads.
         const code=String(body?.error?.code??''); const message=String(body?.error?.message??'');
         error.contextExceeded=code==='context_length_exceeded' || /context (?:window|length)|maximum context|too many tokens/i.test(message);
-        error.chainExpired=Boolean(args.previousResponseId) && (['response_not_found','previous_response_not_found'].includes(code) || /previous_response_id.*(?:expired|not found)|previous response.*(?:expired|not found)/i.test(message));
+        error.chainExpired=Boolean(args.previousResponseId) && (['response_not_found','previous_response_not_found'].includes(code) || /previous_response_id.*(?:expired|not found)|previous response.*(?:expired|not found)|referenced response not found or expired/i.test(message));
         throw error;
       }
       this.gatewayLogAttr(span,res);

@@ -14,6 +14,8 @@ export interface ChatServiceHost {
   hints(domain:string):any[];
   inbox():any[];
   plus():Promise<boolean>;
+  signupContact?():Promise<{email:string;choice:string}>;
+  credentialForDomain?(domain:string):string|undefined;
   mirror(doc:ChatDocument):Promise<void>;
   erase?(doc:ChatDocument):Promise<void>;
   deletedMessage(id:string):boolean;
@@ -31,20 +33,23 @@ function stableUUID(hash:string){return `${hash.slice(0,8)}-${hash.slice(8,12)}-
 export function chatServices(host:ChatServiceHost):ChatServices {
   const pendingStates=['awaiting_approval','needsHuman','approved','running'];
   async function draftSite(s:any,operationId:string){
+    if(!await host.plus()&&monthlyLoggedEarnings(host.rows('journalEvents').map(r=>r.data),new Date())>=FREE_MONTHLY_EARNINGS_LIMIT)return {status:'plan_rested',message:'New setup work is resting until next month under the current plan.'};
     const state=host.get('accountStates',s.id)?.data?.state;
     if(['watching','profileLive','hasAccount'].includes(state))return {status:'already_tracking',siteId:s.id};
     if(['joining','needsVerification'].includes(state))return {status:'setup_pending',siteId:s.id};
     const pending=host.tasks().find(t=>t.kind==='signup'&&t.mobile_task?.siteID===s.id&&pendingStates.includes(t.status));
     if(pending)return {status:'setup_pending',siteId:s.id,taskId:pending.id};
-    const task=await createTask('signup',s,operationId,`Set up my account on ${s.name}`,true);
+    const task=await createTask('signup',s,operationId,`Get the user set up on ${s.name}. First check whether an existing saved login works or a new signup is needed. Handle safe reversible setup choices; use known draft/profile values and ask only for missing facts. Never ask for passwords or codes in chat. Do not publish a profile or make commitments without specific approval. Email verification follows the approved draft's email choice.`,true);
     return {status:'drafted',siteId:s.id,taskId:task.id,message:'Signup draft created; confirmation is required before external work.'};
   }
   async function createTask(kind:string,s:any,operationId:string,goal:string,approval:boolean){
     const id=stableUUID(await digest({operationId,kind,site:s.id}));
     const existing=host.tasks().find(t=>t.id===id);if(existing)return existing;
     const p=profileRow(host).profile??{};
+    const contact=kind==='signup'?(await host.signupContact?.()??{email:p.email??'',choice:'own'}):null;
     const task={id,kind,title:kind==='signup'?`Join ${s.name}`:`Look for work on ${s.name}`,target_url:s.startURLString,goal,
-      drafted_payload:kind==='signup'?{displayName:p.displayName??'',location:p.locationLabel??'',headline:p.headline??'',skills:(p.skills??[]).join(', '),hourlyRate:String(p.hourlyRateFloor??'')}: {},
+      drafted_payload:kind==='signup'?{displayName:p.displayName??'',email:contact?.email??'',emailChoice:contact?.choice??'own',awaitingEmailVerification:contact?.choice==='hygge'?'true':'false',location:p.locationLabel??'',headline:p.headline??'',skills:(p.skills??[]).join(', '),hourlyRate:String(p.hourlyRateFloor??'')}: {},
+      credential_id:host.credentialForDomain?.(siteDomain(s))??null,email_choice:contact?.choice??null,awaiting_email_verification:contact?.choice==='hygge',email_code_available:false,
       requires_approval:approval,status:approval?'awaiting_approval':'approved',interaction_version:1,log:[approval?'Drafted. Waiting for approval.':'Read-only search requested in conversation.'],browser_trace:[],extracted_items:[],information_requests:[],help:null,
       mobile_task:{id,kind,siteID:s.id,targetURLString:s.startURLString,title:kind==='signup'?`Join ${s.name}`:`Look for work on ${s.name}`,goal,draftedPayload:{},status:approval?'awaitingApproval':'approved',log:[],createdAt:Date.now()/1000-978307200}};
     // The wire projection must carry the actual approved draft, never an empty parallel copy.

@@ -12,7 +12,7 @@ The client caches a pending outgoing message and generation. Native conversation
 
 Native consequential tools return an awaiting-confirmation result; the model has no approval tool. The authenticated person approves an immutable proposal bound to current material target state. Changed or missing drafts invalidate it. Pending proposals survive questions, restarts and device changes, and can be cancelled by a correction. Tool and turn budgets return explicit deferred outcomes. Signup tools create drafts; they do not silently perform signup.
 
-Approved calendar tasks request device execution. EventKit stores a proposal marker and checks for it before retrying event creation. The authenticated device reports success/failure back to the same conversation. This reports a device outcome, not a server observation of the user's calendar. Availability lookup, editing appointments, proximity and travel time are not added here.
+Approved calendar tasks request device execution. A durable claim binds execution to one installation, preventing another device from concurrently creating the event; the claim does not expire into an automatic replay. EventKit stores a proposal marker and checks for it before retrying event creation. The authenticated device reports success/failure back to the same conversation. This reports a device outcome, not a server observation of the user's calendar. Availability lookup, editing appointments, proximity and travel time are not added here.
 
 ## Memory and workspace
 

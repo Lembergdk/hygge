@@ -25,7 +25,7 @@ import {
   type SharedSkill, type SkillCandidate, type SkillOutcome,
 } from "./skills.ts";
 import {
-  attachEmailToTasks, parseOwnerEmailCommand, takeFreshCode,
+  attachEmailToTasks, parseOwnerEmailCommand, takeFreshCode, addressForUser, d1EmailAddressDb,
   type InboundEmailDelivery,
 } from "./email.ts";
 import {
@@ -1957,7 +1957,9 @@ export class UserSandbox extends DurableObject<Env> {
       tasks:()=>[...this.ctx.storage.sql.exec('SELECT task FROM tasks ORDER BY created_at')].map(r=>JSON.parse(String(r.task))),
       saveTask:task=>this.saveTask(task),enqueue:task=>this.enqueueOrRunMission(task),
       hints:domain=>[...this.ctx.storage.sql.exec('SELECT kind,hints,success_count,failure_count FROM memories WHERE domain=?',domain)].map(r=>({...r,hints:JSON.parse(String(r.hints))})),
-      inbox:()=>[...this.ctx.storage.sql.exec("SELECT id,sender_domain,subject,summary,kind,received_at FROM email_summaries WHERE kind='other' ORDER BY received_at DESC LIMIT 30")],
+      inbox:()=>[...this.ctx.storage.sql.exec("SELECT id,sender_domain,subject,summary,kind,created_at FROM email_summaries WHERE kind='other' ORDER BY created_at DESC LIMIT 30")],
+      signupContact:async()=>{const address=this.userId?await addressForUser(d1EmailAddressDb(this.env.DB),this.userId,this.env.HYGGE_EMAIL_DOMAIN):null;return address?{email:address.address,choice:'hygge'}:{email:String((state.get('profile','profile')?.data as any)?.profile?.email??''),choice:'own'};},
+      credentialForDomain:domain=>{const r=[...this.ctx.storage.sql.exec('SELECT id FROM credentials WHERE domain=? LIMIT 1',domain)][0];return r?String(r.id):undefined;},
       plus:async()=>!!this.userId && (await activeTier(d1SubscriptionDb(this.env.DB),this.userId,new Date()))==='plus',
       mirror:async(doc:ChatDocument)=>{await this.workspace().saveDocument(`${doc.generation}/${doc.path}`,doc.revision,new TextEncoder().encode(doc.content));},
       erase:async(doc:ChatDocument)=>{await this.workspace().eraseDocument(`${doc.generation}/${doc.path}`);},
@@ -2035,9 +2037,10 @@ export class UserSandbox extends DurableObject<Env> {
           return json(await this.chatExclusive(async()=>{agent.importMessages();this.scheduleChatCleanup();return agent.store.state();}));
         }
         if(request.method==='POST'&&parts[1]==='reset'){const result=await this.chatExclusive(()=>agent.reset(String(body.generation??'')));this.scheduleChatCleanup();return json(result);}
+        if(request.method==='POST'&&parts[1]==='device-claim')return json(await this.chatExclusive(async()=>agent.claimDevice({generation:String(body.generation??''),proposalId:String(body.proposalId??''),deviceID:String(body.deviceID??'')})));
         if(request.method==='POST'&&parts[1]==='device-result'){
           if(typeof body.success!=='boolean'||typeof body.id!=='string'||!/^[0-9a-f-]{36}$/i.test(body.id))return json({error:'Invalid device result'},400);
-          return json(await this.chatExclusive(()=>agent.deviceResult({id:body.id,generation:String(body.generation??''),proposalId:String(body.proposalId??''),success:body.success})));
+          return json(await this.chatExclusive(()=>agent.deviceResult({id:body.id,generation:String(body.generation??''),proposalId:String(body.proposalId??''),success:body.success,deviceID:String(body.deviceID??'')})));
         }
         if(request.method==='POST'&&parts[1]==='proposals'&&parts[2]){
           if(!['approve','reject'].includes(body.decision)||typeof body.id!=='string'||!/^[0-9a-f-]{36}$/i.test(body.id))return json({error:'Invalid decision'},400);

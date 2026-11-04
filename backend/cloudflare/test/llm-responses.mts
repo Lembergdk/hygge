@@ -213,6 +213,7 @@ test('native transport distinguishes expired chain, context exhaustion, and unre
  const previous=globalThis.fetch;
  try {for(const [body,expired,context] of [
   [{error:{code:'previous_response_not_found'}},true,false],
+  [{error:{type:'invalid_request_error',message:'referenced response not found or expired'}},true,false],
   [{error:{code:'context_length_exceeded'}},false,true],
   [{error:{code:'invalid_tool_schema'}},false,false],
  ] as any[]){globalThis.fetch=(async()=>jsonResponse(body,400)) as any;

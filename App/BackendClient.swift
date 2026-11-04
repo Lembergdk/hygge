@@ -53,6 +53,7 @@ struct BackendClient {
     var baseURL: URL {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--settings-preview") {
+            if ProcessInfo.processInfo.arguments.contains("--conversation-preview") { return URL(string: "http://127.0.0.1:18769")! }
             return URL(string: ProcessInfo.processInfo.arguments.contains("--browser-preview") ? "http://127.0.0.1:8768" : "http://127.0.0.1:9")!
         }
         #endif
@@ -360,10 +361,22 @@ struct BackendClient {
         try await post("chat/proposals/\(proposalID)", body: ["generation": generation,
             "decision": approve ? "approve" : "reject", "id": UUID().uuidString.lowercased()])
     }
+    private var conversationDeviceID: String {
+        let key = "hyggeConversationDeviceID"
+        if let saved = UserDefaults.standard.string(forKey: key) { return saved }
+        let value = UUID().uuidString.lowercased()
+        UserDefaults.standard.set(value, forKey: key)
+        return value
+    }
+    func claimConversationDeviceAction(generation: String, proposalID: String) async throws {
+        struct Receipt: Decodable { var claimed: Bool }
+        let result: Receipt = try await post("chat/device-claim", body: ["generation": generation, "proposalId": proposalID, "deviceID": conversationDeviceID])
+        guard result.claimed else { throw URLError(.cannotParseResponse) }
+    }
     func conversationDeviceResult(generation: String, proposalID: String, success: Bool) async throws -> PersistentConversationState {
-        struct Body: Encodable { var generation: String; var proposalId: String; var id: String; var success: Bool }
+        struct Body: Encodable { var generation: String; var proposalId: String; var id: String; var success: Bool; var deviceID: String }
         return try await post("chat/device-result", body: Body(generation: generation, proposalId: proposalID,
-            id: UUID().uuidString.lowercased(), success: success))
+            id: UUID().uuidString.lowercased(), success: success, deviceID: conversationDeviceID))
     }
     func resetConversation(generation: String) async throws -> PersistentConversationState {
         try await post("chat/reset", body: ["generation": generation])
