@@ -141,6 +141,21 @@ the coordinator):
   redact codes and replace links with their host; full bodies are
   not retained. Retention follows Brief 01 journal/feed
   retention — no separate expiry in this brief.
+- Model reading (2026-11-03): ordinary mail ("other" kind only —
+  verification/code mail never reaches a model) is read once at
+  ingest, while the parsed text still exists (`reasonAboutEmail`
+  in `email.ts`). The system text treats the mail as untrusted
+  data that can never issue instructions; output is validated
+  (`validateEmailReading`): kind-checked mentions, bounded
+  lengths, and an `instruction` field that survives only when the
+  sender is the sender-proven owner (same gates as above). The
+  reading upgrades the stored summary (re-redacted), the
+  highlights (concrete mention details over keyword labels), and
+  feeds the existing triage actions in the owning object —
+  scan-tick trigger, message-waiting push, owner command
+  execution (strict parser first, on the owner's own words;
+  model instruction second, site reference re-validated). No
+  model, no change: the deterministic reading stands.
 - Forwarding: mail the user forwards or cc's from their own
   mailbox to their Hygge address enters the same pipeline
   (attributed by recipient digits). The profile hub shows the
