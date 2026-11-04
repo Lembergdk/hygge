@@ -16,7 +16,7 @@ public struct ProposedSite: Codable, Identifiable, Equatable, Sendable {
     public var verification: String
     public var status: ProposalStatus
     /// When this suggestion was born from filed mail: the sender
-    /// domain it came from, so dismissing the place can also
+    /// domain it came from, so dismissing the job site can also
     /// answer that sender ("just file it") in one motion.
     public var sourceMailDomain: String?
     /// Brief 06: score from the one server ranker when this site was

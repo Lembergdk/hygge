@@ -45,7 +45,7 @@ struct FeedPreviewHost: View {
         store.archivedFeedIDs = []; store.accountStates = [:]; store.lastMessage = nil; store.lastSyncError = nil
         store.notificationPrimerVisible = false; store.isPaused = false; store.hasOnboarded = true
         store.conversationTaskID = nil; store.pendingTaskOpenID = nil; store.visitMarker = .distantPast
-        store.proposals = [ProposedSite(siteID: site.id, rationale: "A place for your design and writing", payPattern: "Rates and fees vary by contract", dataShared: "Name, photo and work profile", verification: "Email and identity checks before payouts")]
+        store.proposals = [ProposedSite(siteID: site.id, rationale: "A job site for your design and writing", payPattern: "Rates and fees vary by contract", dataShared: "Name, photo and work profile", verification: "Email and identity checks before payouts")]
         store.opportunities = [Opportunity(siteID: "upwork", title: "Brand refresh for a local café", summary: "Refresh the café’s visual identity, menu and social templates.", category: .creative, payLabel: "$450 fixed", estimatedHourly: nil, locationLabel: "Remote", isRemote: true, requiredSkills: ["Brand design"], urlString: "https://example.com", isDemo: false)]
         var review = AgentTaskFactory.profileTask(profile: store.profile, site: contra)
         review.draftedPayload = ["profileHeadline": "Designer & writer", "profileBio": "Thoughtful brand design and clear writing for small businesses."]

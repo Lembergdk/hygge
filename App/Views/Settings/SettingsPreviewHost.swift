@@ -8,7 +8,8 @@ struct SettingsPreviewHost: View {
     @State private var presented = true
     @AppStorage("settingsPreviewScreen") private var screen = "main"
     var body: some View {
-        if ProcessInfo.processInfo.arguments.contains("--feed-preview") { FeedPreviewHost() }
+        if ProcessInfo.processInfo.arguments.contains("--plan-preview") { PlanPreviewHost() }
+        else if ProcessInfo.processInfo.arguments.contains("--feed-preview") { FeedPreviewHost() }
         else if ProcessInfo.processInfo.arguments.contains("--browser-preview") { BrowserPreviewHost() }
         else if screen == "login" { LoginView() } else {
         ZStack {

@@ -12,7 +12,7 @@ struct FeedCatalogBoard: View {
             Text("Production components · illustrative local data · collapsed states")
                 .font(.title3).foregroundStyle(HyggeTheme.secondary)
             LazyVGrid(columns: columns, alignment: .leading, spacing: 28) {
-                sample("01 · Site suggestion", style: .invitation, title: "Upwork", subtitle: "A place for your design and writing", icon: "globe")
+                sample("01 · Site suggestion", style: .invitation, title: "Upwork", subtitle: "A job site for your design and writing", icon: "globe")
                 sample("02 · Work opportunity", style: .opportunity, title: "Brand refresh for a local café", subtitle: "$450 fixed · Remote", icon: "paintpalette")
                 VStack(alignment: .leading, spacing: 10) {
                     Text("03 · Live work").font(.headline).foregroundStyle(HyggeTheme.secondary)

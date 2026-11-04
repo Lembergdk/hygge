@@ -3,8 +3,10 @@ import SwiftUI
 struct ProfileHubView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @State private var signingOut = false
     @State private var confirmSignOut = false
+    @State private var showPlus = false
 
     var body: some View {
         NavigationStack {
@@ -13,6 +15,13 @@ struct ProfileHubView: View {
                     profileHeader
                     preferences
                     insights
+                    PlanCardView(state: PlanUsageState(store.plan, renewsAt: store.plusStore.expiresAt),
+                                 onSeePlus: { showPlus = true },
+                                 onManage: {
+                                     if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+                                         openURL(url)
+                                     }
+                                 })
                     VStack(spacing: 0) {
                         NavigationLink { SettingsLoginsView() } label: {
                             SettingsRow(title: "Your logins", icon: "key")
@@ -54,6 +63,9 @@ struct ProfileHubView: View {
                 }
             }
             .task { await store.syncProfilePhoto(); await store.refreshSessionProfiles(); await store.refreshHyggeEmail() }
+            .sheet(isPresented: $showPlus) {
+                NavigationStack { PlusSheetView() }.presentationDragIndicator(.visible)
+            }
         }
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(28)

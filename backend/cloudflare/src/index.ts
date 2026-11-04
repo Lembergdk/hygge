@@ -5,7 +5,8 @@ import { appleAppSiteAssociation, handleAuthRequest, resolveRequestUserId } from
 import { LLMClient } from "./llm.ts";
 import { onboardingMessage, onboardingMessageStream } from "./onboarding.ts";
 import { runDateOf, slotForCron, sweepOrder } from "./scan.ts";
-import { handleEmailAddressRequest, handleEmailMessage } from "./email.ts";
+import { handleEmailAddressRequest, handleEmailAliasRequest, handleEmailMessage } from "./email.ts";
+import { activeTier, d1SubscriptionDb, decodeStoreKitTransaction } from "./subscriptions.ts";
 import { d1PushDb, handleDeviceTokenRequest } from "./push.ts";
 import { jobAckDecision, parseMissionJobMessage, type MissionJobMessage } from "./jobs.ts";
 
@@ -239,6 +240,33 @@ export default {
     // DO. Everything else user-scoped goes into the user's sandbox.
     if (url.pathname === "/email/address") {
       return handleEmailAddressRequest(request, env, userId);
+    }
+    if (url.pathname === "/email/alias") {
+      return handleEmailAliasRequest(request, env, userId, {
+        isPlus: async (id) => (await activeTier(d1SubscriptionDb(env.DB), id, new Date())) === "plus",
+      });
+    }
+    if (url.pathname === "/subscriptions/status" && request.method === "GET") {
+      const db = d1SubscriptionDb(env.DB);
+      const row = await db.findByUser(userId);
+      const tier = await activeTier(db, userId, new Date());
+      return json({ tier, expiresAt: tier === "plus" ? row?.expiresAt ?? null : null });
+    }
+    if (url.pathname === "/subscriptions" && request.method === "POST") {
+      const body = await request.json().catch(() => null) as any;
+      const now = new Date();
+      const decoded = decodeStoreKitTransaction(body?.jws, {
+        now,
+        environment: env.HYGGE_ENV === "production" ? "production" : "sandbox",
+      });
+      if (!decoded) return json({ tier: "free", verified: false }, 400);
+      await d1SubscriptionDb(env.DB).upsert({
+        userId, productId: decoded.productId,
+        originalTransactionId: decoded.originalTransactionId,
+        environment: decoded.environment, expiresAt: decoded.expiresAt,
+        jws: String(body.jws),
+      });
+      return json({ tier: "plus", verified: true, expiresAt: decoded.expiresAt }, 201);
     }
 
     // Device tokens also live in D1 (the sender runs outside any

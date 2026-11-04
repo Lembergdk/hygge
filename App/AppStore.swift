@@ -173,7 +173,31 @@ final class AppStore {
     static let pushPrimerResolvedKey = "hyggePushPrimerResolvedV1"
 
     let backend = BackendClient()
+    /// Hygge Plus entitlement (StoreKit). Started in init; the
+    /// device's verified reading is what the plan gates use.
+    let plusStore = PlusStore()
     private let localRunner = SimulatedMissionRunner()
+
+    /// The plan, read fresh from witnessed facts every time —
+    /// never stored. Gates below and the Profile card share it.
+    var plan: PlanSnapshot {
+        PlanSnapshot.make(tier: plusStore.isPlus ? .plus : .free,
+                          events: activityEvents, states: accountStates, now: Date())
+    }
+
+    /// The honest sentence for why new work is pausing, when it is.
+    var planRestMessage: String {
+        let when = plan.restartsAt.formatted(.dateTime.month(.wide).day())
+        return "I'm resting until \(when). You've passed the free $100 of earnings this month, so new searches and applications pause. Work already under way carries on."
+    }
+
+    var planSiteCapMessage: String {
+        "I'm already watching \(Plan.freeSiteLimit) job sites, which is the free plan's limit. Stop one to make room, or see Plus in your profile."
+    }
+
+    var canJoinAnotherSite: Bool {
+        Plan.canManageAnotherSite(tier: plan.tier, managedSites: plan.managedSites)
+    }
 
     /// True with a usable session token (Keychain, or a Debug
     /// developer token). Drives the launch sign-in gate (Brief 00).
@@ -195,6 +219,10 @@ final class AppStore {
         PushInbox.onArrival = { [weak self] in
             Task { await self?.refreshPushState() }
         }
+        plusStore.reportTransaction = { [backend] jws in
+            _ = await backend.reportSubscription(jws: jws)
+        }
+        plusStore.start()
     }
 
     var pendingApprovalCount: Int { tasks.filter { $0.status == .awaitingApproval }.count }
@@ -561,7 +589,7 @@ final class AppStore {
         for proposal in proposals where accountStates[proposal.siteID] == nil {
             accountStates[proposal.siteID] = .proposed
         }
-        lastMessage = "I've found \(proposals.count) places that fit you — starting with the one below. Say yes and I'll handle the signup from there."
+        lastMessage = "I've found \(proposals.count) job sites that fit you — starting with the one below. Say yes and I'll handle the signup from there."
         save()
     }
 
@@ -576,6 +604,8 @@ final class AppStore {
     }
 
     func approveProposal(proposalID: UUID, alreadyHasAccount: Bool) {
+        if plan.rested { lastMessage = planRestMessage; return }
+        if !canJoinAnotherSite { lastMessage = planSiteCapMessage; return }
         guard let index = proposals.firstIndex(where: { $0.id == proposalID }),
               let site = site(id: proposals[index].siteID),
               proposals[index].status == .proposed else { return }
@@ -665,7 +695,7 @@ final class AppStore {
     }
 
     func findMoreProposals() {
-        guard !isPaused else { lastMessage = "Hygge is paused — resume and I'll look for more places."; return }
+        guard !isPaused else { lastMessage = "Hygge is paused — resume and I'll look for more job sites."; return }
         let blocked = Set(accountStates.filter { $0.value.blocksSuggestions }.keys)
         let known = Set(proposals.map(\.siteID)).union(blocked)
         let extra = SiteProposals.generate(profile: profile, sites: sites.filter { !known.contains($0.id) })
@@ -728,7 +758,7 @@ final class AppStore {
             let task = tasks[index]
             tasks[index].help = TaskHelp(kind: task.status == .failed ? .recovery : task.informationRequests.isEmpty ? .verification : .information,
                 message: task.status == .failed ? "I couldn't finish this step. Let's check where it stopped before continuing."
-                    : task.informationRequests.isEmpty ? "This site has a check I couldn't finish. Your place is saved."
+                    : task.informationRequests.isEmpty ? "This site has a check I couldn't finish. Your progress is saved."
                     : "I need a detail to continue.",
                 questions: task.informationRequests.map { .init(text: $0) },
                 actionLabel: task.status == .failed ? "Check and continue" : "Complete check")
@@ -937,6 +967,14 @@ final class AppStore {
         }
     }
 
+    /// Plus custom email name: choose or change it. The digits
+    /// address keeps working either way.
+    func setCustomEmailName(_ name: String) async -> BackendClient.EmailAliasOutcome {
+        let outcome = await backend.setEmailAlias(name)
+        if case .set = outcome { await refreshHyggeEmail() }
+        return outcome
+    }
+
     /// Own-email path: the user confirms their own email for a site
     /// and a suggested site password. The password goes once to the
     /// safe store via the normal save-login path — nowhere else.
@@ -962,6 +1000,7 @@ final class AppStore {
     }
 
     func draftApplication(for opportunity: Opportunity) {
+        if plan.rested { lastMessage = planRestMessage; return }
         var task = AgentTaskFactory.applyTask(profile: profile, opportunity: opportunity)
         attachCredential(&task)
         attachSkill(&task)
@@ -980,6 +1019,9 @@ final class AppStore {
     }
 
     func draftBrowserTask(site: TargetSite, goal: String, kind: AgentTaskKind = .discover) {
+        // New searches rest at the free limit; work already under
+        // way (other kinds) is untouched.
+        if kind == .discover, plan.rested { lastMessage = planRestMessage; return }
         var task = AgentTaskFactory.customTask(site: site, goal: goal, kind: kind)
         attachCredential(&task)
         attachSkill(&task)
@@ -989,6 +1031,8 @@ final class AppStore {
     }
 
     func draftSignup(site: TargetSite) {
+        if plan.rested { lastMessage = planRestMessage; return }
+        if !canJoinAnotherSite { lastMessage = planSiteCapMessage; return }
         var task = hyggeEmailAddress.map {
             AgentTaskFactory.signupTask(profile: profile, site: site,
                                         emailChoice: .hygge, signupEmail: $0.address)
@@ -1427,6 +1471,7 @@ final class AppStore {
         if isPaused {
             return "I'm paused right now, so I can't look yet. Say “resume”, then ask me again and I'll check \(site.name) straight away."
         }
+        if plan.rested { return planRestMessage }
         if tasks.contains(where: { $0.siteID == siteID && $0.kind == .discover && ($0.status == .running || $0.status == .approved) }) {
             return "I'm already looking on \(site.name) — anything that fits will land on your Home screen."
         }
@@ -1451,6 +1496,8 @@ final class AppStore {
     /// suggestion if it was dismissed or stopped, then start joining.
     /// The user's sentence is the consent for this one site.
     private func joinSiteFromChat(_ site: TargetSite) -> String {
+        if plan.rested { return planRestMessage }
+        if !canJoinAnotherSite { return planSiteCapMessage }
         let state = accountStates[site.id] ?? .unknown
         if state.isWatching || state == .hasAccount {
             return "You're already set up on \(site.name) — I'm watching it for work."
@@ -1474,7 +1521,7 @@ final class AppStore {
             proposalID = existing.id
         } else {
             let details = ConsentCatalog.details(for: site)
-            let proposal = ProposedSite(siteID: site.id, rationale: "You asked me to add this place.",
+            let proposal = ProposedSite(siteID: site.id, rationale: "You asked me to add this job site.",
                                         payPattern: details.pay, dataShared: details.data, verification: details.verification)
             proposals.append(proposal)
             proposalID = proposal.id

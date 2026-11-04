@@ -1,0 +1,51 @@
+{
+  "identifier" : "hygge-plus-local",
+  "nonRenewingSubscriptions" : [],
+  "products" : [],
+  "settings" : {
+    "_locale" : "en_US",
+    "_storefront" : "USA"
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "hygge-plus-group",
+      "localizations" : [
+        {
+          "description" : "Unlimited searches and job sites.",
+          "displayName" : "Hygge Plus",
+          "locale" : "en_US"
+        }
+      ],
+      "name" : "Hygge Plus",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [],
+          "codeOffers" : [],
+          "displayPrice" : "9.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "hygge-plus-monthly",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Unlimited searches, as many job sites as you like, and your name on your Hygge email.",
+              "displayName" : "Hygge Plus",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "app.usehygge.plus.monthly",
+          "promotionalOffers" : [],
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Hygge Plus Monthly",
+          "subscriptionGroupID" : "hygge-plus-group",
+          "type" : "RecurringSubscription",
+          "winBackOffers" : []
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}

@@ -493,7 +493,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       trace.push({ action: "needsHuman", target: "", urlString: snapshot!.currentURLString,
                    summary: `${cp} — tried, then paused for you in the browser`, succeeded: false, modelTier: null });
       log.push(`Tried to get through a ${cp} (${checkpointAttempts} step(s)) and could not. The browser session stays open for you to finish it there.`);
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint: cp, help: help("verification", `I tried to finish a ${cp} on ${site}, but couldn't get through it. I need you to finish it — your place is saved.`, [], "Complete check"), ...routing() };
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint: cp, help: help("verification", `I tried to finish a ${cp} on ${site}, but couldn't get through it. I need you to finish it — your progress is saved.`, [], "Complete check"), ...routing() };
     };
     if (checkpoint) {
       if (activeCheckpoint !== checkpoint) {

@@ -33,10 +33,11 @@ struct HomeFeedView: View {
     @State private var returnPlacement: FlamePlacement?
 
     @State private var showProfile = false
+    @State private var showPlus = false
     @State private var showNotifications = false
     @State private var emailOpenItem: FiledEmailSummary?
     @State private var earlierExpanded = false
-    @State private var morePlaces = false
+    @State private var moreSites = false
     @State private var openCardID: String?
     @State private var undo: FeedUndo?
     @State private var flameDimmed = false
@@ -142,6 +143,7 @@ struct HomeFeedView: View {
         }
         .sheet(isPresented: $showConversation, onDismiss: { store.conversationTaskID = nil }) { ConversationView().presentationDragIndicator(.visible) }
         .sheet(isPresented: $showProfile) { ProfileHubView().presentationDragIndicator(.visible) }
+        .sheet(isPresented: $showPlus) { NavigationStack { PlusSheetView() }.presentationDragIndicator(.visible) }
         .sheet(isPresented: $showNotifications) { NavigationStack { SettingsPermissionsView() }.presentationDragIndicator(.visible) }
         .sheet(item: $emailOpenItem) { mail in
             NavigationStack { FiledEmailDetailView(mail: mail) }.presentationDragIndicator(.visible)
@@ -556,13 +558,13 @@ struct HomeFeedView: View {
             updateGate.receive(candidateIDs, atTop: canInsert)
         }
     }
-    private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && emailDecisions.isEmpty && !store.isPaused }
+    private var isEmpty: Bool { pendingProposals.isEmpty && listings.isEmpty && decisionTasks.isEmpty && runningTasks.isEmpty && events.isEmpty && emailDecisions.isEmpty && !store.isPaused && !store.plan.rested }
     /// Anything above the Journal heading. When this is false the
     /// feed is journal-only, so Earlier expands by default.
     private var hasActionableFeedItems: Bool {
         !runningTasks.isEmpty || !pendingProposals.isEmpty || !listings.isEmpty
             || !decisionTasks.filter { !isArchived(taskKey($0)) }.isEmpty
-            || !emailDecisions.isEmpty || store.isPaused
+            || !emailDecisions.isEmpty || store.isPaused || store.plan.rested
             || (store.notificationPrimerVisible && updateGate.visibleIDs.contains("notifications"))
     }
     private func taskKey(_ task: AgentTask) -> String { FeedFocus.taskKey(task) }
@@ -665,9 +667,15 @@ struct HomeFeedView: View {
         if store.isPaused {
             rows.append(.paused)
             rows += emailDecisions.map(FeedRow.emailDecision)
+        } else if store.plan.rested {
+            // Free is resting: say so where the paused card sits.
+            // What is already under way still shows below.
+            rows.append(.planRested)
+            rows += emailDecisions.map(FeedRow.emailDecision)
+            rows += decisionTasks.filter { !isArchived(taskKey($0)) }.map(FeedRow.decision)
         } else {
-            rows += pendingProposals.prefix(morePlaces ? pendingProposals.count : 1).map(FeedRow.proposal)
-            if pendingProposals.count > 1 { rows.append(.morePlaces) }
+            rows += pendingProposals.prefix(moreSites ? pendingProposals.count : 1).map(FeedRow.proposal)
+            if pendingProposals.count > 1 { rows.append(.moreSites) }
             rows += emailDecisions.map(FeedRow.emailDecision)
             rows += listings.map(FeedRow.opportunity)
             rows += decisionTasks.filter { !isArchived(taskKey($0)) }.map(FeedRow.decision)
@@ -698,8 +706,11 @@ struct HomeFeedView: View {
             Button { openFocus(.paused) } label: {
                 FeedSummary(title: "Hygge is paused", subtitle: "Everything is here when you’re ready", icon: "pause")
             }.buttonStyle(.plain)
-        case .morePlaces:
-            Button(morePlaces ? "Fewer suggestions" : "\(pendingProposals.count - 1) more places") { withAnimation { morePlaces.toggle() } }
+        case .planRested:
+            PlanLimitCardView(state: PlanUsageState(store.plan, renewsAt: store.plusStore.expiresAt),
+                              onSeePlus: { showPlus = true })
+        case .moreSites:
+            Button(moreSites ? "Fewer suggestions" : "\(pendingProposals.count - 1) more job sites") { withAnimation { moreSites.toggle() } }
                 .font(.caption.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
         case .notifications:
             card(id: "notifications", title: "A heads-up when you need it", subtitle: "New work and things that need your OK", icon: "bell", primaryTitle: "Permissions", open: { showNotifications = true }, primary: { showNotifications = true }, dismiss: {
@@ -722,7 +733,7 @@ struct HomeFeedView: View {
     private func emailDecisionCard(_ mail: FiledEmailSummary) -> some View {
         // Domain leads: it is the decision key, so it must be the
         // last thing large type could ever squeeze out.
-        card(id: "email-decision-\(mail.senderDomain)", title: "Mail from a new place",
+        card(id: "email-decision-\(mail.senderDomain)", title: "Mail from a new sender",
              subtitle: "\(mail.senderDomain) · \(mail.subject.isEmpty ? "(no subject)" : mail.subject)",
              icon: "envelope", primaryTitle: "Decide", primaryIcon: "envelope.open",
              open: { openFocus(.emailDecision(mail)) },
@@ -735,7 +746,7 @@ struct HomeFeedView: View {
         FeedDetailContent {
             Text("Mail from \(mail.senderDomain)").font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("This place is new to me, so I filed it and waited for your call. Whatever you pick, I'll remember it for this sender.")
+            Text("This sender is new to me, so I filed it and waited for your call. Whatever you pick, I'll remember it for this sender.")
                 .foregroundStyle(HyggeTheme.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 8) {
@@ -895,7 +906,7 @@ private struct FeedScrollTracking: ViewModifier {
 
 private enum FeedRow: Identifiable {
     case active(AgentTask), proposal(ProposedSite), opportunity(Opportunity), decision(AgentTask), event(ActivityEvent), emailDecision(FiledEmailSummary)
-    case paused, morePlaces, notifications, journal, earlier
+    case paused, planRested, moreSites, notifications, journal, earlier
     var id: String {
         switch self {
         case .active(let task), .decision(let task): return FeedFocus.taskKey(task)
@@ -904,7 +915,8 @@ private enum FeedRow: Identifiable {
         case .opportunity(let value): return "opportunity-\(value.id)"
         case .event(let value): return "event-\(value.id)"
         case .paused: return "paused"
-        case .morePlaces: return "more-places"
+        case .planRested: return "plan-rested"
+        case .moreSites: return "more-sites"
         case .notifications: return "notifications"
         case .journal: return "journal-heading"
         case .earlier: return "earlier"

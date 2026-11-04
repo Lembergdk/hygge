@@ -41,10 +41,17 @@ public struct HyggeEmailAddress: Codable, Equatable, Sendable {
     public var address: String
     public var digits: String
     public var createdAt: String
-    public init(address: String, digits: String, createdAt: String) {
+    /// Plus custom name (e.g. "sam"): an extra address that
+    /// delivers like the digits one. Absent until chosen.
+    public var alias: String?
+    public var customAddress: String?
+    public init(address: String, digits: String, createdAt: String,
+                alias: String? = nil, customAddress: String? = nil) {
         self.address = address
         self.digits = digits
         self.createdAt = createdAt
+        self.alias = alias
+        self.customAddress = customAddress
     }
 }
 
@@ -99,7 +106,7 @@ public struct FiledEmailSummary: Codable, Equatable, Sendable, Identifiable {
     public var attachments: [AttachmentMeta]
     public var filedAt: String?
     /// How the sender relates to the user: "owner" (the user's own
-    /// verified address), "site" (a place Hygge watches), or "unknown".
+    /// verified address), "site" (a job site Hygge watches), or "unknown".
     public var relation: String?
     /// "pending" while an unknown sender waits for the user's call;
     /// otherwise the remembered sender choice ("work"/"file"/"ignore")

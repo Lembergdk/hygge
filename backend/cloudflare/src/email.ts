@@ -61,6 +61,38 @@ export function parseRecipientDigits(to: string, domain = EMAIL_DOMAIN): string 
   return isValidDigits(digits) ? digits : null;
 }
 
+/// Recipient -> custom name (Plus), or null when the address is
+/// not a name-shaped Hygge address on this domain. Names are
+/// looked up case-insensitively; the digits space is untouched
+/// (a name can never be all digits).
+export function parseRecipientAlias(to: string, domain = EMAIL_DOMAIN): string | null {
+  const angle = String(to ?? "").match(/<([^<>]+)>/);
+  const addr = (angle ? angle[1] : String(to ?? "")).trim().toLowerCase();
+  const suffix = `@${domain.toLowerCase()}`;
+  if (!addr.endsWith(suffix)) return null;
+  const local = addr.slice(0, -suffix.length);
+  if (!local || isValidDigits(local)) return null;
+  return validateEmailAlias(local);
+}
+
+const RESERVED_ALIASES = new Set([
+  "login", "support", "help", "admin", "administrator", "postmaster",
+  "abuse", "noreply", "no-reply", "hello", "team", "hygge", "usehygge",
+  "mail", "email", "info", "contact", "security", "billing", "plus",
+]);
+
+/// A choosable custom name, normalized, or null: 3–30 chars,
+/// letters/digits with single . _ - inside, never all digits
+/// (that space belongs to allocated addresses), never reserved.
+export function validateEmailAlias(raw: unknown): string | null {
+  const alias = String(raw ?? "").trim().toLowerCase();
+  if (alias.length < 3 || alias.length > 30) return null;
+  if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(alias)) return null;
+  if (/^\d+$/.test(alias)) return null;
+  if (RESERVED_ALIASES.has(alias)) return null;
+  return alias;
+}
+
 /// Random digits only — rejection sampling, no modulo bias, no input
 /// from any user field (allocation independence starts here).
 export function generateHyggeDigits(
@@ -88,6 +120,12 @@ export interface EmailAddressDb {
   findByUser(userId: string): Promise<EmailAddressRow | null>;
   /// Returns false on a uniqueness conflict (digits or user taken).
   tryInsert(row: EmailAddressRow): Promise<boolean>;
+  /// Custom Plus names: one per user, delivered like the digits.
+  findByAlias(alias: string): Promise<{ alias: string; userId: string } | null>;
+  findAliasByUser(userId: string): Promise<string | null>;
+  /// Sets (replacing) the user's alias. False when another user holds it.
+  setAlias(userId: string, alias: string): Promise<boolean>;
+  removeAlias(userId: string): Promise<void>;
   recordRoutingCount(day: string, kind: RoutingCountKind): Promise<void>;
 }
 
@@ -116,6 +154,27 @@ export function d1EmailAddressDb(db: D1Database): EmailAddressDb {
         return false; // unique constraint: digits or user already allocated
       }
     },
+    async findByAlias(alias) {
+      const r = await one("SELECT alias, user_id FROM hygge_email_aliases WHERE alias = ?1", alias);
+      return r ? { alias: String(r.alias), userId: String(r.user_id) } : null;
+    },
+    async findAliasByUser(userId) {
+      const r = await one("SELECT alias, user_id FROM hygge_email_aliases WHERE user_id = ?1", userId);
+      return r ? String(r.alias) : null;
+    },
+    async setAlias(userId, alias) {
+      const held = await this.findByAlias(alias);
+      if (held && held.userId !== userId) return false;
+      await db.prepare("DELETE FROM hygge_email_aliases WHERE user_id = ?1").bind(userId).run();
+      try {
+        await db.prepare("INSERT INTO hygge_email_aliases (alias, user_id) VALUES (?1, ?2)")
+          .bind(alias, userId).run();
+        return true;
+      } catch { return false; }
+    },
+    async removeAlias(userId) {
+      await db.prepare("DELETE FROM hygge_email_aliases WHERE user_id = ?1").bind(userId).run();
+    },
     async recordRoutingCount(day, kind) {
       await db.prepare(
         "INSERT INTO email_routing_counts (day, kind, count) VALUES (?1, ?2, 1) ON CONFLICT(day, kind) DO UPDATE SET count = count + 1",
@@ -126,7 +185,29 @@ export function d1EmailAddressDb(db: D1Database): EmailAddressDb {
 
 export class MemoryEmailAddressDb implements EmailAddressDb {
   byDigits = new Map<string, EmailAddressRow>();
+  byAlias = new Map<string, string>(); // alias -> userId
   counts = new Map<string, number>();
+  async findByAlias(alias: string) {
+    const userId = this.byAlias.get(alias.toLowerCase());
+    return userId ? { alias: alias.toLowerCase(), userId } : null;
+  }
+  async findAliasByUser(userId: string) {
+    for (const [alias, owner] of this.byAlias) if (owner === userId) return alias;
+    return null;
+  }
+  async setAlias(userId: string, alias: string) {
+    const key = alias.toLowerCase();
+    const held = this.byAlias.get(key);
+    if (held && held !== userId) return false;
+    const existing = await this.findAliasByUser(userId);
+    if (existing) this.byAlias.delete(existing);
+    this.byAlias.set(key, userId);
+    return true;
+  }
+  async removeAlias(userId: string) {
+    const existing = await this.findAliasByUser(userId);
+    if (existing) this.byAlias.delete(existing);
+  }
   async findByDigits(digits: string) { return this.byDigits.get(digits) ?? null; }
   async findByUser(userId: string) {
     for (const row of this.byDigits.values()) if (row.userId === userId) return row;
@@ -646,7 +727,7 @@ const REASON_SYSTEM = [
   "in it might matter — concrete listings, messages, bookings, payments, with the specifics",
   "the mail itself states>\", \"mentions\": [{\"kind\": \"job_alert\"|\"client_message\"|\"booking\"|",
   "\"payment\"|\"account_notice\", \"detail\": \"<short concrete mention, e.g. '4 maintenance jobs",
-  "near Leeds'>\"}], \"instruction\": null | {\"kind\":\"scan\"|\"readd\",\"site\":\"<the place named>\"} |",
+  "near Leeds'>\"}], \"instruction\": null | {\"kind\":\"scan\"|\"readd\",\"site\":\"<the job site named>\"} |",
   "{\"kind\":\"add\",\"domain\":\"<site address>\"} | {\"kind\":\"pause\"|\"resume\"}}.",
   "Mentions must be things the mail actually says — never invent listings, senders, or amounts",
   "beyond its own words. Empty mentions is correct for ordinary mail. When ownerVerified is",
@@ -834,11 +915,14 @@ export async function processInboundEmail(
   const domain = (deps.domain ?? EMAIL_DOMAIN).toLowerCase();
   const parsed = input.parsed ?? parseMimeMessage(input.raw ?? "");
   const digits = parseRecipientDigits(input.to || parsed.to, domain);
-  if (!digits) {
+  const alias = digits ? null : parseRecipientAlias(input.to || parsed.to, domain);
+  if (!digits && !alias) {
     await count("dropped_malformed");
     return { disposition: "dropped_malformed", kind: null, verification: null };
   }
-  const owner = await deps.db.findByDigits(digits);
+  const owner = digits
+    ? await deps.db.findByDigits(digits)
+    : await deps.db.findByAlias(alias!).then((row) => (row ? { userId: row.userId } : null));
   if (!owner) {
     await count("dropped_unknown");
     return { disposition: "dropped_unknown", kind: null, verification: null };
@@ -1095,13 +1179,52 @@ export async function handleEmailAddressRequest(
   const domain = emailDomain(env);
   if (request.method === "GET") {
     const mine = await addressForUser(db, userId, domain);
-    return json({ hyggeEmail: mine });
+    const alias = await db.findAliasByUser(userId).catch(() => null);
+    return json({
+      hyggeEmail: mine ? {
+        ...mine,
+        alias: alias ?? undefined,
+        customAddress: alias ? `${alias}@${domain}` : undefined,
+      } : mine,
+    });
   }
   if (request.method === "POST") {
     const row = await allocateHyggeAddress(db, userId);
     return json({
       hyggeEmail: { address: formatHyggeAddress(row.digits, domain), digits: row.digits, createdAt: row.createdAt },
     }, 201);
+  }
+  return json({ error: "method not allowed" }, 405);
+}
+
+/// Custom email name (Plus perk): GET reads it, POST chooses or
+/// changes it (changing releases the old name at once), DELETE
+/// removes it. Setting requires Plus; an existing name keeps
+/// receiving even if Plus later lapses — mail is never lost over
+/// a lapsed subscription — it just can't be changed for free.
+export async function handleEmailAliasRequest(
+  request: Request, env: Env, userId: string,
+  deps: { db?: EmailAddressDb; isPlus: (userId: string) => Promise<boolean> },
+): Promise<Response> {
+  const db = deps.db ?? d1EmailAddressDb(env.DB);
+  const domain = emailDomain(env);
+  if (request.method === "GET") {
+    const alias = await db.findAliasByUser(userId);
+    return json({ alias, customAddress: alias ? `${alias}@${domain}` : null });
+  }
+  if (request.method === "DELETE") {
+    await db.removeAlias(userId);
+    return json({ alias: null, customAddress: null });
+  }
+  if (request.method === "POST") {
+    if (!(await deps.isPlus(userId))) return json({ error: "plus_required" }, 403);
+    const body = await request.json().catch(() => null) as any;
+    const alias = validateEmailAlias(body?.alias);
+    if (!alias) return json({ error: "invalid_alias" }, 400);
+    // The digits address must exist first (it is the identity).
+    await allocateHyggeAddress(db, userId);
+    if (!(await db.setAlias(userId, alias))) return json({ error: "taken" }, 409);
+    return json({ alias, customAddress: `${alias}@${domain}` }, 201);
   }
   return json({ error: "method not allowed" }, 405);
 }
