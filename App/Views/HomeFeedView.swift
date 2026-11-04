@@ -85,18 +85,9 @@ struct HomeFeedView: View {
                         Color.black.opacity(0.55).ignoresSafeArea().onTapGesture { closeFocus() }
                             .accessibilityLabel("Back to feed").accessibilityAddTraits(.isButton)
                         FeedFocusCard(close: { closeFocus() }) { focusedContent(focus) }
-                            // Height hugs the content up to the cap (the
-                            // detail scroll only engages past it); the
-                            // browser keeps its fixed tall card because
-                            // its viewport is flexible space. At
-                            // accessibility sizes vertical space is the
-                            // scarce resource, so the cap becomes
-                            // nearly the full screen.
-                            .frame(width: min(geometry.size.width - 32, 620),
-                                   height: focus.hugsContent ? nil
-                                       : (dynamicTypeSize.isAccessibilitySize
-                                          ? geometry.size.height * 0.92
-                                          : min(geometry.size.height * 0.92, focus.maximumHeight)))
+                            // Short cards keep their natural height; longer content
+                            // scrolls inside this viewport, including at large type.
+                            .frame(width: min(geometry.size.width - 32, 620))
                             .frame(maxHeight: dynamicTypeSize.isAccessibilitySize
                                        ? geometry.size.height * 0.92
                                        : min(geometry.size.height * 0.92, focus.maximumHeight))
@@ -829,14 +820,14 @@ struct HomeFeedView: View {
         case .opportunity(let opportunity): FeedOpportunityDetail(close: { closeFocus() }, opportunityID: opportunity.id)
         case .event(let event):
             if event.kind == .filedEmail, let mail = store.filedEmailSummaries.first(where: { $0.id.lowercased() == event.id.uuidString.lowercased() }) {
-                NavigationStack { FiledEmailDetailView(mail: mail) }
-                    .frame(maxHeight: (mail.jobs ?? []).isEmpty ? 540 : 680)
+                FiledEmailDetailView(mail: mail, isFeedCard: true)
             } else { FeedEventDetail(event: event) }
         case .task(let task): FeedTaskReview(close: { closeFocus() }, taskID: task.id)
         case .browser(let task): CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id, onClose: { closeFocus() })
         case .paused:
             FeedDetailContent {
                 Text("Hygge is paused").font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
+                    .feedCardDismissRegion()
                 Text("Searching, sending and booking will wait until you resume.").foregroundStyle(HyggeTheme.secondary)
                 FeedPrimaryButton(title: "Resume Hygge") { store.setPaused(false); closeFocus() }
             }

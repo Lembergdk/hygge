@@ -25,6 +25,7 @@ struct FeedProposalDetail: View {
                         }
                     }
                 }
+                .feedCardDismissRegion()
                 VStack(alignment: .leading, spacing: 10) {
                     Text(proposal.rationale).foregroundStyle(HyggeTheme.ink)
                         .fixedSize(horizontal: false, vertical: true)
@@ -50,9 +51,6 @@ struct FeedProposalDetail: View {
                 Button("I already have an account") {
                     store.approveProposal(proposalID: proposalID, alreadyHasAccount: true); close()
                 }.foregroundStyle(HyggeTheme.ink).frame(maxWidth: .infinity, minHeight: 44)
-                Button("Not this site") {
-                    store.dismissProposal(proposalID: proposalID); close()
-                }.font(.subheadline).foregroundStyle(HyggeTheme.secondary).frame(maxWidth: .infinity, minHeight: 40)
             }
         }
     }
@@ -77,6 +75,7 @@ struct FeedOpportunityDetail: View {
                         Text("on \(store.siteName(id: opportunity.siteID))").font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .feedCardDismissRegion()
                 if opportunity.needsYouKind != nil {
                     // A blocked look, not work: the one action is the fix (footer).
                     Text(opportunity.summary).foregroundStyle(HyggeTheme.ink)
@@ -107,8 +106,6 @@ struct FeedOpportunityDetail: View {
                     }
                 } else if !store.applications.contains(where: { $0.opportunityID == opportunity.id }) {
                     FeedPrimaryButton(title: "Prepare an application") { store.draftApplication(for: opportunity); close() }
-                    Text("You’ll review it before anything is sent.").font(.caption).foregroundStyle(HyggeTheme.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center).padding(.top, 6)
                 }
             }
         }
@@ -140,6 +137,7 @@ struct FeedEventDetail: View {
                 Image("SettingsEarnings").resizable().scaledToFit().frame(height: 120).frame(maxWidth: .infinity)
             }
             Text(FeedEventPresentation.title(event)).font(.system(.title, design: .rounded, weight: .bold)).foregroundStyle(HyggeTheme.ink)
+                .feedCardDismissRegion()
             Text(event.occurredAt.formatted(date: .abbreviated, time: .shortened)).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
             Text(event.sentence).foregroundStyle(HyggeTheme.ink)
             if !event.detail.isEmpty {
@@ -171,6 +169,7 @@ struct FeedTaskReview: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Text(store.siteName(id: task.siteID)).font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
                 }
+                .feedCardDismissRegion()
                 if task.needsChatHelp {
                     Text(task.help?.message ?? "Hygge needs your help to continue.").foregroundStyle(HyggeTheme.ink)
                         .fixedSize(horizontal: false, vertical: true)
@@ -198,17 +197,11 @@ struct FeedTaskReview: View {
                         store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id; close()
                     }
                 } else if task.status == .awaitingApproval || task.status == .draft {
-                    Text(effect(task)).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
-                        .fixedSize(horizontal: false, vertical: true).padding(.bottom, 8)
                     FeedPrimaryButton(title: submitting ? "Starting…" : actionTitle(task)) {
                         guard !submitting else { return }; submitting = true
                         Task { await store.approveAndRun(taskID: taskID) }
                         close()
                     }.disabled(submitting || store.isPaused)
-                    if store.isPaused {
-                        Text("Resume Hygge before continuing.").font(.caption).foregroundStyle(HyggeTheme.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center).padding(.top, 6)
-                    }
                 }
             }
         }.sheet(isPresented: $audit) { NavigationStack { TaskDetailView(taskID: taskID) } }
@@ -237,13 +230,5 @@ struct FeedTaskReview: View {
         case .discover: return "Find work"
         }
     }
-    private func effect(_ task: AgentTask) -> String {
-        switch task.kind {
-        case .buildProfile: return "Your approved profile may become visible to people on \(store.siteName(id: task.siteID))."
-        case .apply, .message: return "This sends your approved message on \(store.siteName(id: task.siteID))."
-        case .bookCalendar: return "This adds the event to your calendar."
-        case .signup: return "Hygge will set up your account and ask if it needs your help."
-        case .discover: return "Hygge will look for work that fits your preferences."
-        }
-    }
+
 }

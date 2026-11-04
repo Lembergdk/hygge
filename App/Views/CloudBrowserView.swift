@@ -87,6 +87,7 @@ struct CloudBrowserView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(FeedCardDismissal.self) private var cardDismissal: FeedCardDismissal?
     let urlString: String
     var existingSessionID: String? = nil
     var taskID: UUID? = nil
@@ -109,8 +110,25 @@ struct CloudBrowserView: View {
     }
 
     var body: some View {
-        ZStack {
-            HyggeTheme.paper.ignoresSafeArea()
+        Group {
+            if cardDismissal != nil {
+                ViewThatFits(in: .vertical) {
+                    browserContent.fixedSize(horizontal: false, vertical: true)
+                    ScrollView { browserContent }
+                        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                }
+            } else {
+                browserContent.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(HyggeTheme.paper.ignoresSafeArea())
+        .foregroundStyle(HyggeTheme.ink)
+        .tint(HyggeTheme.sageDeep)
+        .presentationDragIndicator(.visible)
+        .toolbar(.hidden, for: .navigationBar)
+        .task { await store.observeBrowserTasks() }
+    }
+    @ViewBuilder private var browserContent: some View {
             if let id = sessionID {
                 let session = store.browserSession(id)
                 // Keep the session's own flag in step with the run:
@@ -141,6 +159,7 @@ struct CloudBrowserView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .accessibilityElement(children: .combine)
+                        .feedCardDismissRegion()
                         Circle().fill(session.connected ? HyggeTheme.sageDeep : HyggeTheme.secondary).frame(width: 7, height: 7)
                             .accessibilityLabel(session.connected ? "Connected" : "Not connected")
                         // The word only earns its space when unhealthy;
@@ -151,7 +170,7 @@ struct CloudBrowserView: View {
                         Button { fullscreen = true } label: { Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 44, height: 44) }
                             .accessibilityLabel("Fullscreen browser")
                     }
-                    BrowserLiveViewport(session: session, interactive: !fullscreen)
+                    feedViewport(session)
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                         .overlay { GeometryReader { geometry in
                             Color.clear.task(id: "\(geometry.size)-\(session.connected)-\(session.ownsControl)-\(fullscreen)") { if !fullscreen { session.resize(geometry.size) } }
@@ -200,12 +219,14 @@ struct CloudBrowserView: View {
                     Button("Back to chat") { openChat() }.buttonStyle(SettingsActionStyle(filled: false))
                 }.padding(24)
             }
+    }
+    @ViewBuilder private func feedViewport(_ session: LiveBrowserSession) -> some View {
+        if cardDismissal != nil {
+            BrowserLiveViewport(session: session, interactive: !fullscreen)
+                .aspectRatio(session.viewport.width / max(session.viewport.height, 1), contentMode: .fit)
+        } else {
+            BrowserLiveViewport(session: session, interactive: !fullscreen)
         }
-        .foregroundStyle(HyggeTheme.ink)
-        .tint(HyggeTheme.sageDeep)
-        .presentationDragIndicator(.visible)
-        .toolbar(.hidden, for: .navigationBar)
-        .task { await store.observeBrowserTasks() }
     }
     private func controls(_ session: LiveBrowserSession) -> some View {
         HStack(spacing: 10) {

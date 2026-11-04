@@ -4,12 +4,32 @@ import SwiftUI
 /// Only Email details navigates to and fetches the original message.
 struct FiledEmailDetailView: View {
     let mail: FiledEmailSummary
+    var isFeedCard = false
+    @State private var showOriginal = false
     @Environment(AppStore.self) private var store
     private var current: FiledEmailSummary {
         store.filedEmailSummaries.first { $0.id == mail.id } ?? mail
     }
     var body: some View {
-        SettingsPage(title: "Email summary") {
+        Group {
+            if isFeedCard && showOriginal {
+                OriginalEmailDetailView(mail: current, isFeedCard: true, backToSummary: { showOriginal = false })
+            } else {
+                summaryPage
+            }
+        }
+        .foregroundStyle(HyggeTheme.ink)
+        .tint(HyggeTheme.sageDeep)
+        .fontDesign(.rounded)
+    }
+    private var summaryPage: some View {
+        Group {
+            if isFeedCard { summaryContent }
+            else { SettingsPage(title: "Email summary") { summaryContent } }
+        }
+        .modifier(EmailMessageActions(mail: mail, isFeedCard: isFeedCard))
+    }
+    @ViewBuilder private var summaryContent: some View {
             HStack(spacing: 12) {
                 SiteLogoTile(domain: mail.senderDomain, name: mail.senderDomain, size: 40)
                 VStack(alignment: .leading, spacing: 5) {
@@ -23,6 +43,7 @@ struct FiledEmailDetailView: View {
             }
             Text(current.displayTitle).font(.title2.bold()).fixedSize(
                 horizontal: false, vertical: true)
+                .feedCardDismissRegion()
             if current.markedAsMe == true || current.relation == "owner" {
                 Label(
                     current.markedAsMe == true ? "Marked as you" : "From you",
@@ -54,23 +75,25 @@ struct FiledEmailDetailView: View {
                         }
                         if job != jobs.last { Divider() }
                     }
-                    Text("As stated in the email; details may still need checking.").font(.caption)
-                        .foregroundStyle(HyggeTheme.secondary)
                 }
             }
-            NavigationLink {
-                OriginalEmailDetailView(mail: current)
-            } label: {
-                SettingsRow(
-                    title: "Email details", icon: "envelope.open",
-                    subtitle: "Read the original email")
-            }.buttonStyle(.plain)
-        }.modifier(EmailMessageActions(mail: mail))
+            if isFeedCard {
+                Button { showOriginal = true } label: { originalEmailLink }
+                    .buttonStyle(.plain)
+            } else {
+                NavigationLink { OriginalEmailDetailView(mail: current) } label: { originalEmailLink }
+                    .buttonStyle(.plain)
+            }
+    }
+    private var originalEmailLink: some View {
+        SettingsRow(title: "Email details", icon: "envelope.open", subtitle: "Read the original email")
     }
 }
 
 struct OriginalEmailDetailView: View {
     let mail: FiledEmailSummary
+    var isFeedCard = false
+    var backToSummary: (() -> Void)?
     @Environment(AppStore.self) private var store
     @State private var original: OriginalEmail?
     @State private var loading = true
@@ -79,7 +102,15 @@ struct OriginalEmailDetailView: View {
         store.filedEmailSummaries.first { $0.id == mail.id } ?? mail
     }
     var body: some View {
-        SettingsPage(title: "Email details") {
+        Group {
+            if isFeedCard { originalContent }
+            else { SettingsPage(title: "Email details") { originalContent } }
+        }
+        .task(id: mail.id) { await load() }
+        .modifier(EmailMessageActions(mail: mail, isFeedCard: isFeedCard,
+                                      pageTitle: "Email details", backToSummary: backToSummary))
+    }
+    @ViewBuilder private var originalContent: some View {
             HStack(spacing: 12) {
                 SiteLogoTile(domain: mail.senderDomain, name: mail.senderDomain, size: 40)
                 VStack(alignment: .leading, spacing: 5) {
@@ -94,6 +125,7 @@ struct OriginalEmailDetailView: View {
             }
             Text(original?.subject ?? mail.subject).font(.title2.bold()).fixedSize(
                 horizontal: false, vertical: true)
+                .feedCardDismissRegion()
             if let original {
                 if !original.to.isEmpty {
                     Text("To: \(original.to)").font(.caption).foregroundStyle(HyggeTheme.secondary)
@@ -156,9 +188,6 @@ struct OriginalEmailDetailView: View {
                     HyggeTheme.sageDeep)
                 Text(mail.summary).textSelection(.enabled)
             }
-        }
-        .task(id: mail.id) { await load() }
-        .modifier(EmailMessageActions(mail: mail))
     }
     private func load() async {
         loading = true
@@ -179,11 +208,15 @@ struct OriginalEmailDetailView: View {
 
 private struct EmailMessageActions: ViewModifier {
     let mail: FiledEmailSummary
+    var isFeedCard = false
+    var pageTitle = "Email summary"
+    var backToSummary: (() -> Void)?
     @Environment(AppStore.self) private var store
     @State private var actionNotice: String?
     @State private var actionError: String?
     @State private var busy = false
     @State private var confirmIgnore = false
+    @State private var showPreferences = false
     @State private var showConversation = false
     @State private var verification: OwnEmailAddress?
     private var current: FiledEmailSummary {
@@ -192,42 +225,10 @@ private struct EmailMessageActions: ViewModifier {
     private var marked: Bool { current.markedAsMe == true }
     private var ignored: Bool { store.ignoredSenderDomains.contains(mail.senderDomain) }
     func body(content: Content) -> some View {
-        content
-            .safeAreaInset(edge: .bottom) {
-                VStack(alignment: .leading, spacing: 10) {
-                    if let actionNotice {
-                        Label(actionNotice, systemImage: "info.circle").font(.footnote)
-                            .foregroundStyle(HyggeTheme.secondary)
-                    }
-                    if let actionError {
-                        Label(actionError, systemImage: "exclamationmark.circle").font(.footnote)
-                            .foregroundStyle(HyggeTheme.emberDeep)
-                    }
-                    Button("Discuss in chat") {
-                        store.pendingChatContext = ChatContextRef(
-                            kind: "mail", id: mail.id, title: current.displayTitle,
-                            subtitle: current.senderAddress, siteID: mail.siteID,
-                            siteDomain: mail.senderDomain)
-                        showConversation = true
-                    }.buttonStyle(SettingsActionStyle())
-                }.padding(.horizontal, 22).padding(.vertical, 16).background(HyggeTheme.paper)
-            }
+        page(content: content)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button(
-                            marked ? "Remove “This is me” label" : "This is me",
-                            systemImage: "person.crop.circle"
-                        ) { markAsMe(!marked) }
-                        if ignored {
-                            Button("Stop ignoring this domain") { setIgnored(false) }
-                        } else {
-                            Button("Ignore mail from \(mail.senderDomain)") { confirmIgnore = true }
-                        }
-                        NavigationLink("Email preferences") { EmailPreferencesView() }
-                    } label: {
-                        Image(systemName: "ellipsis").frame(width: 44, height: 44)
-                    }.accessibilityLabel("Email options").disabled(busy)
+                    if !isFeedCard { optionsMenu }
                 }
             }
             .alert("Ignore mail from \(mail.senderDomain)?", isPresented: $confirmIgnore) {
@@ -244,6 +245,70 @@ private struct EmailMessageActions: ViewModifier {
             .sheet(item: $verification) {
                 EmailAddressVerificationView(address: $0).presentationDragIndicator(.visible)
             }
+            .sheet(isPresented: $showPreferences) {
+                NavigationStack { EmailPreferencesView() }.presentationDragIndicator(.visible)
+            }
+    }
+    @ViewBuilder private func page(content: Content) -> some View {
+        if isFeedCard {
+            FeedDetailContent {
+                HStack {
+                    if let backToSummary {
+                        Button(action: backToSummary) { Label("Email summary", systemImage: "chevron.left") }
+                            .font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.sageDeep)
+                            .frame(minHeight: 44)
+                    } else {
+                        Text(pageTitle).font(.caption.weight(.semibold)).foregroundStyle(HyggeTheme.secondary)
+                    }
+                    Spacer()
+                    optionsMenu
+                }
+                content
+            } footer: { actionControls }
+        } else {
+            content.safeAreaInset(edge: .bottom) {
+                actionControls.padding(.horizontal, 22).padding(.vertical, 16).background(HyggeTheme.paper)
+            }
+        }
+    }
+    private var actionControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let actionNotice {
+                Label(actionNotice, systemImage: "info.circle").font(.footnote)
+                    .foregroundStyle(HyggeTheme.secondary)
+            }
+            if let actionError {
+                Label(actionError, systemImage: "exclamationmark.circle").font(.footnote)
+                    .foregroundStyle(HyggeTheme.emberDeep)
+            }
+            Button("Discuss in chat") {
+                store.pendingChatContext = ChatContextRef(
+                    kind: "mail", id: mail.id, title: current.displayTitle,
+                    subtitle: current.senderAddress, siteID: mail.siteID,
+                    siteDomain: mail.senderDomain)
+                showConversation = true
+            }.buttonStyle(SettingsActionStyle())
+        }
+    }
+    private var optionsMenu: some View {
+        Menu {
+                        Button(
+                            marked ? "Remove “This is me” label" : "This is me",
+                            systemImage: "person.crop.circle"
+                        ) { markAsMe(!marked) }
+                        if ignored {
+                            Button("Stop ignoring this domain") { setIgnored(false) }
+                        } else {
+                            Button("Ignore mail from \(mail.senderDomain)") { confirmIgnore = true }
+                        }
+                        if isFeedCard {
+                            Button("Email preferences") { showPreferences = true }
+                        } else {
+                            NavigationLink("Email preferences") { EmailPreferencesView() }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                    }.accessibilityLabel("Email options").disabled(busy)
     }
     private func markAsMe(_ value: Bool) {
         guard !busy else { return }
