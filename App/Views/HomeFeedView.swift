@@ -19,8 +19,10 @@ struct HomeFeedView: View {
     /// draws him along the way. Driving .position itself through an
     /// optional override snapped him off-screen for a frame on close.
     @State private var hopOffset: CGSize = .zero
-    /// Downward drag on the chat bubble's grabber: the bubble follows
-    /// the finger, then either springs back or closes past the threshold.
+    /// Downward drag on the chat bubble's grabber, in points: the
+    /// bubble collapses (bottom anchored, top edge follows the
+    /// finger), then either springs back open or closes past the
+    /// threshold. It never translates the whole bubble.
     @State private var bubbleDragOffset: CGFloat = 0
     /// While the chat bubble is open he perches a little higher, fully
     /// on screen under its tail, instead of clipped by the bottom edge.
@@ -405,8 +407,14 @@ struct HomeFeedView: View {
         let bubbleBottomWindow = keyboardHeight > 0
             ? screenSize.height - keyboardHeight - 8
             : screenSize.height - flameFrameH * 0.78 - 2
-        let height = min(screenSize.height * 0.84,
-                         max(280, bubbleBottomWindow - 56))
+        let fullHeight = min(screenSize.height * 0.84,
+                             max(280, bubbleBottomWindow - 56))
+        // Grabber drag collapses from the top: position below is
+        // derived from this height against the fixed bottom, so the
+        // bottom (and tail, and composer) stay planted while the
+        // top edge tracks the finger. Floored so the grabber and
+        // composer never crush into each other mid-drag.
+        let height = max(96, fullHeight - bubbleDragOffset)
         return ZStack {
             Color.clear
             VStack(alignment: .trailing, spacing: 0) {
@@ -416,8 +424,9 @@ struct HomeFeedView: View {
                     // the visible pill. It must outrank the transcript
                     // ScrollView directly underneath (plain .gesture
                     // loses to its pan recognizer, which made the
-                    // handle feel dead), and the bubble follows the
-                    // finger so the drag reads as a drag.
+                    // handle feel dead). Dragging collapses the bubble
+                    // (see height above); release past the threshold
+                    // closes it, short of that it springs back open.
                     ZStack(alignment: .top) {
                         Color.clear
                         Capsule()
@@ -433,8 +442,8 @@ struct HomeFeedView: View {
                                 bubbleDragOffset = max(0, value.translation.height)
                             }
                             .onEnded { value in
-                                if value.translation.height > 55
-                                    || value.predictedEndTranslation.height > 140 {
+                                if value.translation.height > 110
+                                    || value.predictedEndTranslation.height > 220 {
                                     closeBubble()
                                 } else {
                                     withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.85)) {
@@ -462,9 +471,12 @@ struct HomeFeedView: View {
                     .padding(.trailing, 58)
                     .offset(y: -9)
             }
+            // Bottom-anchored: center derives from the (possibly
+            // collapsed) height against the fixed bottom, so a
+            // grabber drag shrinks the bubble in place instead of
+            // pushing the whole bubble down.
             .position(x: screenSize.width - width / 2 - 12 - origin.x,
                       y: bubbleBottomWindow - height / 2 - origin.y)
-            .offset(y: bubbleDragOffset)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Chat with Hygge")
             .accessibilityIdentifier("chatBubble")
