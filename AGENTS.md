@@ -1,32 +1,58 @@
 # AGENTS.md — Hygge contributor guide for coding agents
 
-This is the source of truth for automated work in this repo. Human-oriented
-versions: [README.md](/Users/mikaellemberg/Hygge/README.md),
-[CONTRIBUTING.md](/Users/mikaellemberg/Hygge/CONTRIBUTING.md),
-[docs/ARCHITECTURE.md](/Users/mikaellemberg/Hygge/docs/ARCHITECTURE.md).
+Source of truth for automated work here. Human versions: [README.md](README.md),
+[CONTRIBUTING.md](CONTRIBUTING.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Licensed under MIT — see `LICENSE`.
 
 ## What this is
 
-Hygge is an iOS app (SwiftUI, iOS 17+) plus a Cloudflare Workers backend.
-A cloud browser agent performs user-approved missions on arbitrary websites —
+Hygge ("hoo-gah") is an iOS app (SwiftUI, iOS 17+) that finds gig work and
+manages it end-to-end behind **one approval queue**: conversational onboarding
+builds an `EarningsProfile`, the agent proposes sites, every job is drafted
+first, and nothing acts in the user's name without approval. A Cloudflare
+Workers backend drives a cloud browser agent on arbitrary user-approved sites —
 there are **no per-site API integrations and no navigation scripts** anywhere.
-Read [docs/ARCHITECTURE.md](/Users/mikaellemberg/Hygge/docs/ARCHITECTURE.md)
-before touching agent, vault, or site-memory code.
+Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before touching agent, vault,
+or site-memory code.
 
-## Repo map
+## Repo map (concrete)
 
-- `App/` — iOS app (SwiftUI views, services, assets). Entry: `App/HyggeApp.swift`.
-- `Sources/HyggeCore/` — testable core logic (mission loop, matching, vault
-  types, site memory, onboarding). Mirrored by `Tests/HyggeCoreTests/`.
-- `backend/cloudflare/` — Worker + per-user `UserSandbox` Durable Object
-  (browser worker, vault, site memory). See `backend/cloudflare/README.md`.
-- `backend/agent-service/` — retired local Node service, kept in git history
-  only. Do not revive it; the cloud backend is the production path.
-- `docs/` — architecture notes, design atoms (`docs/design/atoms/`), screenshots.
-- `scripts/` — `check-user-copy.mjs`, `check-flame-assets.py`,
-  `make-flame-assets.py`.
-- `.github/workflows/` — `ci.yml` (tests + staging deploy), `testflight.yml`
-  (manual TestFlight upload).
+- `App/HyggeApp.swift` → `ContentView` + `AppStore` (`@Observable`). State is
+  `StoreSnapshot`: decode is tolerant (new fields default, never wipe state).
+- `App/AppStore.swift` — store, `SiteAccountState`, `ProposedSite`, chat types.
+- `App/BackendClient.swift` — `tasks`, `tasks/{id}/approve`, `sessions`,
+  `sessions/{id}/act`, `credentials`, `onboarding/message`, `onboarding/stream`
+  (SSE), `site-proposals`, `health`, `tasks` probe. Bearer token; stale `http://`
+  local-backend URLs and their tokens are dropped (`BackendAddress`).
+- `App/Views/` — `HomeFeedView`, `ApprovalsView`, `ConversationView`,
+  `OnboardingView`, `CloudBrowserView` (watch/takeover via
+  `BrowserSessionSnapshot`), `ProfileHubView`, `YourWorkView`,
+  `IntroCarouselView`, `HyggeTheme` (Warm Nordic tokens + dark-mode mappings).
+- `Sources/HyggeCore/` — `AgentTask` (kinds, status machine, factory drafts,
+  `SimulatedMissionRunner`), `BrowserAgent` (`TargetSite`, `SiteMemory`,
+  `CredentialRef`), `MatchEngine` (scoring + thresholds), `Models`
+  (`EarningsProfile`, `Opportunity`, `ApplicationRecord`, `ActivityEvent`),
+  `Onboarding`, `Journal`, `SeedSites` (17 starter sites), `BackendAddress`,
+  `CloudRequirement` (`HYGGE_REQUIRE_CLOUD`), `TaskBatching`, `ChatActions`,
+  `Beliefs`, `SampleData` (labelled demo feed items).
+- `backend/cloudflare/src/` — `index.ts` (routes `/health /credentials /memory
+  /sessions /tasks /site-proposals /onboarding /sandbox`; user id from verified
+  credential only), `agent.ts` (mission loop, `MAX_STEPS = 25`), `llm.ts`
+  (`selectTier`, `parseDecision`), `vault.ts` (per-user DEK, AES-256-GCM),
+  `browser.ts`, `onboarding.ts` (`ReplyStreamExtractor`,
+  `heuristicSuggestions`), `user-sandbox.ts`, `env.ts`.
+- `backend/cloudflare/test/unit.mts` — tier routing, `parseDecision`, vault
+  DEK/AAD binding, stream extractor, suggestions, `distillHints` (cap 12).
+- `backend/cloudflare/e2e-staging.mjs` — against live staging: auth, two-user
+  isolation, vault canary, approval-gate 403, onboarding SSE, proposals, a real
+  Browser Run discover mission, memory hints, snapshot save/restore. Needs
+  staging tokens (`/tmp/hygge_staging_tokens.json`); maintainer-run, not CI.
+- `backend/agent-service/` — retired local service, history only. Do not revive.
+- `docs/design/atoms/` — 17 SVG atoms + token README; `docs/design/
+  onboarding-package/ONBOARDING-BUILD-SPEC.md`; `docs/screenshots/`.
+- `scripts/` — `check-user-copy.mjs` (banned dev vocabulary in release Swift
+  strings), `check-flame-assets.py` (full-canvas APNG frames),
+  `make-flame-assets.py` (generates `App/Flame{Walk,Laptop,Notify}.png`).
 
 ## Commands (run from the indicated directory)
 
@@ -34,8 +60,8 @@ From repo root:
 
 ```bash
 swift test   # HyggeCore tests
-node scripts/check-user-copy.mjs        # user-facing copy check (CI runs this)
-python3 scripts/check-flame-assets.py   # flame assets are full-frame APNGs (CI runs this)
+node scripts/check-user-copy.mjs        # copy check (CI runs this)
+python3 scripts/check-flame-assets.py   # flame APNG check (CI runs this)
 xcodebuild -project Hygge.xcodeproj -scheme Hygge \
   -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
 ```
@@ -46,78 +72,100 @@ From `backend/cloudflare/`:
 npm ci
 ./node_modules/.bin/tsc --noEmit
 npm test   # node --experimental-strip-types --test "test/*.mts"
-npm run dev # wrangler dev -c wrangler.staging.jsonc
 ```
 
-Backend deploy uses **separate config files per environment, never wrangler
-`env`** (container bindings require it). Always pass `-c <config>`:
+Separate wrangler configs per environment, never wrangler `env` — always
+`-c <config>`. Health: `api-staging.usehygge.app/health`, `api.usehygge.app/health`.
 
-```bash
-npx wrangler deploy -c wrangler.staging.jsonc
-npx wrangler deploy -c wrangler.production.jsonc
-```
+## Where to change what
 
-Health: `https://api-staging.usehygge.app/health`,
-`https://api.usehygge.app/health`.
+| Want | Touch | Prove with |
+|---|---|---|
+| Match/rank/feed honesty | `MatchEngine.swift`, `HomeFeedView.swift` | `swift test` |
+| New/changed mission kind | `AgentTaskKind` + `AgentTaskFactory` + `SimulatedMissionRunner` + `backend/.../agent.ts` | both suites |
+| Vault/credentials | `vault.ts`, `CredentialRef`, `BackendClient.storeCredential` | `npm test`, e2e canary |
+| Onboarding dialogue/copy | `Onboarding.swift`, `onboarding.ts`, views | copy check + `swift test` |
+| Theme/atoms/flame | `HyggeTheme.swift`, `docs/design/atoms/`, `make-flame-assets.py` | flame check |
+| Backend route | `index.ts` `USER_ROUTES` + `user-sandbox.ts` | `tsc`, `npm test` |
+| Schema change | `migrations/` + wrangler configs + both clients | full CI |
 
-## CI / release rules
+## Contracts you must not break (all test-enforced)
 
-- CI (`ci.yml`) runs core tests + copy check + flame check + unsigned iOS
-  build, and backend `tsc` + tests, on every push and PR.
-- Staging deploys automatically from `main` after green tests (health-checked).
-- Production deploys **only** on manual `workflow_dispatch` with
-  `deploy_production: true` (health-checked). Never trigger or imply a
-  production deploy unasked.
-- TestFlight uploads are manual (`testflight.yml`, signing via secrets).
-  Never run this workflow unasked.
+1. **Approval gate.** `AgentTaskKind.requiresApproval` is true for everything
+   except `.discover`. Swift throws `AgentError.notApproved`; backend answers
+   403 on direct runs; e2e asserts the 403. Never add an unattended path.
+2. **Status machine.** `draft → awaitingApproval → approved → running →
+   succeeded/failed`, with `needsHuman`/`rejected` exits; illegal transitions
+   throw. After `requestReapproval`, the mission needs fresh approval.
+3. **Never invent data.** Unknown required values become `askUser`
+   `informationRequests` (e.g. signup asks phone/DOB), never guesses.
+4. **Vault.** Secrets leave only via `vault.use()` into a login form. The app
+   holds `CredentialRef` (id/domain/username — cannot carry a secret); the
+   model sends `valueRef: credential.secret`, never literal passwords
+   (worker refuses password-shaped literals). e2e scans every response for
+   the canary. Do not weaken these tests.
+5. **Human handover.** CAPTCHA/2FA/payment/ID → `needsHuman`, pause for the
+   user in `CloudBrowserView`. Never bypass.
+6. **Site memory is advisory.** `SiteMemoryRepository.learn` distils hints
+   (capped at 12, with success/failure counts + `confidence`); missions start
+   from goal + live page and may ignore hints. Never per-site step lists.
+7. **Matching honesty.** Weights interest 0.35 / skills 0.35 / pay 0.2 /
+   remote 0.1; recommend only at confidence ≥ 0.65 (`recommendationThreshold`),
+   keep at ≥ 0.45; the rate floor is a promise (known pay below it is dropped
+   regardless of score); `survey` records kept/borderline/dropped-with-reason
+   as `SearchEvidence`. Journal, earnings and time-saved derive ONLY from
+   witnessed `ActivityEvent`s; money counts ONLY from structured
+   `estimatedGross`/`agreedGross`, never parsed label text.
+8. **Model tiers** (`llm.ts selectTier`): spark-1.3 routine; wonder-1.0 on any
+   failure, loop (`repeatedAction`), high-stakes final submit
+   (`signup`/`apply`/`bookCalendar`), or drafting user-facing text. Standard
+   (non-`-contributor`) model ids only. Step budgets: 25 server, 14 simulated.
+9. **Multi-tenancy.** One sandbox per user (`sandboxFor`: DO name = user id);
+   every record carries `user_id`; per-user DEKs; shared memory holds no
+   personal data. Two-user isolation is e2e-gated — a release gate.
+10. **Release honesty.** `HYGGE_REQUIRE_CLOUD`: Debug defaults to staging and
+    may simulate; Release requires cloud and never silently simulates
+    (`CloudRequirement`, tested).
 
-## Contracts you must not break
+## Voice and design rules
 
-These are covered by tests on both stacks — keep them green:
-
-1. **Approval gate.** Any state-changing task is drafted first and runs only
-   after user approval. Enforced in Swift (`AgentError.notApproved`) and
-   backend (403 on direct runs). Never add a path that acts in the user's
-   name without approval.
-2. **Never invent data.** Unknown required info comes back as `askUser`
-   requests, never guessed values.
-3. **Credential vault.** Secrets leave the vault only inside `vault.use()`
-   to fill a login form. No endpoint returns a secret; the app holds only
-   `CredentialRef {id, domain, username}`. Secrets never reach prompts,
-   drafts, logs, or responses. Tests prove this — do not weaken them.
-4. **Human handover.** CAPTCHA, 2FA, payment, and ID checks return
-   `needsHuman` and pause for the user. Never bypass or automate around them.
-5. **Site memory is advisory.** Distilled hints with success/failure counts;
-   the agent may ignore them when the page disagrees. Never turn hints into
-   scripts or per-site step lists.
-6. **Model tiers.** `muse-spark-1.3` for routine steps/extraction,
-   `muse-wonder-1.0` for planning, deviations, and user-facing text.
-   Standard (non-`-contributor`) model ids only.
-7. **Multi-tenancy.** One agent per user; every record carries `user_id`;
-   per-user encryption keys; shared memory carries no personal data.
-   User A can never read user B's anything — isolation tests are a release gate.
-8. **Release builds require the cloud backend** (`HYGGE_REQUIRE_CLOUD`).
-   Debug defaults to staging, Release to production; a developer override wins.
-
-## Design rules (Warm Nordic)
-
-Tokens and atoms: [docs/design/atoms/README.md](/Users/mikaellemberg/Hygge/docs/design/atoms/README.md).
-
-- Flame mark is locked: coral `#FF6B57` outer + gold `#FFC53D` inner, exact
-  paths in `flame-mark.svg`. Variants change face/extras only.
-- Ember `#C93A26` for primary buttons (white text); never coral button text.
-- Typeface SF Rounded everywhere; honor Dynamic Type and Reduce Motion.
-- The money moment stays quiet: itemized receipt only, no flame, no confetti.
-- Placeholder data in design atoms is illustrative; real market is Austin, USD.
+- Release Swift strings must not contain dev vocabulary
+  (`agent service`, `simulated`, `mission(s)`, `payload`, `browser worker`,
+  `server`, `vault credential`, `run-live`, `node server`) — the copy check
+  fails; `#if DEBUG` is exempt.
+- `OpportunityCategory.tileLabel` must fit a two-column tile;
+  `activityLabel` is spoken language for onboarding; journal sentences are
+  plain ("Hygge booked…", `SearchEvidence.journalSentence` pattern).
+- `HyggeTheme` tokens only (dark-mode mappings included, warmed charcoal —
+  never pure black): coral `#FF6B57` (theme `HyggeTheme.ember`) never carries
+  button text (2.8:1) — primary buttons are ember `#C93A26` (theme
+  `HyggeTheme.emberDeep`, white text 5.1:1). One saturated element per screen.
+  Typeface SF Rounded everywhere.
+- Cards carry one primary action: tag chip, title, 2–3 fact rows or one short
+  paragraph, the primary button — anything more becomes a sheet; secondary
+  exits are quiet text. Home order is fixed (greeting, at most one
+  suggestion, pinned needs-you, journal); no tab bar, ever; the flame floats
+  bottom-right, sticker-style.
+- The flame is the approved left-facing walking flame (`FlameCharacter`
+  asset; source `docs/design/flame-character-source.png`) — never redraw or
+  substitute it. Moods animate (`FlameAnimation`: walk/laptop/notify), don't
+  swap; honor Reduce Motion and Dynamic Type. Real market Austin, USD.
+- Money honesty: counts only structured, witnessed amounts; the fee is not
+  finalized — never present a cut as deducted (money screen reads "all
+  yours"); time saved is always "about", rounded down, math visible in
+  profile; zero work = zero claims ("none yet"). Money moment: "Done." +
+  itemized receipt + sage Continue — no flame, no confetti. Beliefs
+  (`BeliefBook`) are proposed and confirmed, never silently saved.
 
 ## Working agreements
 
-- Never commit secrets: `.env`, `HYGGE_*` keys/tokens, `*.p12`,
-  `*.mobileprovision`, `.wrangler/`, `node_modules/`. `.gitignore` covers
-  these — keep it that way.
-- Match existing API shapes and reuse sibling helpers; derive the contract
-  from call sites and existing tests, not from the issue text alone.
-- Keep `README.md`'s "What it can do today" accurate when behavior changes.
-- No `LICENSE` file exists yet — the maintainer is choosing one (see
-  [CONTRIBUTING.md](/Users/mikaellemberg/Hygge/CONTRIBUTING.md)). Do not assert
-  license terms in code or docs.
+- CI runs core tests + copy/flame checks + unsigned iOS build and backend
+  `tsc` + tests on every push/PR. Staging deploys from `main` when green;
+  production only on manual `workflow_dispatch`; TestFlight is manual. Never
+  trigger deploys/uploads unasked.
+- Never commit `.env`, `HYGGE_*` keys/tokens, `*.p12`,
+  `*.mobileprovision`, `.wrangler/`, `node_modules/`, staging token files.
+  Debug-only `HYGGE_STAGING_TOKEN` bakes are never set in CI/Release.
+- Match sibling API shapes; derive contracts from call sites + existing
+  tests. Keep README's "What it can do today" and demo-item labelling
+  accurate when behavior changes.
