@@ -5,6 +5,7 @@ container/**
 !container/package.json
 !container/package-lock.json
 !container/server.mjs
+!container/artifacts.mjs
 !src/
 src/**
 !src/browser-live.ts
