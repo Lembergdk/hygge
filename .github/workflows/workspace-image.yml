@@ -2,8 +2,8 @@ name: Publish workspace image
 
 # Manual only. This publishes a new immutable workspace image and
 # reports its digest; it never changes Wrangler config or deploys a
-# worker. Updating both pinned references remains a separate,
-# reviewed image-upgrade change.
+# worker. Changing an environment or owner image policy remains a
+# separate reviewed image-upgrade change.
 on:
   workflow_dispatch:
     inputs:

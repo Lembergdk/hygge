@@ -28,7 +28,7 @@ async function change(o,targetImage,label){
 function populated(value,latest=false){assert.equal(value.cookie,true);assert.equal(value.localStorage,true);assert.equal(value.source,true);if(latest){assert.ok(value.latestBytes>262144);assert.equal(value.latest,true);}}
 try{
  for(const o of owners){
-  console.log(`::add-mask::${o.token}`);
+  console.log(`::add-mask::${o.token}`);console.log(`STAGING synthetic fixture user=${o.id} marker=${o.marker}`);
   sql(`INSERT INTO users (id,do_instance,contact_email) VALUES ('${o.id}','${o.id}','workspace-upgrade-${o.id}@example.invalid')`);o.created=true;
   sql(`INSERT INTO auth_sessions (id,user_id,token_hash,created_at,expires_at) VALUES ('${randomUUID()}','${o.id}','${createHash('sha256').update(o.token).digest('hex')}','${new Date().toISOString()}','${new Date(Date.now()+7200000).toISOString()}')`);
   const seed=await fixture(o,'seed');o.seeded=true;populated(seed);assert.equal(seed.image,OLD);
@@ -46,7 +46,7 @@ try{
  let failed=false;
  for(const o of owners){
   if(!o.created)continue;
-  try{if(o.seeded){const retired=await fixture(o,'retire');assert.equal(retired.retired,true);console.log(`STAGING synthetic container retired user=${o.id}`);}}catch(e){failed=true;console.error(`STAGING retirement pending user=${o.id}: ${e.message}`);}
+  try{const retired=await fixture(o,'retire');assert.equal(retired.retired,true);console.log(`STAGING synthetic container retired user=${o.id}`);}catch(e){failed=true;console.error(`STAGING retirement pending user=${o.id}: ${e.message}`);}
   try{sql(`DELETE FROM auth_sessions WHERE user_id='${o.id}'; DELETE FROM users WHERE id='${o.id}'`);}catch{failed=true;}
  }
  console.log(`STAGING cleanup ${failed?'FAIL':'PASS'}; immutable synthetic DO/R2 evidence retained, auth/users removed`);if(failed)process.exitCode=1;

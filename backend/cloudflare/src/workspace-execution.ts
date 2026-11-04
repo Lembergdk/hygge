@@ -244,9 +244,12 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
           const ref=`file_${(await sha256(new TextEncoder().encode(path))).slice(0,32)}_1`;await bridge.writeArtifact(ref,source);
           await save({expectedLease:lease,task:{id:'fixture-seed',kind:'discover',target_url:origin,status:'running'},runId:'fixture-seed',reason:'pause',evidence:[],requiresBrowserFreeze:true});
         });foundation.persistence.put('image_fixture','active',0,{marker});
-      }else if(!stored)throw Error('FIXTURE_NOT_SEEDED');
+      }else if(!stored&&action!=='retire')throw Error('FIXTURE_NOT_SEEDED');
       if(action==='write-latest')await saveDocument(latestPath,1,latest);
       if(action==='retire'){
+        let existing;try{existing=await foundation.registry.read(owner,owner);}catch(error){if(error instanceof Error&&error.message==='WORKSPACE_NOT_INITIALIZED')return {retired:true,receiptId:null};throw error;}
+        if(existing.lifecycleState==='stopped')return {retired:true,receiptId:null};
+        if(existing.lifecycleState!=='ready')throw Error('FIXTURE_RECOVERY_PENDING');
         const receipt=await save({task:{id:'fixture-cleanup',kind:'discover',target_url:origin,status:'running'},runId:'fixture-cleanup',reason:'pause',evidence:[],requiresBrowserFreeze:true});
         await foundation.verifyDurability(receipt.receiptId);const binding=await foundation.registry.read(owner,owner);
         const stopped=await foundation.registry.fence(owner,owner,binding.generation,`fixture_${marker}_retire`);return {retired:stopped.lifecycleState==='stopped',receiptId:receipt.receiptId};
