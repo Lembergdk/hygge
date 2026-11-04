@@ -1,7 +1,7 @@
 import type { Checkpoint, RunCompletionReceipt, RuntimeLease, RuntimeOperation, WorkspaceDurabilityReceipt, WorkspaceIdentity } from './workspace-contract.ts';
 import type { createWorkspaceFoundation } from './workspace-foundation.ts';
 import type { RunDefinition } from './runtime-checkpoints.ts';
-import { canonical, digest, fail, nonempty, sameOwner, type WorkspaceStorage } from './workspace-persistence.ts';
+import { canonical, digest, fail, InvalidWorkspacePayload, nonempty, sameOwner, type WorkspaceStorage } from './workspace-persistence.ts';
 import { createWorkspaceTaskProjection, type TaskProjector, type WorkspaceTask } from './workspace-task-projection.ts';
 import { outcomeForTaskKind } from './skills.ts';
 
@@ -49,6 +49,43 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
   const project=config.projectTask??createWorkspaceTaskProjection(config.storage,db,now);
   const instanceId=crypto.randomUUID();let tail:Promise<unknown>=Promise.resolve();
   function serialized<T>(operation:()=>Promise<T>):Promise<T>{const next=tail.then(operation);tail=next.catch(()=>{});return next;}
+  type Phase='waiting_for_workspace'|'browser_starting'|'running'|'recovery'|'finished';
+  function progress(taskId:string,phase:Phase){
+    const old=db.get('runner_progress',taskId);
+    db.put('runner_progress',taskId,old?.revision??0,{taskId,runId:record(taskId)?.value.runId??null,phase,updatedAt:now()});
+  }
+  /** Queue exhaustion is an observation, never permission to release an admission or replay an effect. */
+  function applyDeliveryFailure(task:WorkspaceTask,jobId:string){
+    const old=record(task.id)?.value;
+    const notice=db.get<{taskId:string;runId:string|null;applied:boolean}>('runner_delivery',jobId)!;
+    if(notice.value.applied)return copy(old?.task??task);
+    if(old&&old.runId!==notice.value.runId||['succeeded','failed','rejected'].includes(old?.status??task.status)){
+      db.put('runner_delivery',jobId,notice.revision,{...notice.value,applied:true});return copy(old?.task??task);
+    }
+    const admission=db.get<{instanceId:string;taskId:string}>('runner_owner','active')?.value;
+    if(admission?.taskId===task.id&&admission.instanceId===instanceId)return copy(old?.task??task);
+    const next:RunnerRecord=old??{taskId:task.id,runId:crypto.randomUUID(),sequence:0,pendingEffectId:null,status:'created',task:copy(task)};
+    const effects=db.list<import('./workspace-contract.ts').EffectRecord>('effect').filter(e=>e.value.runId===next.runId);
+    const needsReview=!!admission&&admission.taskId===task.id||!!next.pendingEffectId||effects.length>0;
+    const status=needsReview?'needsHuman' as const:'failed' as const;
+    const updated={...next.task,status,authorized_action:null,failure:{code:'job_delivery_exhausted'},
+      help:recoveryHelp(needsReview?'Delivery stopped. I need to verify the earlier browser session before continuing.':'This work could not start after several tries. Please try again when the connection is available.'),
+      log:[...(next.task.log??[]),'Queue delivery exhausted; existing effects and admission preserved.']};
+    const canonicalTask=db.get<any>('runtime_task',task.id);
+    if(canonicalTask)db.put('runtime_task',task.id,canonicalTask.revision,{...canonicalTask.value,status});
+    saveRecord({...next,status,task:updated},`${next.runId}:delivery:${jobId}`);progress(task.id,'recovery');
+    db.put('runner_delivery',jobId,notice.revision,{...notice.value,applied:true});
+    return copy(record(task.id)!.value.task);
+  }
+  function deliveryFailed(task:WorkspaceTask,jobId:string){
+    nonempty(jobId);
+    return db.storage.transactionSync(()=>{
+      const old=db.get<{taskId:string}>('runner_delivery',jobId);
+      if(old&&old.value.taskId!==task.id)fail('JOB_TASK_MISMATCH');
+      if(!old)db.put('runner_delivery',jobId,0,{taskId:task.id,jobId,runId:record(task.id)?.value.runId??null,applied:false});
+      return applyDeliveryFailure(task,jobId);
+    });
+  }
   async function context(taskId:string,requestId:string,expectedRevision:number,op:RuntimeOperation,guard?:ExecutionGuard){
     await guard?.verify();
     const capabilityToken=await f.broker.issue([op],{taskId},guard?.lease());
@@ -158,6 +195,7 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
           if(current.pendingEffectId)throw new WorkspaceActionUncertain();
           const sequence=current.sequence;
           const effectId=`fx_${current.runId.replaceAll('-','')}_${sequence}`;
+          atomicExecution(()=>progress(current.taskId,action.sessionID===null?'browser_starting':'running'));
           const intentHash=await digest({taskId:current.taskId,runId:current.runId,sequence,decision:action.decision,snapshot:action.snapshot,sessionID:action.sessionID});
           await guard.verify();
           const policy=await config.authorizeAction(current.task,{...action,effectId,intentHash,runId:current.runId});
@@ -213,7 +251,8 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
         // so operators can distinguish uncertainty from infrastructure faults.
         const raw=error instanceof Error?error.message:String(error);
         const code=/^[A-Z][A-Z0-9_]{2,48}$/.test(raw)?raw:'INTERRUPTED';
-        s={...s,task:{...s.task,log:[...(s.task.log??[]),`Recovery check paused [${code}]`]}};
+        const detail=error instanceof InvalidWorkspacePayload?` path=${error.path} type=${error.valueType}`:'';
+        s={...s,task:{...s.task,log:[...(s.task.log??[]),`Recovery check paused [${code}]${detail}`]}};
         return await executionPause(s,`The connection was interrupted. I will verify the site before continuing. [${code}]`);
       }
       s=state(input.task.id);
@@ -247,11 +286,18 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
         const old=db.get<{instanceId:string;taskId:string;executionId:string}>('runner_owner','active');
         if(old?.value.instanceId===instanceId&&old.value.executionId===executionId){ // Delete only this owner's completed admission; no cross-incarnation release.
           config.storage.sql.exec('DELETE FROM hygge_workspace_records WHERE scope=? AND kind=? AND id=?',db.scope,'runner_owner','active');
+          for(const notice of db.list<{taskId:string;jobId:string;applied:boolean}>('runner_delivery'))if(!notice.value.applied&&notice.value.taskId===input.task.id)applyDeliveryFailure(input.task,notice.value.jobId);
+          const status=record(input.task.id)?.value.status;
+          progress(input.task.id,status==='succeeded'||status==='rejected'?'finished':'recovery');
         }
       });
     }
   }
   return {
+    deliveryFailed,
+    progress:(taskId:string)=>db.get('runner_progress',taskId)?.value??null,
+    waiting:(taskId:string)=>db.storage.transactionSync(()=>{if(db.get<{taskId:string}>('runner_owner','active')?.value.taskId!==taskId)progress(taskId,'waiting_for_workspace');}),
+    unavailable:(taskId:string)=>db.storage.transactionSync(()=>{if(!db.get('runner_owner','active'))progress(taskId,'recovery');}),
     run:(input:WorkspaceRunContext)=>serialized(()=>execute(input)),
     /** Root-only authenticated human/current-browser reconciliation. This never dispatches or resumes a mission. */
     reconcile:(input:{taskId:string;effectId:string;status:'confirmed'|'not_applied';evidenceRef:string})=>serialized(async()=>{

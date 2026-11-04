@@ -175,7 +175,9 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     },
     /** Renew only while a user mission/live connection is active. Expiry never grants a replacement. */
     async run(task:any,mission:Parameters<typeof runner.run>[0]['mission'],resume=false) {
-      await ensure();let renewalError:unknown;
+      runner.waiting(task.id);
+      try{await ensure();}catch(error){runner.unavailable(task.id);throw error;}
+      let renewalError:unknown;
       const timer=setInterval(()=>{void ensure().catch(error=>{renewalError=error;});},15_000);
       try {
         const site=new URL(task.target_url).origin,outcome=outcomeForTaskKind(task.kind);

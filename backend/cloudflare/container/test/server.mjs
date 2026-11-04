@@ -58,3 +58,22 @@ test('rich references drive the full action set, stale refs fail closed, and cap
  await f.call('capture.release',{captureId:capture.captureId});
  const warm=await f.call('browser.snapshot',{id:'rich'});assert.equal(warm.sessionID,'rich');assert.equal(warm.title,'Controls');
 });
+test('multipart evidence is owner-bound, excluded until committed, and survives verified cold restore',async t=>{
+ const f=await setup(t);await f.call('initialize',{checkpointId:null});
+ const bytes=Buffer.alloc(578754,71),sha256=(await import('node:crypto')).createHash('sha256').update(bytes).digest('hex');
+ const manifest={ref:'large-evidence',size:bytes.length,sha256};const {uploadId}=await f.call('artifact.begin',manifest);
+ await assert.rejects(f.call('artifact.chunk',{uploadId,offset:0,data:b64(bytes.subarray(0,256*1024))},{...identity,userId:'other'}),/MISMATCH/);
+ await assert.rejects(f.call('artifact.commit',{...manifest,uploadId},{...identity,incarnation:'stale'}),/MISMATCH/);
+ const status=await f.call('status');assert.equal(status.artifactProtocolVersion,1);
+ await assert.rejects(f.call('capture.begin',{filesystemRevision:status.nextFilesystemRevision,browserProfileRevision:status.nextBrowserProfileRevision}),/TRANSFER_ACTIVE/);
+ assert.deepEqual(await f.call('artifact.list'),[]);
+ for(let offset=0;offset<bytes.length;offset+=256*1024)await f.call('artifact.chunk',{uploadId,offset,data:b64(bytes.subarray(offset,offset+256*1024))});
+ await f.call('artifact.commit',{...manifest,uploadId});await f.call('artifact.commit',{...manifest,uploadId});
+ const ready=await f.call('status'),capture=await f.call('capture.begin',{filesystemRevision:ready.nextFilesystemRevision,browserProfileRevision:ready.nextBrowserProfileRevision});
+ assert.ok(!capture.tree.files.some(f=>f.path.startsWith('.artifact-transfers')));assert.equal(capture.tree.artifacts['large-evidence'],'artifacts/large-evidence');
+ const cold=await setup(t,{...identity,incarnation:'cold',generation:2});await cold.call('restore.begin',{checkpointId:'synthetic',tree:capture.tree});
+ for(const file of capture.tree.files)for(let offset=0;offset<file.size;offset+=256*1024){const chunk=await f.call('capture.chunk',{captureId:capture.captureId,path:file.path,offset});await cold.call('restore.chunk',{path:file.path,offset,data:chunk.data});}
+ await cold.call('restore.finish',{filesystemRevision:capture.filesystemRevision,browserProfileRevision:capture.browserProfileRevision});
+ assert.deepEqual(await fs.readFile(path.join(cold.root,'artifacts','large-evidence')),bytes);assert.deepEqual(await cold.call('artifact.list'),['large-evidence']);
+ await f.call('capture.release',{captureId:capture.captureId});
+});

@@ -231,3 +231,15 @@ test('provider cleanup retries generic route failures but accepts an already del
   await client().deleteAgentResponse('old');
  }finally{globalThis.fetch=previous;}
 });
+
+test('text and stream requests share a bounded deadline, preserve timeout, and never retry',async()=>{
+ const originalFetch=globalThis.fetch,originalTimeout=AbortSignal.timeout;
+ const deadlines:number[]=[];let calls=0;
+ (AbortSignal as any).timeout=(ms:number)=>{deadlines.push(ms);const c=new AbortController();setTimeout(()=>c.abort(new DOMException('Timed out','TimeoutError')),1);return c.signal;};
+ globalThis.fetch=(async(_url:any,init:any)=>{calls++;return new Promise((_resolve,reject)=>{init.signal.addEventListener('abort',()=>reject(init.signal.reason),{once:true});});}) as any;
+ try{
+  await assert.rejects(client().complete({model:'m-fast',system:'s',user:'u'}),(e:any)=>e.name==='TimeoutError');
+  await assert.rejects(client().completeStream({model:'m-fast',system:'s',user:'u'},()=>{}),(e:any)=>e.name==='TimeoutError');
+  assert.deepEqual(deadlines,[120000,120000]);assert.equal(calls,2);
+ }finally{globalThis.fetch=originalFetch;(AbortSignal as any).timeout=originalTimeout;}
+});

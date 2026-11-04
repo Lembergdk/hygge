@@ -1,6 +1,7 @@
 import { ChatAgent } from './chat-agent.ts';
 import { ChatStore, sqlChatStorage, type ChatDocument } from './chat-store.ts';
 import { chatServices } from './chat-services.ts';
+import { latestMissionJob } from './jobs.ts';
 import { classifyBrowserFailure } from "./browser-failure.ts";
 import { help, applyHelpReply, mobileTask, canResumeWithInboxCode, reconcileEndedSession, rejectTaskHelp } from "./task-help.ts";
 import { bindWorkspaceOwner, workspaceMode } from './workspace-owner.ts';
@@ -1296,10 +1297,15 @@ export class UserSandbox extends DurableObject<Env> {
     if (!jobId || !taskId) return json({ error: "jobId and taskId required" }, 400);
     const existing = getMissionJob(this.ctx.storage, jobId);
     if (!existing || existing.taskId !== taskId) return json({ error: "unknown job" }, 404);
+    if (existing.state === "done") return json({ ok:true,jobState:"done",duplicate:true });
+    const task = this.loadTask(taskId);
+    if (task && workspaceMode(this.env.HYGGE_WORKSPACE_MODE) === "retained-v2") {
+      // Canonical recovery is durable before the terminal queue acknowledgement.
+      this.workspace().runner.deliveryFailed(task,jobId);
+    }
     if (!isTerminalJobState(existing.state)) {
       finishMissionJob(this.ctx.storage, jobId, "failed", new Date().toISOString(), "delivery retries exhausted");
     }
-    const task = this.loadTask(taskId);
     if (task && workspaceMode(this.env.HYGGE_WORKSPACE_MODE) === "legacy"
         && ["approved", "running"].includes(String(task.status))
         && !this.activeMissions.has(task.id)) {
@@ -2437,7 +2443,10 @@ export class UserSandbox extends DurableObject<Env> {
           if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='legacy'
               && reconcileEndedSession(t, Boolean(t.session_id && browser.hasSession(t.session_id)),
               this.activeMissions.has(t.id) || this.browserResumes.has(t.id))) this.saveTask(t);
-          return { ...t, mobile_task: mobileTask(t) };
+          const job=latestMissionJob(this.ctx.storage,t.id);
+          const progress=workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2'?this.workspace().runner.progress(t.id):null;
+          return { ...t, mobile_task: mobileTask(t), execution:{jobId:job?.jobId??null,jobState:job?.state??null,attempts:job?.attempts??0,
+            ...(progress??{}),...(job?.state==='queued'?{phase:'queued',updatedAt:job.updatedAt}:{})} };
         }) });
       }
       if (request.method === "POST" && parts.join("/") === "skills/quarantine") {

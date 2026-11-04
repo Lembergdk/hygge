@@ -1,3 +1,4 @@
+import { canonical } from "./workspace-persistence.ts";
 import { classifyBrowserFailure, failureFeedback } from "./browser-failure.ts";
 import { safePageURL, sensitiveElement } from "./browser-observation.ts";
 import { BrowserControlInterrupted } from "./browser-control.ts";
@@ -34,6 +35,21 @@ import { profilePhotoAllowedForTask, profilePhotoTargetAllowed } from "./profile
 import type { WorkspaceMissionHooks } from './workspace-task-runner.ts';
 
 const ACTIONS = new Set(["navigate", "click", "type", "upload", "select", "check", "press", "hover", "scroll", "back", "forward", "wait", "extract", "askUser", "done", "needsHuman"]);
+/** Normalize only declared optional absence before approval, hashing or browser dispatch. */
+export function normalizeBrowserDecision(input:unknown):Record<string,any> {
+  if(!input||typeof input!=='object'||Array.isArray(input))throw Error('INVALID_BROWSER_DECISION');
+  const decision={...(input as Record<string,any>)};
+  if(!ACTIONS.has(decision.action))throw Error('INVALID_BROWSER_DECISION');
+  for(const key of ['target','value','valueRef','reason','effect','preview','userMessage','questions','skillDraft','tier']){
+    if(Object.hasOwn(decision,key)&&decision[key]===undefined)delete decision[key];
+  }
+  const targeted=new Set(['click','type','upload','select','check','press','hover']);
+  if(decision.target===undefined&&!targeted.has(decision.action))decision.target='';
+  if(typeof decision.target!=='string'||targeted.has(decision.action)&&!decision.target.trim())throw Error('INVALID_BROWSER_TARGET');
+  for(const key of ['value','valueRef','reason','effect','preview','userMessage'])if(decision[key]!==undefined&&typeof decision[key]!=='string')throw Error('INVALID_BROWSER_DECISION');
+  canonical(decision); // no permissive stringify: reject unsupported nested values before side effects
+  return decision;
+}
 export const MAX_STEPS = 25;
 /// Steps the agent may spend working on one detected check before it
 /// must ask the user. Counts toward MAX_STEPS; the consequential-
@@ -533,6 +549,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
         });
         delete decision.consentGranted;
       }
+      decision = normalizeBrowserDecision(decision);
       delete task.authorized_action;
     } catch (e: any) {
       failures += 1;

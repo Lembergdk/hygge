@@ -201,3 +201,31 @@ test('Synchronous onSession projects only live owner session pointer and rejects
  assert.equal(JSON.parse(String(f.sqlite.prepare('SELECT task FROM tasks WHERE id=?').get('old-session')!.task)).session_id,'reserved-session');
  release();assert.match(String(await old),/STALE_WORKSPACE_EXECUTION/);releaseNew();assert.equal((await fresh).status,'succeeded');f.sqlite.close();
 });
+
+test('exhausted undispatched delivery fails visibly through canonical projection, once',async()=>{
+ const f=await fixture(),task=f.task('undelivered');
+ const result=f.runner.deliveryFailed(task,'job-a');assert.equal(result.status,'failed');assert.equal(result.failure.code,'job_delivery_exhausted');
+ const projected=JSON.parse(String(f.sqlite.prepare('SELECT task FROM tasks WHERE id=?').get(task.id)!.task));assert.equal(projected.status,'failed');
+ const count=f.foundation.persistence.list('task_projection_outbox').length;assert.deepEqual(f.runner.deliveryFailed(task,'job-a'),result);assert.equal(f.foundation.persistence.list('task_projection_outbox').length,count);
+ assert.equal(f.foundation.persistence.list('effect').length,0);assert.equal(f.foundation.persistence.list('completion').length,0);f.sqlite.close();
+});
+test('exhausted delivery retains unknown effect, consumed approval, and orphan admission',async()=>{
+ const f=await fixture();const task=await f.runner.run({task:f.task('uncertain','apply'),mission:async hooks=>{
+  const ticket=await hooks.onActionBefore({decision:{action:'click',target:'Submit'},snapshot:null,sessionID:'s'});
+  await hooks.onActionAfter(ticket,{error:Error('lost response')});return{status:'succeeded'};
+ }});
+ const before=f.foundation.persistence.list<any>('effect')[0];
+ f.foundation.persistence.put('runner_owner','active',0,{instanceId:'retired-instance',taskId:task.id,executionId:'old'});
+ const result=f.runner.deliveryFailed(task,'job-exhausted');assert.equal(result.status,'needsHuman');assert.equal(result.workspace_pending_effect_id,task.workspace_pending_effect_id);
+ assert.deepEqual(f.foundation.persistence.list<any>('effect')[0],before);assert.ok(f.foundation.persistence.get('runner_owner','active'));
+ assert.equal(f.foundation.persistence.list('completion').length,0);f.sqlite.close();
+});
+test('dead-letter interleaving never changes a live run and cannot overwrite its verified success',async()=>{
+ const f=await fixture();let entered!:()=>void,release!:()=>void;const inside=new Promise<void>(r=>entered=r),hold=new Promise<void>(r=>release=r);
+ const running=f.runner.run({task:f.task('live'),mission:async()=>{entered();await hold;return{status:'succeeded',extractedItems:['verified listing']};}});
+ await inside;const before=f.foundation.persistence.get('runner_task','live');const admission=f.foundation.persistence.get('runner_owner','active');
+ assert.equal(f.runner.deliveryFailed(f.task('live'),'job-live').status,'running');
+ assert.deepEqual(f.foundation.persistence.get('runner_task','live'),before);assert.deepEqual(f.foundation.persistence.get('runner_owner','active'),admission);
+ release();assert.equal((await running).status,'succeeded');assert.equal(f.runner.deliveryFailed(f.task('live'),'job-live').status,'succeeded');
+ assert.equal(f.foundation.persistence.list('completion').length,1);assert.equal(f.foundation.persistence.get('runner_owner','active'),null);f.sqlite.close();
+});
