@@ -16,21 +16,21 @@ struct SettingsPermissionsView: View {
             Text("Choose what Hygge can use.").foregroundStyle(HyggeTheme.secondary)
             permission("Notifications", icon: "bell", color: HyggeTheme.sageDeep,
                        explanation: "Know when something needs your OK, or new work turns up.",
-                       label: notifications == .authorized ? "Manage notifications" : notifications == .denied ? "Open Settings" : "Allow notifications") {
+                       label: notifications == .authorized ? "Manage" : notifications == .denied ? "Open Settings" : "Allow notifications") {
                 if notifications != .notDetermined { settings(); return }
                 busy = "Notifications"
                 Task { await store.allowNotifications(); await refresh(); busy = nil }
             }
             permission("Calendar", icon: "calendar", color: HyggeTheme.butterText,
                        explanation: "Check availability and add confirmed work to your calendar.",
-                       label: calendar == .fullAccess ? "Manage calendar access" : calendar == .denied || calendar == .restricted ? "Open Settings" : "Allow calendar access") {
+                       label: calendar == .fullAccess ? "Manage" : calendar == .denied || calendar == .restricted ? "Open Settings" : "Allow calendar access") {
                 if calendar == .fullAccess || calendar == .denied || calendar == .restricted { settings(); return }
                 busy = "Calendar"
                 Task { _ = await PermissionService.requestCalendar(); await refresh(); busy = nil }
             }
             permission("Location", icon: "mappin.circle", color: HyggeTheme.ember,
                        explanation: "Use your location to find work nearby.",
-                       label: location.authorized ? "Manage location access" : location.status == .notDetermined ? "Allow location access" : "Open Settings") {
+                       label: location.authorized ? "Manage" : location.status == .notDetermined ? "Allow location access" : "Open Settings") {
                 if location.status == .notDetermined { location.request() } else { settings() }
             }
             Text("You can change access in Settings.").font(.caption).foregroundStyle(HyggeTheme.secondary)
@@ -49,6 +49,9 @@ struct SettingsPermissionsView: View {
                     Button(action: action) {
                         if busy == title { ProgressView() } else { Text(label) }
                     }.buttonStyle(SettingsActionStyle(filled: false)).disabled(busy != nil)
+                    // Visually "Manage" is enough (the row title gives
+                    // context); VoiceOver gets the full phrase.
+                    .accessibilityLabel(label == "Manage" ? "Manage \(title.lowercased())" : label)
                 }
             }
         }
