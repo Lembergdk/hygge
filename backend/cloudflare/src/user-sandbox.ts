@@ -211,6 +211,7 @@ export class UserSandbox extends DurableObject<Env> {
       ["highlights", "TEXT NOT NULL DEFAULT '[]'"],
       ["site_id", "TEXT"],
       ["content_hash", "TEXT"],
+      ["jobs", "TEXT NOT NULL DEFAULT '[]'"],
     ] as const) {
       if (!summaryColumns.has(name)) ctx.storage.sql.exec(`ALTER TABLE email_summaries ADD COLUMN ${name} ${def}`);
     }
@@ -627,12 +628,14 @@ export class UserSandbox extends DurableObject<Env> {
     const rule = ruleRows.length ? String(ruleRows[0].choice) : null;
 
     const relation = delivery.triage?.ownerVerified ? "owner" : tracked ? "site" : "unknown";
+    // Every tracked sender's mail is evaluated for action by
+    // default (highlights, site proposals, chat asks, message
+    // pushes) — there is no work/file question anymore. The one
+    // remembered opt-out is "ignore"; legacy work/file rules
+    // simply mean the default.
     let decision = "none";
     if (delivery.kind === "other") {
-      if (relation === "owner") decision = "work";
-      else if (rule) decision = rule;
-      else if (relation === "site") decision = "work";
-      else decision = "pending";
+      decision = rule === "ignore" ? "ignore" : "work";
     }
     return { relation, decision, site, sites, accountStates };
   }
@@ -816,19 +819,30 @@ export class UserSandbox extends DurableObject<Env> {
     delivery: InboundEmailDelivery,
     triage: ReturnType<UserSandbox["triageEmail"]>,
   ): { domain: string; name: string } | null {
-    if (delivery.triage?.senderAuthenticated !== true) return null;
+    // A proposal is a consent surface (nothing joins or scans
+    // without the user's OK), so it needs no sender-authentication
+    // gate — forwards, which routinely fail alignment, are
+    // exactly the mail this exists for. Authentication still
+    // gates pushes, owner commands, and code use elsewhere.
     const mentionsWork = (delivery.triage?.reading?.mentions ?? []).some((m) => m.kind === "job_alert")
-      || (delivery.triage?.highlights ?? []).some((h) => h.kind === "job_alert");
+      || (delivery.triage?.highlights ?? []).some((h) => h.kind === "job_alert")
+      || (delivery.triage?.reading?.jobs ?? []).length > 0;
     if (!mentionsWork) return null;
     const genericMailboxes = new Set([
       "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
       "yahoo.com", "yahoo.co.uk", "icloud.com", "me.com", "proton.me", "protonmail.com", "aol.com",
+      "usehygge.cc", "usehygge.app",
     ]);
+    // The site the mail points at (its own links) outranks who
+    // sent it — a forwarded LinkedIn alert is about LinkedIn,
+    // not the forwarder's domain, so the sender domain is only
+    // a fallback for unforwarded mail.
+    const forwarded = /^\s*(fwd?|fw)\s*:/i.test(delivery.summary.subject);
     const hosts = [
       ...delivery.summary.actionableItems
         .filter((item) => item.startsWith("Link to "))
         .map((item) => item.slice("Link to ".length).trim().toLowerCase().replace(/^www\./, "")),
-      delivery.summary.senderDomain.toLowerCase(),
+      ...(forwarded ? [] : [delivery.summary.senderDomain.toLowerCase()]),
     ];
     for (const domain of hosts) {
       if (!domain || genericMailboxes.has(domain)) continue;
@@ -862,15 +876,23 @@ export class UserSandbox extends DurableObject<Env> {
       goalTemplate: "Find current opportunities on this site that match my earnings profile and extract their title, pay, location and link.",
     });
     const id = crypto.randomUUID();
+    const jobs = delivery.triage?.reading?.jobs ?? [];
+    const forwarded = /^\s*(fwd?|fw)\s*:/i.test(delivery.summary.subject);
+    const rationale = jobs.length > 1
+      ? `${forwarded ? "Your forwarded job alert" : `A job alert from ${delivery.summary.senderDomain}`} mentioned ${jobs.length} roles there, including ${jobs[0].title}.`
+      : jobs.length === 1
+        ? `${forwarded ? "Your forwarded job alert" : `A job alert from ${delivery.summary.senderDomain}`} mentioned a role there: ${jobs[0].title}.`
+        : `Mail from ${delivery.summary.senderDomain} mentioned work there.`;
     store.upsert("proposals", id, {
       id, siteID: candidate.domain,
-      rationale: `Mail from ${delivery.summary.senderDomain} mentioned work there.`,
+      rationale,
       payPattern: "Paid per job, rates vary by listing",
       dataShared: "Your name, photo and profile text",
       verification: "Email confirmation; a bot check may need you",
       status: "proposed",
       sourceMailDomain: delivery.summary.senderDomain.toLowerCase(),
       sourceMailId: summaryId,
+      sourceMailJobs: jobs,
     });
     store.upsert("accountStates", candidate.domain, { siteID: candidate.domain, state: "proposed" });
   }
@@ -901,21 +923,26 @@ export class UserSandbox extends DurableObject<Env> {
     // evidences becomes a feed proposal; work-relevant mail with
     // no job site to attach becomes a chat question; the rest keeps
     // the triage decision. The journal only ever records facts.
-    const siteCandidate = delivery.kind === "other" && triage.relation === "unknown"
+    const readingJobs = delivery.triage?.reading?.jobs ?? [];
+    const evaluated = triage.decision !== "ignore";
+    const siteCandidate = evaluated && delivery.kind === "other" && triage.relation === "unknown"
       ? this.candidateSiteFromMail(delivery, triage) : null;
     const mentionsWorkOrMessage = readingMentions.some((m) => m.kind === "job_alert" || m.kind === "client_message");
-    const chatAsk = !siteCandidate && triage.relation === "unknown" && delivery.kind === "other"
-      && triage.decision === "pending" && mentionsWorkOrMessage
-      && delivery.triage?.senderAuthenticated === true;
+    // Asking is a consent surface like the proposal card, so it
+    // carries no authentication gate either; nothing acts on
+    // the mail's say-so without the user's answer.
+    const chatAsk = evaluated && !siteCandidate && triage.relation === "unknown" && delivery.kind === "other"
+      && (mentionsWorkOrMessage || readingJobs.length > 0);
     const finalDecision = siteCandidate ? "proposed" : chatAsk ? "chat" : triage.decision;
     this.ctx.storage.sql.exec(
-      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, content_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO email_summaries (id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, content_hash, jobs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       summaryId, s.sender, s.senderDomain, s.subject, s.date, s.kind,
       s.summary, JSON.stringify(s.actionableItems), JSON.stringify(s.attachments),
       triage.relation, finalDecision, JSON.stringify(highlightLabels),
       triage.relation === "site" ? (triage.site?.siteID ?? null) : null,
       delivery.contentHash ?? null,
+      JSON.stringify(readingJobs),
     );
     if (delivery.code) {
       const blob = await vault.seal(await this.dek(), delivery.code, this.emailCodeAAD(s.senderDomain));
@@ -979,8 +1006,14 @@ export class UserSandbox extends DurableObject<Env> {
           `Filed mail from ${s.senderDomain || "a new sender"}: ${s.subject || "(no subject)"}. Suggested ${siteCandidate.name} as a new job site.`,
           detail, null, hash);
       } else if (chatAsk && delivery.contentHash) {
+        const titles = readingJobs.map((j) => j.title);
+        const listed = titles.length > 1
+          ? `${titles.slice(0, -1).join(", ")}, and ${titles[titles.length - 1]}`
+          : titles[0] ?? "";
         this.appendAgentChat(
-          `Mail from ${s.senderDomain} — “${s.subject || "(no subject)"}”. ${s.summary} It looks work-related, but I couldn't tell which job site it belongs to. What would you like me to do with mail like this?`,
+          titles.length
+            ? `That email from ${s.senderDomain} — “${s.subject || "(no subject)"}” — lists ${titles.length === 1 ? "a role" : `${titles.length} roles`}: ${listed}. I couldn't tell which job site they belong to. Want me to look into any of these?`
+            : `Mail from ${s.senderDomain} — “${s.subject || "(no subject)"}”. ${s.summary} It looks work-related, but I couldn't tell which job site it belongs to. What would you like me to do with mail like this?`,
           delivery.receivedAt, delivery.contentHash);
         outcome = "chat_asked";
         this.journalEmail(delivery.receivedAt,
@@ -2013,9 +2046,12 @@ export class UserSandbox extends DurableObject<Env> {
       }
       if (request.method === "GET" && parts.join("/") === "email/messages") {
         const rows = [...this.ctx.storage.sql.exec(
-          "SELECT id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, created_at FROM email_summaries ORDER BY created_at DESC LIMIT 100",
+          "SELECT id, sender, sender_domain, subject, mail_date, kind, summary, actionable, attachments, relation, decision, highlights, site_id, created_at, jobs FROM email_summaries ORDER BY created_at DESC LIMIT 100",
         )] as Row[];
+        const ruleRows = [...this.ctx.storage.sql.exec(
+          "SELECT sender_domain, choice FROM email_sender_rules")] as Row[];
         return json({
+          senderRules: ruleRows.map((r) => ({ senderDomain: r.sender_domain, choice: r.choice })),
           messages: rows.map((r) => ({
             id: r.id, sender: r.sender, senderDomain: r.sender_domain,
             subject: r.subject, date: r.mail_date, kind: r.kind,
@@ -2026,15 +2062,15 @@ export class UserSandbox extends DurableObject<Env> {
             relation: r.relation ?? "unknown",
             decision: r.decision ?? "none",
             highlights: JSON.parse(String(r.highlights ?? "[]")),
+            jobs: JSON.parse(String(r.jobs ?? "[]")),
             siteID: r.site_id ?? null,
           })),
         });
       }
-      // The user's call on one sender, remembered where mail
-      // arrives so the same sender is never asked about twice.
-      // Choices: "work" (read for anything relevant), "file"
-      // (journal only), "ignore" (silent). Waiting mail from that
-      // sender takes the choice immediately.
+      // The one remembered sender call: "ignore" opts a sender
+      // out of evaluation (silent filing); "work"/"file" remain
+      // accepted for older clients and simply mean the default
+      // (evaluate). Filed mail from that sender takes it now.
       if (request.method === "POST" && parts.join("/") === "email/decision") {
         const senderDomain = String(body?.senderDomain ?? "").trim().toLowerCase();
         const choice = String(body?.choice ?? "");

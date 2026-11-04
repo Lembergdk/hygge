@@ -108,13 +108,25 @@ public struct FiledEmailSummary: Codable, Equatable, Sendable, Identifiable {
     /// How the sender relates to the user: "owner" (the user's own
     /// verified address), "site" (a job site Hygge watches), or "unknown".
     public var relation: String?
-    /// "pending" while an unknown sender waits for the user's call;
-    /// otherwise the remembered sender choice ("work"/"file"/"ignore")
-    /// or "none" for signup codes and confirmations.
+    /// What triage did with it: "work" (evaluated — the default
+    /// for every tracked sender), "proposed"/"chat" (an action was
+    /// surfaced), "ignore" (the user opted this sender out), or
+    /// "none" for signup codes and confirmations. Older rows may
+    /// carry "pending"/"file" from the retired sender question.
     public var decision: String?
     /// Plain labels for things the mail mentioned that may matter
     /// ("Someone may have messaged you") — mentions, never claims.
     public var highlights: [String]?
+    /// Concrete roles the mail itself listed, as written.
+    public struct JobMention: Codable, Equatable, Sendable, Hashable {
+        public var title: String
+        public var detail: String
+        public init(title: String, detail: String = "") {
+            self.title = title
+            self.detail = detail
+        }
+    }
+    public var jobs: [JobMention]?
     /// The watched site this mail belongs to, when one matches.
     public var siteID: String?
 
@@ -122,7 +134,7 @@ public struct FiledEmailSummary: Codable, Equatable, Sendable, Identifiable {
                 date: String? = nil, kind: String, summary: String,
                 actionableItems: [String] = [], attachments: [AttachmentMeta] = [],
                 filedAt: String? = nil, relation: String? = nil, decision: String? = nil,
-                highlights: [String]? = nil, siteID: String? = nil) {
+                highlights: [String]? = nil, jobs: [JobMention]? = nil, siteID: String? = nil) {
         self.id = id
         self.sender = sender
         self.senderDomain = senderDomain
@@ -136,6 +148,7 @@ public struct FiledEmailSummary: Codable, Equatable, Sendable, Identifiable {
         self.relation = relation
         self.decision = decision
         self.highlights = highlights
+        self.jobs = jobs
         self.siteID = siteID
     }
 }

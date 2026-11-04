@@ -329,6 +329,8 @@ export function validateChatIntent(parsed: any, context: any): ChatIntentAction 
 
 const INTENT_SYSTEM = [
   "You decide whether the user's latest Hygge chat message wants something DONE.",
+  "context.focus, when present, is the exact feed card the latest message is about —",
+  "\"this\", \"it\", and \"that one\" refer to it; prefer its ids over any other referent.",
   "Reason about referents from the conversation (\"it\", \"that forward\", \"the Rover one\")",
   "and about intent in your own judgment — phrasing is free, there are no magic words.",
   "Reply ONLY with JSON: {\"action\": {...} } or {\"action\": null}.",

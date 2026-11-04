@@ -287,9 +287,16 @@ struct BackendClient {
             var id: String; var senderDomain: String; var subject: String
             var summary: String; var highlights: [String]
         }
+        /// The feed card the latest message was sent about
+        /// ("Chat about this"): "this"/"it" mean this object.
+        struct FocusLine: Encodable {
+            var kind: String; var id: String; var title: String
+            var subtitle: String; var siteId: String?
+        }
         var sites: [SiteLine]
         var inbox: [MailLine]
         var paused: Bool
+        var focus: FocusLine?
     }
 
     struct ChatIntentActionDTO: Decodable, Equatable {
@@ -370,19 +377,31 @@ struct BackendClient {
         return response.hyggeEmail
     }
 
-    private struct FiledEmailResponse: Decodable { var messages: [FiledEmailSummary] }
+    struct SenderRule: Decodable, Equatable { var senderDomain: String; var choice: String }
+    private struct FiledEmailResponse: Decodable {
+        var messages: [FiledEmailSummary]
+        var senderRules: [SenderRule]?
+    }
 
     func filedEmail() async throws -> [FiledEmailSummary] {
         let response: FiledEmailResponse = try await get("email/messages")
         return response.messages
     }
 
+    /// Filed mail plus the remembered sender rules (the app only
+    /// acts on "ignore"; everything else is the evaluate default).
+    func filedEmailInbox() async throws -> (messages: [FiledEmailSummary], ignoredDomains: [String]) {
+        let response: FiledEmailResponse = try await get("email/messages")
+        return (response.messages,
+                (response.senderRules ?? []).filter { $0.choice == "ignore" }.map(\.senderDomain))
+    }
+
     private struct EmailDecisionBody: Encodable { var senderDomain: String; var choice: String }
     private struct EmailDecisionAck: Decodable { var remembered: Bool? }
 
-    /// Remembers how one sender's mail should be treated from now
-    /// on ("work", "file", or "ignore"). Returns the fresh inbox so
-    /// the caller can update in one step.
+    /// Remembers the one sender call: "ignore" opts the sender
+    /// out of evaluation; anything else restores the default.
+    /// Returns the fresh inbox so the caller updates in one step.
     func decideEmailSender(domain: String, choice: String) async -> [FiledEmailSummary]? {
         let ack: EmailDecisionAck? = try? await post(
             "email/decision", body: EmailDecisionBody(senderDomain: domain, choice: choice))
