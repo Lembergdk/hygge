@@ -8,6 +8,7 @@ import { runDateOf, slotForCron, sweepOrder } from "./scan.ts";
 import { handleEmailAddressRequest, handleEmailMessage } from "./email.ts";
 import { d1PushDb, handleDeviceTokenRequest } from "./push.ts";
 import { jobAckDecision, parseMissionJobMessage, type MissionJobMessage } from "./jobs.ts";
+import { handlePurgeRequest } from "./purge.ts";
 
 export { UserSandbox } from "./user-sandbox.ts";
 
@@ -206,6 +207,12 @@ export default {
       });
     }
 
+    // TEMPORARY one-shot fleet wipe (purge.ts). Inert (404)
+    // unless HYGGE_PURGE_TOKEN is set for the run.
+    if (url.pathname === "/admin/purge-users") {
+      return handlePurgeRequest(request, env);
+    }
+
     // Universal links: magic-link taps on this host open the app.
     if (url.pathname === "/.well-known/apple-app-site-association") {
       return new Response(JSON.stringify(appleAppSiteAssociation()), {
@@ -260,6 +267,8 @@ export default {
     forwarded.headers.delete("x-hygge-scheduled-sweep");
     forwarded.headers.delete("x-hygge-email-delivery");
     forwarded.headers.delete("x-hygge-job-consumer");
+    forwarded.headers.delete("x-hygge-purge");
+    forwarded.headers.delete("x-hygge-purge-token");
     forwarded.headers.set("x-hygge-user-id", userId);
     return stub.fetch(forwarded);
   },

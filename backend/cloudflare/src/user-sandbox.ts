@@ -1919,6 +1919,22 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
+    // TEMPORARY fleet wipe (purge.ts): server-side marker + the
+    // same one-shot token, checked here as defense in depth.
+    // Runs before owner binding/schema migration so nothing is
+    // (re)created on the way to erasure. Removed with purge.ts.
+    if (new URL(request.url).pathname === "/internal/purge") {
+      const expected = this.env.HYGGE_PURGE_TOKEN ?? "";
+      const provided = request.headers.get("x-hygge-purge-token") ?? "";
+      if (!expected || request.headers.get("x-hygge-purge") !== "1" || provided !== expected) {
+        return json({ error: "not found" }, 404);
+      }
+      try { await this.ctx.storage.deleteAlarm(); } catch { /* no alarm armed */ }
+      await this.ctx.storage.deleteAll();
+      this.schemaReady = null;
+      this.userId = null;
+      return json({ ok: true });
+    }
     const verifiedUser = request.headers.get('x-hygge-user-id');
     if (!verifiedUser) return json({error:'Verified owner required'},403);
     try {

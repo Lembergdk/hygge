@@ -1,0 +1,96 @@
+# TEMPORARY one-shot fleet wipe (owner-requested fresh start,
+# 2026-11-03). Arms the purge endpoint with an ephemeral secret
+# that exists only inside this run, executes the wipe, verifies
+# zero, and deletes the secret again. This workflow, the purge
+# route, and purge.ts are removed in the follow-up change.
+name: Purge users (one-shot)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to wipe
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      confirm:
+        description: Type DELETE-ALL-USERS to run
+        required: true
+        type: string
+
+concurrency:
+  group: purge-users-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  purge:
+    name: Purge ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    if: inputs.confirm == 'DELETE-ALL-USERS'
+    defaults:
+      run:
+        working-directory: backend/cloudflare
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ENV_NAME: ${{ inputs.environment }}
+      CONFIG: ${{ inputs.environment == 'production' && 'wrangler.production.jsonc' || 'wrangler.staging.jsonc' }}
+      DATABASE: ${{ inputs.environment == 'production' && 'hygge-production' || 'hygge-staging' }}
+      API_ORIGIN: ${{ inputs.environment == 'production' && 'https://api.usehygge.app' || 'https://api-staging.usehygge.app' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/cloudflare/package-lock.json
+      - run: npm ci
+      - name: Arm purge endpoint with an ephemeral secret
+        id: arm
+        run: |
+          TOKEN="$(openssl rand -hex 32)"
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          printf %s "$TOKEN" | npx wrangler secret put HYGGE_PURGE_TOKEN -c "$CONFIG"
+      - name: Execute purge
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 24); do
+            CODE=$(curl -sS -o /tmp/purge-out.json -w '%{http_code}' -X POST "$API_ORIGIN/admin/purge-users" \
+              -H "Authorization: Bearer ${{ steps.arm.outputs.token }}" \
+              -H 'Content-Type: application/json' \
+              -d '{"confirm":"DELETE-ALL-USERS"}' || true)
+            echo "attempt $i: HTTP $CODE"
+            if [ "$CODE" = "200" ]; then break; fi
+            if [ "$CODE" != "404" ]; then cat /tmp/purge-out.json; exit 1; fi
+            sleep 5
+          done
+          [ "$CODE" = "200" ] || { echo "purge endpoint never armed"; exit 1; }
+          cat /tmp/purge-out.json
+          node -e 'const b=require("/tmp/purge-out.json"); if(!b.ok||b.durableObjectFailures!==0) process.exit(1); console.log("purge report ok:", JSON.stringify(b))'
+      - name: Verify zero users and healthy worker
+        run: |
+          set -euo pipefail
+          npx wrangler d1 execute "$DATABASE" -c "$CONFIG" --remote \
+            --command "SELECT 'users', COUNT(*) FROM users UNION ALL SELECT 'linked_methods', COUNT(*) FROM linked_methods UNION ALL SELECT 'auth_sessions', COUNT(*) FROM auth_sessions UNION ALL SELECT 'site_catalog', COUNT(*) FROM site_catalog;" \
+            | tee /tmp/counts.txt
+          python3 - <<'PY'
+          import re, sys
+          text = open('/tmp/counts.txt').read()
+          counts = re.findall(r'"COUNT\(\*\)": (\d+)', text)
+          print("counts:", counts)
+          sys.exit(0 if counts and all(c == '0' for c in counts) else 1)
+          PY
+          curl -sS "$API_ORIGIN/health"
+      - name: Disarm purge endpoint (always)
+        if: always()
+        run: |
+          yes | npx wrangler secret delete HYGGE_PURGE_TOKEN -c "$CONFIG" || true
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API_ORIGIN/admin/purge-users" -H 'Content-Type: application/json' -d '{}')
+          echo "post-disarm probe: HTTP $CODE (expected 404)"
+          [ "$CODE" = "404" ]
