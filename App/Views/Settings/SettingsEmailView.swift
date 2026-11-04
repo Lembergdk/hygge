@@ -33,6 +33,25 @@ struct SettingsEmailView: View {
                 Text("Forward emails from work sites here. Hygge will file the useful bits.")
                     .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
                 customNameSection(address)
+                if !store.ignoredSenderDomains.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Ignored senders").font(.title3.bold()).foregroundStyle(HyggeTheme.ink)
+                        Text("Their mail is filed silently — no journal line, no suggestions.")
+                            .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                        ForEach(store.ignoredSenderDomains, id: \.self) { domain in
+                            HStack(spacing: 12) {
+                                SiteLogoTile(domain: domain, name: domain, size: 32)
+                                Text(domain).font(.subheadline).foregroundStyle(HyggeTheme.ink)
+                                Spacer(minLength: 0)
+                                Button("Stop ignoring") {
+                                    Task { await store.decideEmailSender(domain: domain, choice: "work") }
+                                }
+                                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
+                                .frame(minHeight: 44).buttonStyle(.plain)
+                            }
+                        }
+                    }.settingsSurface()
+                }
                 filedMail
             } else {
                 Text("An email address for the work Hygge handles.").foregroundStyle(HyggeTheme.secondary)
@@ -172,13 +191,43 @@ struct SettingsEmailView: View {
 
 struct FiledEmailDetailView: View {
     let mail: FiledEmailSummary
+    @Environment(AppStore.self) private var store
     var body: some View {
         SettingsPage(title: "Filed mail") {
-            Text(mail.senderDomain).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+            HStack(spacing: 12) {
+                SiteLogoTile(domain: mail.senderDomain, name: mail.senderDomain, size: 40)
+                Text(mail.senderDomain).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+            }
             Text(mail.subject.isEmpty ? "Email summary" : mail.subject).font(.title2.bold()).foregroundStyle(HyggeTheme.ink)
             Text(mail.summary).foregroundStyle(HyggeTheme.ink).textSelection(.enabled)
+            ForEach(mail.jobs ?? [], id: \.title) { job in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(job.title).font(.subheadline.weight(.semibold)).foregroundStyle(HyggeTheme.ink)
+                    if !job.detail.isEmpty {
+                        Text(job.detail).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                    }
+                }
+            }
             ForEach(Array(mail.actionableItems.enumerated()), id: \.offset) { _, item in
                 Text(item).font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+            }
+            // The one sender opt-out: everything else is evaluated
+            // by default. Ignoring is reversible from the list in
+            // Hygge email settings.
+            if store.ignoredSenderDomains.contains(mail.senderDomain) {
+                Text("You're ignoring this sender — their mail is filed silently.")
+                    .font(.subheadline).foregroundStyle(HyggeTheme.secondary)
+                Button("Stop ignoring \(mail.senderDomain)") {
+                    Task { await store.decideEmailSender(domain: mail.senderDomain, choice: "work") }
+                }
+                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
+                .frame(minHeight: 44).buttonStyle(.plain)
+            } else if !mail.senderDomain.isEmpty {
+                Button("Ignore this sender") {
+                    Task { await store.decideEmailSender(domain: mail.senderDomain, choice: "ignore") }
+                }
+                .font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.secondary)
+                .frame(minHeight: 44).buttonStyle(.plain)
             }
         }
     }

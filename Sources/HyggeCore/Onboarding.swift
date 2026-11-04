@@ -174,6 +174,32 @@ public enum TimeSaved {
 
 // MARK: - The one continuous conversation thread
 
+/// The feed card a chat message is about ("Chat about this"):
+/// enough to render the mini-card and to resolve "this" against
+/// real state — a stable kind/id pair plus display text. The id
+/// is interpreted per kind (site id, task id, opportunity id,
+/// mail id, proposal-site id) and always re-validated before
+/// anything acts on it.
+public struct ChatContextRef: Codable, Equatable, Sendable, Hashable {
+    public var kind: String
+    public var id: String
+    public var title: String
+    public var subtitle: String
+    /// The job site this object belongs to, when there is one —
+    /// drives the site mark in chat and site-level intents.
+    public var siteID: String?
+    public var siteDomain: String?
+    public init(kind: String, id: String, title: String, subtitle: String = "",
+                siteID: String? = nil, siteDomain: String? = nil) {
+        self.kind = kind
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.siteID = siteID
+        self.siteDomain = siteDomain
+    }
+}
+
 public struct ChatEntry: Codable, Identifiable, Equatable, Sendable {
     public var id: UUID
     public var taskID: UUID?
@@ -181,13 +207,16 @@ public struct ChatEntry: Codable, Identifiable, Equatable, Sendable {
     public var fromAgent: Bool
     public var text: String
     public var createdAt: Date
-    public init(id: UUID = UUID(), fromAgent: Bool, text: String, createdAt: Date = Date(), taskID: UUID? = nil, helpID: UUID? = nil) {
+    /// Set when this message was sent about a specific feed card.
+    public var context: ChatContextRef?
+    public init(id: UUID = UUID(), fromAgent: Bool, text: String, createdAt: Date = Date(), taskID: UUID? = nil, helpID: UUID? = nil, context: ChatContextRef? = nil) {
         self.id = id
         self.taskID = taskID
         self.helpID = helpID
         self.fromAgent = fromAgent
         self.text = text
         self.createdAt = createdAt
+        self.context = context
     }
 }
 

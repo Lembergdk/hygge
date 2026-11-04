@@ -46,6 +46,9 @@ struct ConversationView: View {
                             VStack(alignment: .leading, spacing: 13) {
                                 ForEach(store.chatTranscript) { entry in
                                     VStack(alignment: .leading, spacing: 8) {
+                                        if !entry.fromAgent, let context = entry.context {
+                                            HStack { Spacer(minLength: 44); chatContextCard(context) }
+                                        }
                                         bubble(entry)
                                         if let taskID = entry.taskID,
                                            let task = store.tasks.first(where: { $0.id == taskID }),
@@ -114,6 +117,19 @@ struct ConversationView: View {
                             Button("Cancel") { replyTarget = nil }
                         }.foregroundStyle(HyggeTheme.secondary).padding(.horizontal, 18)
                     }
+                    if replyTarget == nil, let pending = store.pendingChatContext {
+                        HStack(spacing: 10) {
+                            chatContextCard(pending)
+                            Spacer(minLength: 0)
+                            Button { store.pendingChatContext = nil } label: {
+                                Image(systemName: "xmark").font(.caption.weight(.semibold))
+                                    .frame(width: 44, height: 44).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain).foregroundStyle(HyggeTheme.secondary)
+                            .accessibilityLabel("Detach card")
+                        }
+                        .padding(.horizontal, 14).padding(.top, 8)
+                    }
                     composer
                 }
             }
@@ -133,6 +149,34 @@ struct ConversationView: View {
     private var avatarAnimation: FlameAnimation {
         if !store.chatHelpTasks.isEmpty { return .notify }
         return store.isAgentWorking || isThinking ? .laptop : .walk
+    }
+
+    /// The mini-card a message is about — attached above the
+    /// composer before sending, stamped above its bubble after.
+    private func chatContextCard(_ context: ChatContextRef) -> some View {
+        HStack(spacing: 10) {
+            if let domain = context.siteDomain {
+                SiteLogoTile(domain: domain, name: context.title, size: 34)
+            } else {
+                Image(systemName: context.kind == "mail" ? "envelope" : context.kind == "event" ? "doc.text" : "bubble.left")
+                    .font(.subheadline).foregroundStyle(HyggeTheme.sageDeep)
+                    .frame(width: 34, height: 34)
+                    .background(HyggeTheme.sageTint, in: RoundedRectangle(cornerRadius: 9))
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(context.title).font(.subheadline.weight(.semibold))
+                    .foregroundStyle(HyggeTheme.ink).lineLimit(2)
+                if !context.subtitle.isEmpty {
+                    Text(context.subtitle).font(.caption).foregroundStyle(HyggeTheme.secondary).lineLimit(2)
+                }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(HyggeTheme.card, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(HyggeTheme.hairline, lineWidth: 1))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("About: \(context.title)")
     }
 
     private var composer: some View {
@@ -221,7 +265,11 @@ struct ConversationView: View {
             isThinking = false
             return
         }
-        store.appendChat(fromAgent: false, text: text)
+        // The attached card (if any) is stamped on this message
+        // and consumed: the next message starts unattached.
+        let attached = store.pendingChatContext
+        store.pendingChatContext = nil
+        store.appendChat(fromAgent: false, text: text, context: attached)
         // Understanding is model-led: one short intent call decides
         // whether this message wants something done (referents and
         // all), and the store validates whatever it proposes before
@@ -264,9 +312,7 @@ struct ConversationView: View {
         isThinking = true
         streamingText = nil
         defer { isThinking = false; streamingText = nil }
-        let transcript = store.chatTranscript.map {
-            BackendClient.TranscriptLine(fromAgent: $0.fromAgent, text: $0.text)
-        }
+        let transcript = store.chatTranscriptLines()
         do {
             let reply = try await store.backend.chatStream(
                 transcript: transcript, profile: store.profile,

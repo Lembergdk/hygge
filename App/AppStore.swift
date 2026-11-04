@@ -96,6 +96,10 @@ final class AppStore {
     var tasks: [AgentTask] = []
     private var runningTaskIDs: Set<UUID> = []
     var conversationTaskID: UUID?
+    /// The feed card attached to the next chat message
+    /// ("Chat about this"). Session-only; stamped onto the
+    /// entry when sent, then cleared.
+    var pendingChatContext: ChatContextRef?
     var dismissedProposalID: UUID?
     var applications: [ApplicationRecord] = []
     var proposals: [ProposedSite] = []
@@ -158,6 +162,9 @@ final class AppStore {
     /// own inbox; codes never come to the device.
     var hyggeEmailAddress: HyggeEmailAddress?
     var filedEmailSummaries: [FiledEmailSummary] = []
+    /// Senders the user opted out of evaluation (silent filing).
+    /// The only remembered sender rule the app surfaces.
+    var ignoredSenderDomains: [String] = []
 
     /// Brief 07 push: the one-time Home primer (shown only after the
     /// first thing worth telling the user about exists), plus where
@@ -565,6 +572,7 @@ final class AppStore {
         isExistingAccount = false
         passwordFlow = nil
         magicLinkFlow = nil
+        pendingChatContext = nil
         pendingOnboardingProfile = nil
         magicLinkError = nil
         wantsOnboarding = false
@@ -684,11 +692,9 @@ final class AppStore {
     func dismissProposal(proposalID: UUID) {
         guard let index = proposals.firstIndex(where: { $0.id == proposalID }) else { return }
         proposals[index].status = .dismissed
-        // A mail-born suggestion dismissed = also the answer for
-        // that sender: just file their mail, never re-suggest.
-        if let domain = proposals[index].sourceMailDomain, !domain.isEmpty {
-            Task { await decideEmailSender(domain: domain, choice: "file") }
-        }
+        // The dismissed site stays in the site list, which is
+        // what keeps mail from ever re-suggesting it — the mail's
+        // sender (often just a forwarder) is not punished for it.
         dismissedProposalID = proposalID
         recordFeedback(FeedbackEvent(subjectType: .siteProposal,
                                      subjectId: proposalID.uuidString.lowercased(),
@@ -929,40 +935,27 @@ final class AppStore {
         if let address = try? await backend.hyggeEmailAddress() {
             hyggeEmailAddress = address
         }
-        if let filed = try? await backend.filedEmail() {
-            filedEmailSummaries = filed
+        if let inbox = try? await backend.filedEmailInbox() {
+            filedEmailSummaries = inbox.messages
+            ignoredSenderDomains = inbox.ignoredDomains
         }
     }
 
-    /// Unknown senders whose mail is waiting for the user's call,
-    /// newest example per sender. Drives the Home screen cards.
-    var pendingEmailDecisions: [FiledEmailSummary] {
-        var seen: Set<String> = []
-        return filedEmailSummaries.filter { mail in
-            guard mail.decision == "pending", !mail.senderDomain.isEmpty,
-                  !seen.contains(mail.senderDomain) else { return false }
-            seen.insert(mail.senderDomain)
-            return true
-        }
-    }
-
-    var pendingEmailSenderDomains: [String] { pendingEmailDecisions.map(\.senderDomain) }
-
-    /// The user's answer for one unknown sender. It is remembered
-    /// where the mail arrives, so the same sender is never asked
-    /// about twice.
+    /// The one sender call the user can make: ignore this sender
+    /// (silent filing, no evaluation) — or undo that. Remembered
+    /// where the mail arrives.
     func decideEmailSender(domain: String, choice: String) async {
-        // The card leaves at tap time; the remembered choice is then
-        // confirmed by a fresh inbox (a failed save brings it back).
+        let ignoring = choice == "ignore"
+        ignoredSenderDomains = ignoring
+            ? Array(Set(ignoredSenderDomains + [domain])).sorted()
+            : ignoredSenderDomains.filter { $0 != domain }
         filedEmailSummaries = filedEmailSummaries.map { mail in
-            guard mail.senderDomain == domain, mail.decision == "pending" else { return mail }
+            guard mail.senderDomain == domain else { return mail }
             var copy = mail
-            copy.decision = choice
+            copy.decision = ignoring ? "ignore" : "work"
             return copy
         }
-        if let fresh = await backend.decideEmailSender(domain: domain, choice: choice) {
-            filedEmailSummaries = fresh
-        } else {
+        if await backend.decideEmailSender(domain: domain, choice: choice) == nil {
             await refreshHyggeEmail()
         }
     }
@@ -1328,9 +1321,24 @@ final class AppStore {
 
     // MARK: - Thread, journal, insights, site control
 
-    func appendChat(fromAgent: Bool, text: String) {
-        chatTranscript.append(ChatEntry(fromAgent: fromAgent, text: text))
+    func appendChat(fromAgent: Bool, text: String, context: ChatContextRef? = nil) {
+        chatTranscript.append(ChatEntry(fromAgent: fromAgent, text: text, context: context))
         save()
+    }
+
+    /// Transcript as the model sees it: a message sent about a
+    /// card carries a plain "[about: …]" tag so "this" resolves
+    /// without polluting what the user reads in the thread.
+    func chatTranscriptLines() -> [BackendClient.TranscriptLine] {
+        chatTranscript.map { entry in
+            var text = entry.text
+            if let context = entry.context {
+                text += " [about: \(context.title)"
+                if !context.subtitle.isEmpty { text += " — \(context.subtitle)" }
+                text += "]"
+            }
+            return BackendClient.TranscriptLine(fromAgent: entry.fromAgent, text: text)
+        }
     }
 
     var journalEntries: [JournalEntry] { JournalBuilder.entries(from: activityEvents) }
@@ -1343,7 +1351,6 @@ final class AppStore {
     /// Urgent decisions only. Optional site suggestions never inflate this.
     var needsYouCount: Int {
         tasks.filter { $0.status == .awaitingApproval || $0.needsChatHelp }.count
-            + pendingEmailDecisions.count
     }
 
     /// What the flame badge may promise: only what tapping him
@@ -1591,10 +1598,6 @@ final class AppStore {
         if filedEmailSummaries.count > 3 {
             reply += "\n…\(filedEmailSummaries.count) filed in all. The full list is under Hygge email in your profile."
         }
-        let deciding = pendingEmailSenderDomains
-        if !deciding.isEmpty {
-            reply += "\n\(deciding.count == 1 ? "One sender is" : "\(deciding.count) senders are") new to me — I've put \(deciding.count == 1 ? "it" : "them") on your Home screen for your call."
-        }
         return reply
     }
 
@@ -1615,7 +1618,14 @@ final class AppStore {
     }
 
     private func chatIntentContext() -> BackendClient.ChatIntentContext {
-        BackendClient.ChatIntentContext(
+        // The latest message's card, when it has one: "this" in
+        // the message means exactly this object.
+        let focus = chatTranscript.last(where: { !$0.fromAgent })?.context.map { context in
+            BackendClient.ChatIntentContext.FocusLine(
+                kind: context.kind, id: context.id, title: context.title,
+                subtitle: context.subtitle, siteId: context.siteID)
+        }
+        return BackendClient.ChatIntentContext(
             sites: sites.map { site in
                 .init(id: site.id, name: site.name, domain: site.domain,
                       state: (accountStates[site.id] ?? .unknown).label)
@@ -1625,7 +1635,8 @@ final class AppStore {
                       summary: truncatedForChat(mail.summary, limit: 240),
                       highlights: mail.highlights ?? [])
             },
-            paused: isPaused)
+            paused: isPaused,
+            focus: focus)
     }
 
     /// Ask the model what this message wants done, then run only
@@ -1640,9 +1651,7 @@ final class AppStore {
                                                     inbox: filedEmailSummaries) {
             await refreshHyggeEmail()
         }
-        let transcript = chatTranscript.map {
-            BackendClient.TranscriptLine(fromAgent: $0.fromAgent, text: $0.text)
-        }
+        let transcript = chatTranscriptLines()
         guard let dto = try? await backend.chatIntent(transcript: transcript, profile: profile,
                                                       context: chatIntentContext()) else {
             return .unhandled
