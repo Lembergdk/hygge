@@ -156,6 +156,20 @@ the coordinator):
   execution (strict parser first, on the owner's own words;
   model instruction second, site reference re-validated). No
   model, no change: the deterministic reading stands.
+- One mail, one event, actions in action surfaces (2026-11-04):
+  identity is content (`mailContentHash`: sender domain +
+  Fwd-stripped subject + opening body) — a re-forward changes
+  nothing (no second summary, journal entry, proposal, or push).
+  Each distinct mail earns exactly one journal entry: a
+  past-tense fact (what arrived, what it said, what Hygge did),
+  never an ask. Anything needing the user lives elsewhere: a
+  jobs-bearing mail evidencing a place becomes a feed proposal
+  (`proposeSiteFromMail`, carrying `sourceMailDomain`);
+  work-relevant mail with no place to attach becomes a question
+  in the chat thread (`appendAgentChat`); genuinely
+  uninferrable senders keep the feed decision card. Outcomes
+  are counted (`duplicate` / `proposed_site` / `chat_asked` /
+  `reasoned`) without logging content.
 - Forwarding: mail the user forwards or cc's from their own
   mailbox to their Hygge address enters the same pipeline
   (attributed by recipient digits). The profile hub shows the
