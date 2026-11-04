@@ -15,6 +15,7 @@ struct ConversationView: View {
     @State private var streamingText: String?
     @State private var isThinking = false
     @State private var pendingAction: ChatAction?
+    @State private var conversationVisible = false
     @State private var pendingRemainder: [ChatBatchItem] = []
     @State private var replyTarget: TaskReplyTarget?
     @State private var credentialRequest: AppStore.CredentialSaveRequest?
@@ -88,6 +89,7 @@ struct ConversationView: View {
                         }
                         .scrollDismissesKeyboard(.interactively)
                         .onAppear {
+                            conversationVisible = true
                             store.markChatRead()
                             for task in store.chatHelpTasks { store.surfaceTaskHelp(taskID: task.id) }
                             if let id = store.conversationTaskID,
@@ -107,6 +109,7 @@ struct ConversationView: View {
                             if let id = store.chatTranscript.last?.taskID { prepareReply(to: id) }
                         }
                         .onDisappear {
+                            conversationVisible = false
                             store.markChatRead()
                             if pendingAction != nil {
                                 store.appendChat(fromAgent: true, text: "I left the unconfirmed request and any remaining requests undone. Ask me again when you're ready.")
@@ -469,6 +472,10 @@ struct ConversationView: View {
     private func presentBatch(_ progress: ChatActionBatch.Progress) {
         if !progress.replies.isEmpty {
             store.appendChat(fromAgent: true, text: progress.replies.joined(separator: " "))
+        }
+        guard conversationVisible else {
+            store.appendChat(fromAgent: true, text: "I left the unconfirmed request and any remaining requests undone. Ask me again when you're ready.")
+            return
         }
         pendingAction = progress.confirmation
         pendingRemainder = progress.remaining
