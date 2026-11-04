@@ -83,3 +83,11 @@ test('interrupted uninitialized restore re-proves source before replacing only i
  assert.equal((await w.foundation.registry.read(owner,owner)).lifecycleState,'starting');await assert.rejects(w.imageUpgrade.abort(input.operationId),/CANNOT_ABORT/);
  w=f.make();const result=await w.imageUpgrade.run(input);assert.equal(result.operation.phase,'verified');assert.equal(f.stats().destroys,2);await w.foundation.verifyDurability(result.operation.sourceReceipt!.receiptId);
 });
+
+for(const status of ['prepared','dispatching','uncertain'])test(`unresolved ${status} effect blocks image migration without clearing state`,async t=>{
+ const f=await fixture(t),w=f.make();await w.ensure();const current=await w.foundation.registry.read(owner,owner);
+ w.foundation.persistence.put('effect','preserved',0,{status,approvalId:'consumed-approval',privateEvidence:'keep'});
+ const before=w.foundation.persistence.get('effect','preserved');
+ await assert.rejects(w.imageUpgrade.run({operationId:'blocked_effect',expectedGeneration:current.generation,targetImage:newImage}),/UNRESOLVED_ACTION/);
+ assert.deepEqual(w.foundation.persistence.get('effect','preserved'),before);assert.equal(w.imageUpgrade.locked(),false);assert.equal(f.stats().destroys,0);
+});
