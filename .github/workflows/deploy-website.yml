@@ -1,0 +1,45 @@
+name: Deploy website
+
+# Manual only: Actions -> Deploy website -> Run workflow.
+# Deploys website/ to Cloudflare Pages (project hygge-website),
+# the live site at usehygge.app. Nothing runs on push or on PR;
+# a run only happens when someone clicks Run workflow.
+# Requires repo secrets CLOUDFLARE_API_TOKEN (with Pages:Edit) and
+# CLOUDFLARE_ACCOUNT_ID — the same secrets the workspace-image
+# workflow uses. If the token behind CLOUDFLARE_API_TOKEN lacks
+# Pages:Edit, update that secret before running this.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy website --project-name=hygge-website
+
+      - name: Smoke-check the live site
+        run: |
+          code="$(curl -s -o /dev/null -w '%{http_code}' https://usehygge.app/)"
+          if [ "$code" != "200" ]; then
+            echo "usehygge.app returned HTTP $code" >&2
+            exit 1
+          fi
+          echo "usehygge.app is up (HTTP $code)"
+
+      - name: Report deployment
+        run: |
+          {
+            echo "## Website deployed"
+            echo
+            echo "Live at https://usehygge.app/ (Cloudflare Pages project \`hygge-website\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
