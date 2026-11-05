@@ -239,7 +239,7 @@ final class AppStore {
             opportunities = SampleData.opportunities
         }
         isSignedIn = backend.hasSessionToken
-        isExistingAccount = isSignedIn && !backend.sessionIsNewUser
+        isExistingAccount = isSignedIn && !backend.sessionIsNewUser && hasOnboarded
         visitMarker = lastVisitAt ?? .distantPast
         lastVisitAt = Date()
         // A token or a tap that arrives while running is drained
@@ -348,7 +348,7 @@ final class AppStore {
 
     func refreshAuthState() {
         isSignedIn = backend.hasSessionToken
-        isExistingAccount = isSignedIn && !backend.sessionIsNewUser
+        isExistingAccount = isSignedIn && !backend.sessionIsNewUser && hasOnboarded
         // Any live session (including one from a build predating
         // this flag) proves a previous sign-in on this phone.
         if isSignedIn { UserDefaults.standard.set(true, forKey: Self.hasSignedInBeforeKey) }
@@ -451,11 +451,28 @@ final class AppStore {
             }
         }
         if !backend.sessionIsNewUser {
-            // An existing identity may have no profile row yet. It still belongs
-            // in Home; never import another account's cached onboarding answers.
-            resetLocalState()
-            markBackendFirst(hasReal: false)
-            writeCache()
+            // A returning identity with no server state is not an onboarded
+            // account yet — it is the stranded case (signup created the
+            // account but onboarding never ran, e.g. the first sign-in
+            // failed after the server issued a session). Never import a
+            // previous account's cached answers, but answers handed in by
+            // this run are this account's own: complete onboarding with
+            // them and import once. Without complete answers, reset to a
+            // clean slate and let routing send the user to onboarding
+            // instead of an empty Home — isExistingAccount now requires
+            // hasOnboarded, so a non-onboarded account routes there.
+            // In both cases stay out of backend-first mode: the server
+            // is empty, so a later import must actually import, not pull
+            // the empty state over freshly completed onboarding.
+            isBackendFirst = false
+            UserDefaults.standard.removeObject(forKey: Self.backendFirstKey)
+            if localComplete {
+                completeOnboarding(profile: answers)
+                await syncOnLaunch(finishingSignIn: true)
+            } else {
+                resetLocalState()
+                writeCache()
+            }
             accountLoaded = true
             return
         }
