@@ -6,6 +6,9 @@ struct ConversationView: View {
     /// Sheet presentations keep the paper background; the feed's speech
     /// bubble passes the card color so it lifts off the feed behind it.
     var background: Color = HyggeTheme.paper
+    /// Bubbles and the composer must contrast with the surface they sit
+    /// on: card on paper in a sheet, paper on card in the feed bubble.
+    var bubbleBackground: Color = HyggeTheme.card
     /// The speech bubble sits right on top of him — a name header there
     /// only repeats what the flame below already says.
     var showsHeader: Bool = true
@@ -17,7 +20,6 @@ struct ConversationView: View {
     @State private var agentState: PersistentConversationState?
     @State private var agentError: String?
     @State private var retryMessage: ChatEntry?
-    @State private var showReset = false
     @State private var replyTarget: TaskReplyTarget?
     @State private var credentialRequest: AppStore.CredentialSaveRequest?
     @State private var takeBrowserControl = false
@@ -82,12 +84,15 @@ struct ConversationView: View {
                                     agentBubble(streamingText)
                                 }
                                 if let agentError { Text(agentError).font(.footnote).foregroundStyle(HyggeTheme.secondary) }
-                                if let pending = agentState?.activeTurn {
-                                    Button("Continue saved turn") { Task { await retryTurn(id: pending.id) } }
-                                        .disabled(isThinking)
-                                } else if let retryMessage {
-                                    Button("Try again") { Task { await retryTurn(id: retryMessage.id.uuidString.lowercased(), text: retryMessage.text) } }
-                                        .disabled(isThinking)
+                                // Retry affordances stay hidden while a turn
+                                // is live: after sending, the pending message
+                                // is the turn in flight, not a failure.
+                                if !isThinking {
+                                    if let pending = agentState?.activeTurn {
+                                        Button("Continue saved turn") { Task { await retryTurn(id: pending.id) } }
+                                    } else if let retryMessage {
+                                        Button("Try again") { Task { await retryTurn(id: retryMessage.id.uuidString.lowercased(), text: retryMessage.text) } }
+                                    }
                                 }
                                 ForEach(agentState?.proposals ?? []) { proposal in
                                     agentConfirmationCard(proposal)
@@ -160,22 +165,6 @@ struct ConversationView: View {
                 await refreshConversation()
             }
         }
-        .confirmationDialog("Clear this conversation, saved notes and working files?", isPresented: $showReset, titleVisibility: .visible) {
-            Button("Clear chat, notes and files", role: .destructive) {
-                Task {
-                    guard let generation = agentState?.generation else { return }
-                    isThinking = true
-                    defer { isThinking = false }
-                    do {
-                        await store.beginConversationRequest()
-                        agentState = try await store.backend.resetConversation(generation: generation)
-                        store.chatTranscript = []; retryMessage = nil
-                        store.saveConversationOutbox(messageID: nil)
-                        _ = await store.pullFromServer(reconcilingConversation: true)
-                    } catch { agentError = "I couldn't clear the saved conversation. Nothing is reported as deleted yet." }
-                }
-            }
-        }
     }
 
     private var avatarAnimation: FlameAnimation {
@@ -205,7 +194,7 @@ struct ConversationView: View {
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 9)
-        .background(HyggeTheme.card, in: RoundedRectangle(cornerRadius: 16))
+        .background(bubbleBackground, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(HyggeTheme.hairline, lineWidth: 1))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("About: \(context.title)")
@@ -213,18 +202,11 @@ struct ConversationView: View {
 
     private var composer: some View {
         HStack(spacing: 9) {
-            Menu {
-                Button("Refresh saved conversation") { Task { await refreshConversation() } }
-                Button("Clear chat, notes and files", role: .destructive) { showReset = true }
-                    .disabled(isThinking)
-            } label: {
-                Image(systemName: "ellipsis.circle").frame(width: 32, height: 44)
-            }.accessibilityLabel("Conversation options")
             TextField(replyTarget == nil ? "Message Hygge…" : "Your reply…", text: $input, axis: .vertical)
                 .focused($composerFocused)
                 .lineLimit(1...4)
                 .padding(.horizontal, 16).padding(.vertical, 12)
-                .background(HyggeTheme.card, in: Capsule())
+                .background(bubbleBackground, in: Capsule())
                 .overlay(Capsule().stroke(HyggeTheme.hairline, lineWidth: 1).allowsHitTesting(false))
                 .onSubmit { Task { await send() } }
             Button { Task { await send() } } label: {
@@ -275,10 +257,9 @@ struct ConversationView: View {
     private func agentBubble(_ text: String) -> some View {
         HStack(alignment: .bottom, spacing: 7) {
             AnimatedFlame(animation: avatarAnimation, size: 26)
-            Text(text.isEmpty ? " " : text)
-                .font(.body).foregroundStyle(HyggeTheme.ink).lineSpacing(3)
+            AgentMarkdownText(text: text)
                 .padding(.horizontal, 15).padding(.vertical, 12)
-                .background(HyggeTheme.card, in: UnevenRoundedRectangle(
+                .background(bubbleBackground, in: UnevenRoundedRectangle(
                     topLeadingRadius: 6, bottomLeadingRadius: 20,
                     bottomTrailingRadius: 20, topTrailingRadius: 20))
                 .overlay(UnevenRoundedRectangle(
@@ -338,6 +319,9 @@ struct ConversationView: View {
     }
 
     private func applyConversation(_ state: PersistentConversationState) async {
+        // Clear the streaming bubble before appending the final reply, so
+        // the same text never shows twice (streaming bubble + entry).
+        streamingText = nil
         agentState = state
         if let reply = state.reply, !reply.isEmpty {
             store.appendConversationMessage(fromAgent: true, text: reply, id: state.replyMessageId ?? UUID())
@@ -348,7 +332,9 @@ struct ConversationView: View {
 
     private func retryTurn(id: String, text: String? = nil) async {
         guard !isThinking else { return }
-        isThinking = true; agentError = nil; streamingText = ""
+        // Leave streamingText nil until the first delta arrives: the
+        // thinking dots own the pre-reply phase, not an empty bubble.
+        isThinking = true; agentError = nil
         defer { isThinking = false; streamingText = nil }
         do {
             if agentState == nil { agentState = try await store.backend.conversationState() }
