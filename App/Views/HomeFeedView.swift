@@ -820,7 +820,10 @@ struct HomeFeedView: View {
         case .opportunity(let opportunity): FeedOpportunityDetail(close: { closeFocus() }, opportunityID: opportunity.id)
         case .event(let event):
             if event.kind == .filedEmail, let mail = store.filedEmailSummaries.first(where: { $0.id.lowercased() == event.id.uuidString.lowercased() }) {
-                FiledEmailDetailView(mail: mail, isFeedCard: true)
+                FiledEmailDetailView(mail: mail, isFeedCard: true, discussInChat: { context in
+                    closeFocus()
+                    chatAbout(context)
+                })
             } else { FeedEventDetail(event: event) }
         case .task(let task): FeedTaskReview(close: { closeFocus() }, taskID: task.id)
         case .browser(let task): CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id, onClose: { closeFocus() })

@@ -5,6 +5,9 @@ import SwiftUI
 struct FiledEmailDetailView: View {
     let mail: FiledEmailSummary
     var isFeedCard = false
+    /// When set (feed card detail), discussing opens the caller's chat
+    /// surface instead of this view's own sheet.
+    var discussInChat: ((ChatContextRef) -> Void)? = nil
     @State private var showOriginal = false
     @Environment(AppStore.self) private var store
     private var current: FiledEmailSummary {
@@ -13,7 +16,7 @@ struct FiledEmailDetailView: View {
     var body: some View {
         Group {
             if isFeedCard && showOriginal {
-                OriginalEmailDetailView(mail: current, isFeedCard: true, backToSummary: { showOriginal = false })
+                OriginalEmailDetailView(mail: current, isFeedCard: true, backToSummary: { showOriginal = false }, discussInChat: discussInChat)
             } else {
                 summaryPage
             }
@@ -27,7 +30,7 @@ struct FiledEmailDetailView: View {
             if isFeedCard { summaryContent }
             else { SettingsPage(title: "Email summary") { summaryContent } }
         }
-        .modifier(EmailMessageActions(mail: mail, isFeedCard: isFeedCard))
+        .modifier(EmailMessageActions(mail: mail, isFeedCard: isFeedCard, discussInChat: discussInChat))
     }
     @ViewBuilder private var summaryContent: some View {
             HStack(spacing: 12) {
@@ -94,6 +97,7 @@ struct OriginalEmailDetailView: View {
     let mail: FiledEmailSummary
     var isFeedCard = false
     var backToSummary: (() -> Void)?
+    var discussInChat: ((ChatContextRef) -> Void)? = nil
     @Environment(AppStore.self) private var store
     @State private var original: OriginalEmail?
     @State private var loading = true
@@ -108,7 +112,7 @@ struct OriginalEmailDetailView: View {
         }
         .task(id: mail.id) { await load() }
         .modifier(EmailMessageActions(mail: mail, isFeedCard: isFeedCard,
-                                      pageTitle: "Email details", backToSummary: backToSummary))
+                                      pageTitle: "Email details", backToSummary: backToSummary, discussInChat: discussInChat))
     }
     @ViewBuilder private var originalContent: some View {
             HStack(spacing: 12) {
@@ -211,6 +215,9 @@ private struct EmailMessageActions: ViewModifier {
     var isFeedCard = false
     var pageTitle = "Email summary"
     var backToSummary: (() -> Void)?
+    /// When set (feed card detail), discussing opens the caller's chat
+    /// surface instead of this view's own sheet.
+    var discussInChat: ((ChatContextRef) -> Void)? = nil
     @Environment(AppStore.self) private var store
     @State private var actionNotice: String?
     @State private var actionError: String?
@@ -282,11 +289,14 @@ private struct EmailMessageActions: ViewModifier {
                     .foregroundStyle(HyggeTheme.emberDeep)
             }
             Button("Discuss in chat") {
-                store.pendingChatContext = ChatContextRef(
+                let context = ChatContextRef(
                     kind: "mail", id: mail.id, title: current.displayTitle,
                     subtitle: current.senderAddress, siteID: mail.siteID,
                     siteDomain: mail.senderDomain)
-                showConversation = true
+                if let discussInChat { discussInChat(context) } else {
+                    store.pendingChatContext = context
+                    showConversation = true
+                }
             }.buttonStyle(SettingsActionStyle())
         }
     }
