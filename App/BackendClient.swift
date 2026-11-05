@@ -1013,6 +1013,20 @@ struct BackendClient {
         return try JSONDecoder().decode(Response.self, from: data)
     }
 
+    /// Raw read of the owner-only workspace diagnostics. Longer timeout than
+    /// the plain read: the read attaches the workspace first, which can take
+    /// a while when its container is starting cold.
+    func fetchWorkspaceDiagnosticsData() async throws -> Data {
+        var request = URLRequest(url: baseURL.appendingPathComponent("sandbox/diagnostics"))
+        request.timeoutInterval = 60
+        if !apiToken.isEmpty { request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        return data
+    }
+
     private func post<Response: Decodable, Body: Encodable>(_ path: String, body: Body) async throws -> Response {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"

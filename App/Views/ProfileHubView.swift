@@ -40,6 +40,10 @@ struct ProfileHubView: View {
                         NavigationLink { SettingsPermissionsView() } label: {
                             SettingsRow(title: "Permissions", icon: "slider.horizontal.3", subtitle: "Notifications, calendar & location")
                         }
+                        Divider()
+                        NavigationLink { WorkspaceDiagnosticsView() } label: {
+                            SettingsRow(title: "Workspace diagnostics", icon: "stethoscope", subtitle: "See why scans won't start")
+                        }
                         #if DEBUG
                         Divider()
                         NavigationLink { FlameLabView() } label: {
