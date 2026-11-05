@@ -2182,6 +2182,16 @@ export class UserSandbox extends DurableObject<Env> {
         if (request.method!=='GET') return json({error:'Method not allowed'},405);
         return json(await this.workspace().diagnostics());
       }
+      // Workspace keepalive: starts the workspace when the app opens
+      // (rebinding a dead container from its checkpoint) and renews the
+      // container lease while the app is foregrounded. Best-effort: the app
+      // calls it on becoming active and about every 60s; a failure never
+      // blocks the UI, and the mission path retries the same start.
+      if (path.endsWith("/sandbox/keepalive")) {
+        if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)!=='retained-v2') return json({error:'retained-v2 required'},409);
+        if (request.method!=='POST') return json({error:'Method not allowed'},405);
+        return json(await this.workspace().keepalive());
+      }
 
       // Brief 04 inbox (receive only). Inbound accepts only the
       // Email Worker delivery marker; reads are this user's filed
