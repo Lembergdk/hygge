@@ -156,6 +156,9 @@ struct FeedTaskReview: View {
     @Environment(AppStore.self) private var store
     let close: () -> Void
     let taskID: UUID
+    /// Opens the task's live browser (the same .browser focus the
+    /// feed's live attachment uses); set by the feed, no-op elsewhere.
+    var openBrowser: () -> Void = {}
     @State private var submitting = false
     @State private var audit = false
     private var task: AgentTask? { store.tasks.first { $0.id == taskID } }
@@ -187,6 +190,11 @@ struct FeedTaskReview: View {
                     }
                 }
                 Button("Full details") { audit = true }.foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
+                if task.browserSessionID == nil, task.status == .running {
+                    Text("No live browser open yet — the watch button appears below once the run starts browsing.")
+                        .foregroundStyle(HyggeTheme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else { Text("This work is no longer available.").foregroundStyle(HyggeTheme.secondary) }
         } footer: {
             // The approve action is the point of this surface: pinned,
@@ -202,6 +210,8 @@ struct FeedTaskReview: View {
                         Task { await store.approveAndRun(taskID: taskID) }
                         close()
                     }.disabled(submitting || store.isPaused)
+                } else if task.browserSessionID != nil {
+                    FeedPrimaryButton(title: "Watch live browser") { openBrowser() }
                 }
             }
         }.sheet(isPresented: $audit) { NavigationStack { TaskDetailView(taskID: taskID) } }
