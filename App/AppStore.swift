@@ -24,6 +24,10 @@ struct StoreSnapshot: Codable {
     var profilePhotoIsLegacy = false
     var pendingProfileEdit: Bool = false
     var archivedFeedIDs: Set<String> = []
+    /// Tasks the person explicitly brought into chat by swiping a feed
+    /// card to discuss it. Only these get a browser embedded in chat;
+    /// a help request from Hygge never embeds one on its own.
+    var discussedTaskIDs: Set<UUID> = []
     var hasOnboarded: Bool
     var sites: [TargetSite]
     var siteMemory: SiteMemoryRepository
@@ -82,6 +86,9 @@ struct StoreSnapshot: Codable {
 @Observable
 final class AppStore {
     var archivedFeedIDs: Set<String> = []
+    /// Tasks the person explicitly brought into chat by swiping a feed
+    /// card to discuss it. Only these get a browser embedded in chat.
+    var discussedTaskIDs: Set<UUID> = []
     var profile = EarningsProfile()
     // Server-owned photo with an offline cache and durable pending upload.
     var profilePhotoData: Data?
@@ -1370,6 +1377,7 @@ final class AppStore {
     /// Start over and sign-out; callers decide how it is persisted.
     private func resetLocalState() {
         archivedFeedIDs = []
+        discussedTaskIDs = []
         profile = EarningsProfile()
         profilePhotoData = nil
         profilePhotoNeedsUpload = false
@@ -2238,6 +2246,14 @@ final class AppStore {
         writeCache()
     }
 
+    /// Records that the person brought this task into chat themselves
+    /// (swipe on its feed card). Only such tasks embed their browser
+    /// in the conversation.
+    func markTaskDiscussedInChat(taskID: UUID) {
+        discussedTaskIDs.insert(taskID)
+        writeCache()
+    }
+
     func retryProfileSync() async { await pushStateNow() }
 
     // MARK: - Persistence
@@ -2265,6 +2281,7 @@ final class AppStore {
                                      proposals: proposals, accountStates: accountStates,
                                      chatTranscript: chatTranscript, activityEvents: activityEvents, isPaused: isPaused, lastVisitAt: lastVisitAt, beliefs: beliefs, searchEvidence: searchEvidence, feedbackEvents: feedbackEvents, learningProfile: learningProfile)
         snapshot.archivedFeedIDs = archivedFeedIDs
+        snapshot.discussedTaskIDs = discussedTaskIDs
         snapshot.profilePhotoData = profilePhotoData
         snapshot.profilePhotoNeedsUpload = profilePhotoNeedsUpload
         snapshot.profilePhotoIsLegacy = profilePhotoIsLegacy
@@ -2281,6 +2298,7 @@ final class AppStore {
         guard let url = storeURL, let data = try? Data(contentsOf: url),
               let snapshot = try? JSONDecoder().decode(StoreSnapshot.self, from: data) else { return false }
         archivedFeedIDs = snapshot.archivedFeedIDs
+        discussedTaskIDs = snapshot.discussedTaskIDs
         profile = snapshot.profile
         profilePhotoData = snapshot.profilePhotoData
         profilePhotoNeedsUpload = snapshot.profilePhotoNeedsUpload
