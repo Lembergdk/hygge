@@ -2562,9 +2562,16 @@ export class UserSandbox extends DurableObject<Env> {
         const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks ORDER BY created_at")] as Row[];
         return json({ tasks: rows.map((r) => {
           const t = JSON.parse(String(r.task));
-          if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='legacy'
+          // Retained-v2 runs keep their session id in the projected task
+          // even after the session dies, so reconcile dead sessions there
+          // too. A live runner run still counts as active, so a run that
+          // has not opened its session yet is never flipped mid-start.
+          const retainedV2 = workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2';
+          const runnerPhase = retainedV2 ? (this.workspace().runner.progress(t.id) as { phase?: string } | null)?.phase : null;
+          const runnerActive = runnerPhase === 'waiting_for_workspace' || runnerPhase === 'browser_starting' || runnerPhase === 'running';
+          if ((workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='legacy' || retainedV2)
               && reconcileEndedSession(t, Boolean(t.session_id && browser.hasSession(t.session_id)),
-              this.activeMissions.has(t.id) || this.browserResumes.has(t.id))) this.saveTask(t);
+              this.activeMissions.has(t.id) || this.browserResumes.has(t.id) || runnerActive)) this.saveTask(t);
           return { ...this.executionView(t), mobile_task: mobileTask(t) };
         }) });
       }

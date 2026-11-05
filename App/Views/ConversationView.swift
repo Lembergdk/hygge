@@ -169,7 +169,9 @@ struct ConversationView: View {
 
     private var avatarAnimation: FlameAnimation {
         if !store.chatHelpTasks.isEmpty { return .notify }
-        return store.isAgentWorking || isThinking ? .laptop : .walk
+        // The laptop means a live browser run, nothing else: thinking or
+        // a queued task without a session must not hold it on.
+        return store.hasActiveBrowserSession ? .laptop : .walk
     }
 
     /// The mini-card a message is about — attached above the
