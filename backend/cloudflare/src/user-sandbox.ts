@@ -2050,6 +2050,14 @@ export class UserSandbox extends DurableObject<Env> {
   private async handleOwnerRequest(request: Request): Promise<Response> {
     const verifiedUser = request.headers.get('x-hygge-user-id');
     if (!verifiedUser) return json({error:'Verified owner required'},403);
+    // Account deletion runs before owner binding, schema migration, and
+    // the image-upgrade lock: deleting must work even when the workspace
+    // is broken or an upgrade is pending.
+    if (request.method === 'POST' && new URL(request.url).pathname === '/internal/account/delete') {
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+      return json({ ok: true });
+    }
     try {
       const owner = bindWorkspaceOwner(this.ctx.storage, verifiedUser, this.env.HYGGE_ENV, this.ctx.id.toString());
       this.userId = owner.userId;
