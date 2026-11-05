@@ -618,7 +618,7 @@ struct HomeFeedView: View {
                     siteDomain: chat && !approval ? nil : store.siteDomain(id: task.siteID), siteName: store.siteName(id: task.siteID),
                     chatContext: taskChatContext(task),
                     open: { if chat { openChat(task) } else { openFocus(.task(task)) } },
-                    chatOverride: chat ? { openChat(task) } : nil)
+                    chatOverride: chat ? { store.markTaskDiscussedInChat(taskID: task.id); openChat(task) } : nil)
     }
     private func taskIcon(_ task: AgentTask) -> String {
         if task.needsChatHelp {
@@ -783,6 +783,7 @@ struct HomeFeedView: View {
     /// Right swipe on any card: open the chat with that card
     /// attached, so the next message is understood to be about it.
     private func chatAbout(_ context: ChatContextRef) {
+        if context.kind == "task", let id = UUID(uuidString: context.id) { store.markTaskDiscussedInChat(taskID: id) }
         store.pendingChatContext = context
         if !showBubbleChat { flameTapped() }
     }
@@ -792,6 +793,7 @@ struct HomeFeedView: View {
                        siteID: task.siteID, siteDomain: store.siteDomain(id: task.siteID))
     }
     private func chatAboutTask(_ task: AgentTask) {
+        store.markTaskDiscussedInChat(taskID: task.id)
         // A task already waiting on a chat answer keeps its
         // dedicated reply flow; anything else is a normal
         // conversation about the task.
@@ -825,7 +827,7 @@ struct HomeFeedView: View {
                     chatAbout(context)
                 })
             } else { FeedEventDetail(event: event) }
-        case .task(let task): FeedTaskReview(close: { closeFocus() }, taskID: task.id)
+        case .task(let task): FeedTaskReview(close: { closeFocus() }, taskID: task.id, openBrowser: { openFocus(.browser(task)) })
         case .browser(let task): CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id, onClose: { closeFocus() })
         case .paused:
             FeedDetailContent {

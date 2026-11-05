@@ -59,6 +59,7 @@ struct ConversationView: View {
                                            let task = store.tasks.first(where: { $0.id == taskID }),
                                            entry.helpID != nil {
                                             if task.browserSessionID != nil,
+                                               store.discussedTaskIDs.contains(task.id),
                                                store.chatTranscript.last(where: { $0.taskID == task.id })?.id == entry.id {
                                                 BrowserLiveAttachment(task: task) { takeBrowserControl = false; browserTask = task }.padding(.leading, 33)
                                             }
