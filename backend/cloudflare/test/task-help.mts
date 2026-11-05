@@ -75,6 +75,11 @@ test('mobile projection owns status and clears stale controls', () => {
   const projected = mobileTask({ ...task(), status: 'succeeded', mobile_task: { id: 'client', status: 'running', pendingReply: { approved: true } } });
   assert.equal(projected.status, 'succeeded'); assert.equal(projected.pendingReply, null);
 });
+test('mobile projection carries the step awaiting review, and null when none is stuck', () => {
+  const base = { ...task(), status: 'needsHuman', mobile_task: { id: 'client', status: 'needsHuman' } };
+  assert.equal(mobileTask({ ...base, workspace_pending_effect_id: 'fx_1' }).pendingEffectID, 'fx_1');
+  assert.equal(mobileTask(base).pendingEffectID, null);
+});
 
 test('Swift uppercase UUID replies match lowercase stored request IDs', () => {
   const t: any = { ...task(), status: 'needsHuman', help: help('verification', 'Finish check') };

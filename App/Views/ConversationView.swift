@@ -404,6 +404,16 @@ struct ConversationView: View {
                     replyTarget = TaskReplyTarget(taskID: task.id, helpID: help.id, question: question.text)
                     composerFocused = true
                 }.buttonStyle(SettingsActionStyle(filled: false))
+            } else if let effectID = task.pendingEffectID {
+                // A pending effect is a review, whatever the help kind:
+                // the step's browser session is gone, so the check is the
+                // user's own review: did the step happen on the site?
+                Button("It worked") {
+                    Task { await store.reviewTask(taskID: task.id, helpID: help.id, effectID: effectID, confirmed: true) }
+                }.buttonStyle(SettingsActionStyle())
+                Button("It didn't work") {
+                    Task { await store.reviewTask(taskID: task.id, helpID: help.id, effectID: effectID, confirmed: false) }
+                }.buttonStyle(SettingsActionStyle(filled: false))
             } else {
                 Button(help.actionLabel) {
                     switch help.kind {

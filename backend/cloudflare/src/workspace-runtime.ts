@@ -77,6 +77,13 @@ export class WorkspaceRegistry {
     assertOwner(actor, owner);
     return this.storage.transaction(tx => (this.record(tx, owner)).binding);
   }
+  /** Reports whether a lifecycle operation completed, for resuming a rebind
+   * that stopped part-way. A stopped binding is only resumed when its own
+   * fence is recorded; another operation's stopped binding is never hijacked. */
+  async completedOperation(actor: WorkspaceIdentity, owner: WorkspaceIdentity, operationId: string): Promise<{kind:'start'|'fence'|'image';generation:number}|undefined> {
+    assertOwner(actor, owner); this.operationId(operationId);
+    return this.storage.transaction(tx => this.record(tx, owner).completed['op:' + operationId]);
+  }
   private record(tx: WorkspaceTransaction, owner: WorkspaceIdentity): RegistryRecord {
     const record = tx.get<RegistryRecord>(this.key(owner));
     if (!record) throw new Error('WORKSPACE_NOT_INITIALIZED');
@@ -174,8 +181,19 @@ export class WorkspaceRegistry {
   }
   private validateFence(b: WorkspaceBinding, e: RuntimeFenceEvidence): void {
     assertOwner(e, b);
-    if (e.provider !== b.provider || e.previousRuntimeId !== b.runtimeId || e.previousIncarnation !== b.incarnation || e.previousGeneration !== b.generation || e.browserRetired !== true || !e.providerRequestIds.length || !Number.isFinite(Date.parse(e.verifiedAt)) || Date.parse(e.verifiedAt) < Date.parse(b.lastVerifiedAt) || Date.parse(e.verifiedAt) > this.now()) throw new Error('FENCE_UNCONFIRMED');
-    if (e.provider !== 'cloudflare' || e.providerRuntimeId !== b.providerRuntimeId || e.result !== 'exact_incarnation_stopped') throw new Error('FENCE_UNCONFIRMED');
+    if (e.provider !== b.provider || e.previousRuntimeId !== b.runtimeId || e.browserRetired !== true || !e.providerRequestIds.length || !Number.isFinite(Date.parse(e.verifiedAt)) || Date.parse(e.verifiedAt) < Date.parse(b.lastVerifiedAt) || Date.parse(e.verifiedAt) > this.now()) throw new Error('FENCE_UNCONFIRMED');
+    if (e.provider !== 'cloudflare' || e.providerRuntimeId !== b.providerRuntimeId) throw new Error('FENCE_UNCONFIRMED');
+    // Exact case: the evidence names this binding. Absent case: the container
+    // is already gone, so the evidence names this binding with no destroy.
+    // Orphan case: the destroyed container belonged to this workspace but
+    // carried an older incarnation; it must name itself as the orphan.
+    if (e.result === 'exact_incarnation_absent') {
+      if (e.previousIncarnation !== b.incarnation || e.previousGeneration !== b.generation) throw new Error('FENCE_UNCONFIRMED');
+    } else if (e.result === 'exact_incarnation_stopped') {
+      if (e.previousGeneration > b.generation) throw new Error('FENCE_UNCONFIRMED');
+      if (e.previousIncarnation === b.incarnation) { if (e.previousGeneration !== b.generation) throw new Error('FENCE_UNCONFIRMED'); }
+      else if (e.orphanIncarnation !== e.previousIncarnation) throw new Error('FENCE_UNCONFIRMED');
+    } else throw new Error('FENCE_UNCONFIRMED');
   }
   async saved(actor: WorkspaceIdentity, owner: WorkspaceIdentity, writeId: string): Promise<StoredWorkspaceReceipt | undefined> {
     assertOwner(actor, owner); this.operationId(writeId);

@@ -49,6 +49,16 @@ final class TaskHelpTests: XCTestCase {
         XCTAssertNil(restored.browserSessionID)
         XCTAssertFalse(task.prepareReply(helpID: request.id))
     }
+    func testSynthesizedHelpIDIsStableAcrossPollsAndChangesWithTheSituation() {
+        let taskID = UUID()
+        let first = TaskHelp.stableSynthesizedID(taskID: taskID, status: "needsHuman", pendingEffectID: "fx_3", informationRequests: [])
+        let again = TaskHelp.stableSynthesizedID(taskID: taskID, status: "needsHuman", pendingEffectID: "fx_3", informationRequests: [])
+        XCTAssertEqual(first, again)
+        XCTAssertNotEqual(first, TaskHelp.stableSynthesizedID(taskID: taskID, status: "needsHuman", pendingEffectID: nil, informationRequests: []))
+        XCTAssertNotEqual(first, TaskHelp.stableSynthesizedID(taskID: taskID, status: "failed", pendingEffectID: "fx_3", informationRequests: []))
+        XCTAssertNotEqual(first, TaskHelp.stableSynthesizedID(taskID: taskID, status: "needsHuman", pendingEffectID: "fx_3", informationRequests: ["What should I use?"]))
+        XCTAssertNotEqual(first, TaskHelp.stableSynthesizedID(taskID: UUID(), status: "needsHuman", pendingEffectID: "fx_3", informationRequests: []))
+    }
     func testOldCachesStillDecodeAndHelpLinksSurviveRoundTrip() throws {
         var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(task())) as! [String: Any]
         for key in ["help", "pendingReply", "backendTaskID"] { object.removeValue(forKey: key) }
