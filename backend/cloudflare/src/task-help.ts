@@ -85,7 +85,10 @@ export function mobileTask(task: any) {
   return { ...task.mobile_task, backendTaskID: task.id, status: task.status === "awaiting_approval" ? "awaitingApproval" : task.status,
     draftedPayload: task.drafted_payload, browserSessionID: task.session_id ?? null,
     browserTrace: task.browser_trace ?? [], informationRequests: task.information_requests ?? [],
-    help: task.help ?? null, pendingReply: null, log: task.log ?? [] };
+    help: task.help ?? null, pendingReply: null, log: task.log ?? [],
+    // The step awaiting review, so the app can ask the user whether it
+    // happened on the site and reconcile it. Null when nothing is stuck.
+    pendingEffectID: task.workspace_pending_effect_id ?? null };
 }
 
 export function canResumeWithInboxCode(task: any): boolean {
