@@ -16,7 +16,6 @@ public enum SampleData {
               locationLabel: "Suburbs", isRemote: false,
               requiredSkills: ["House sitting", "Cat care"],
               urlString: "https://www.trustedhousesitters.com", isDemo: true),
-
         .init(siteID: "taskrabbit", title: "Assemble a bookshelf and desk",
               summary: "Flat-pack assembly, tools provided, about 2 hours.",
               category: .localGig, payLabel: "$38/hr", estimatedHourly: 38,
