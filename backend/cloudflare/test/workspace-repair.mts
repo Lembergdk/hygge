@@ -28,7 +28,7 @@ function fakeContainer(){
   const uploads=new Map<string,{ref:string,size:number,sha256:string,bytes:Buffer}>();
   let restore:any=null,capture:any=null;
   const ops:string[]=[];
-  let destroys=0,starts=0;
+  let destroys=0,starts=0,failStartOnce=false;
   const sha=(b:Buffer)=>createHash('sha256').update(b).digest('hex');
   const b64=(b:Buffer)=>b.toString('base64');
   const unb64=(s:string)=>Buffer.from(s,'base64');
@@ -60,7 +60,7 @@ function fakeContainer(){
   }
   const container:any={
     get running(){return running;},
-    start(o:any){starts++;running=true;image=o.image;labels=o.labels;identity=JSON.parse(o.env.HYGGE_IDENTITY);initialized=false;frozen=false;recoveredCheckpointId=null;fsRevision=0;profileRevision=0;files.clear();for(const k of Object.keys(artifacts))delete artifacts[k];},
+    start(o:any){if(failStartOnce){failStartOnce=false;throw new Error('START_TRANSIENT');}starts++;running=true;image=o.image;labels=o.labels;identity=JSON.parse(o.env.HYGGE_IDENTITY);initialized=false;frozen=false;recoveredCheckpointId=null;fsRevision=0;profileRevision=0;files.clear();for(const k of Object.keys(artifacts))delete artifacts[k];},
     async inspect(){return running?{image,labels}:null;},
     async destroy(){destroys++;running=false;},
     async monitor(){},async setInactivityTimeout(){},async interceptOutboundHttp(){},async interceptOutboundHttps(){},
@@ -69,6 +69,8 @@ function fakeContainer(){
   return {container,ops,stats:()=>({destroys,starts}),
     // The platform reclaims the container out-of-band: no fence, no notice.
     kill(){running=false;},
+    // A start that fails once, so a rebind can be left starting.
+    failNextStart(){failStartOnce=true;},
     async plantOrphan(incarnation:string,generation:number){
       const ownerHash=(await digest(new TextEncoder().encode(ownerKey(owner)))).slice(0,32);
       running=true;image=oldImage;labels={owner:ownerHash,operation:'orphan',incarnation,generation:String(generation)};
@@ -260,5 +262,49 @@ test('a binding with no recovery point refuses instead of starting empty',async(
   const stalled=await w.foundation.registry.read(owner,owner);
   assert.equal(stalled.lifecycleState,'ready');
   assert.equal(stalled.incarnation,before.incarnation);
+});
+
+test('a rebind stopped after its fence resumes at select/start and moves to the pinned image',async()=>{
+  const {f,w,before}=await wedgedMain();
+  // Drive the fence step by hand: the container is already gone, so the
+  // fence completes and leaves the binding stopped with this rebind's
+  // fence op recorded — the state a crash between fence and start leaves.
+  const fenced=await w.foundation.registry.fence(owner,owner,before.generation,`rebind-${before.incarnation}-fence`);
+  assert.equal(fenced.lifecycleState,'stopped');
+  const completed=await w.foundation.registry.completedOperation(owner,owner,`rebind-${before.incarnation}-fence`);
+  assert.equal(completed?.kind,'fence');
+  await w.ensure();
+  const after=await w.foundation.registry.read(owner,owner);
+  assert.equal(after.generation,2);
+  assert.equal(after.lifecycleState,'ready');
+  assert.equal(after.desiredImageDigest,newImage);
+  assert.equal(after.recoveryPoint?.checkpointId,before.recoveryPoint!.checkpointId);
+  const diag:any=await w.diagnostics();
+  assert.equal(diag.ensure.ok,true);
+  assert.equal(diag.container.recoveredCheckpointId,before.recoveryPoint!.checkpointId);
+});
+
+test('a rebind whose start failed transiently resumes its start and moves to the pinned image',async()=>{
+  const {f,w,before}=await wedgedMain();
+  await w.foundation.registry.fence(owner,owner,before.generation,`rebind-${before.incarnation}-fence`);
+  const stalled=await w.foundation.registry.read(owner,owner);
+  assert.equal(stalled.lifecycleState,'stopped');
+  // The start fails once mid-rebind: the binding is left starting with
+  // this rebind's start op pending — the state a crash during start leaves.
+  f.fake.failNextStart();
+  await assert.rejects(w.ensure(),/START_TRANSIENT/);
+  const mid=await w.foundation.registry.read(owner,owner);
+  assert.equal(mid.lifecycleState,'starting');
+  // The retry resumes the same start op instead of fencing again, and
+  // lands on the new image with the checkpoint restored.
+  await w.ensure();
+  const after=await w.foundation.registry.read(owner,owner);
+  assert.equal(after.generation,2);
+  assert.equal(after.lifecycleState,'ready');
+  assert.equal(after.desiredImageDigest,newImage);
+  assert.equal(after.recoveryPoint?.checkpointId,before.recoveryPoint!.checkpointId);
+  const diag:any=await w.diagnostics();
+  assert.equal(diag.ensure.ok,true);
+  assert.equal(diag.container.recoveredCheckpointId,before.recoveryPoint!.checkpointId);
 });
 

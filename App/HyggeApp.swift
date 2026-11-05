@@ -38,6 +38,19 @@ struct HyggeApp: App {
                         }
                     }
                 }
+                // The workspace stays warm as long as the app is open: a
+                // beat every minute while foregrounded, on every screen —
+                // not just the feed/chat/browser polls. sendKeepaliveIfDue
+                // throttles to one a minute across all callers, so this
+                // never double-fires with the poll. The task restarts
+                // whenever the phase changes, so backgrounding cancels it.
+                .task(id: scenePhase) {
+                    guard scenePhase == .active else { return }
+                    while !Task.isCancelled {
+                        await store.sendKeepaliveIfDue()
+                        do { try await Task.sleep(for: .seconds(60)) } catch { return }
+                    }
+                }
                 // Magic links: hygge:// from the landing page, and the
                 // https universal link when associated domains open
                 // the app directly. The sign-in step consumes them.
