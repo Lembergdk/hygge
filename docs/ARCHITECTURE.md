@@ -107,6 +107,11 @@ sign in unattended within approved tasks:
   optional passwords); the user id on every route comes from the
   verified credential, never from request data. KMS key rotation
   and a dedicated vault-use audit log remain future hardening.
+- Account deletion (`DELETE auth/account`, session-authenticated)
+  wipes the user's sandbox (`deleteAll` plus the alarm) and then
+  deletes every D1 row for the user in one batch; job-site accounts,
+  shared skills, and aggregate counts are untouched, and Plus must be
+  cancelled in device settings since Apple owns the subscription.
 
 ## Multi-tenancy & privacy invariants
 
