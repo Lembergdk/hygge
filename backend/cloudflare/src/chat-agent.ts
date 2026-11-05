@@ -205,7 +205,12 @@ export class ChatAgent {
       const context=await this.services.context(turn.focus);
       const prompt=SYSTEM+`\nPending proposals and working memory index: ${JSON.stringify({proposals:this.store.proposals().map(p=>({id:p.id,title:p.title,status:p.status})),documents:this.store.documents().slice(-25).map(d=>({path:d.path,revision:d.revision,kind:d.kind,preview:d.kind==='note'?d.content.slice(0,400):undefined,provenance:d.provenance}))})}\nCurrent trusted state (JSON): ${JSON.stringify(context)}\nEarlier conversation summary: ${meta.summary||'(none)'}\n${round>=8?'Finish this turn using recorded results; disclose unfinished work.':''}`;
       let response;
-      try { response=await this.model.agentTurn({model:this.model.cfg.modelStrong,instructions:prompt,input:historyInput(this.store.events(meta.responseId?meta.cursor:meta.summaryThrough)),previousResponseId:meta.responseId,tools:round<8?CHAT_AGENT_TOOLS:[],onDelta:(text:string)=>emit({type:'reply-delta',text}),onResponseCreated:(id:string)=>this.store.db.put(`response:${id}`,{id})}); }
+      // One round's streamed text is working narration when the round ends
+      // in tool calls, and the reply when it ends in text. Buffer it and
+      // only stream the reply round into the message bubble: intermediate
+      // narration is not a message and must never appear there.
+      let roundText = "";
+      try { response=await this.model.agentTurn({model:this.model.cfg.modelStrong,instructions:prompt,input:historyInput(this.store.events(meta.responseId?meta.cursor:meta.summaryThrough)),previousResponseId:meta.responseId,tools:round<8?CHAT_AGENT_TOOLS:[],onDelta:(text:string)=>{roundText += text;},onResponseCreated:(id:string)=>this.store.db.put(`response:${id}`,{id})}); }
       catch(error:any){
         if((error.chainExpired||error.contextExceeded)&&meta.responseId&&recoveries++<1){
           // Preserve every event and retry from the durable checkpoint, never empty history.
@@ -228,6 +233,7 @@ export class ChatAgent {
         }
         this.store.db.put(`turn:${turn!.id}`,turn);
       });
+      if(!response.calls.length && roundText) emit({type:'reply-delta', text: roundText});
       if(turn.stage==='completed'){return {...this.store.state(),reply:turn.reply,replyMessageId:turn.replyMessageId};}
     }
     if(turn.pending){for(const call of turn.pending.calls)this.store.append('result',{callId:call.callId,result:{status:'deferred_budget',message:'Not executed.'}},`result:${call.callId}`);turn.pending=undefined;}
