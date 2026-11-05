@@ -405,11 +405,18 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       // A lost response can leave the effect 'dispatching' when the
       // uncertain-note itself never landed; the ledger resolve transition
       // accepts dispatching or uncertain with the same reviewed evidence.
-      if(!task || task.status!=='needsHuman' || effect.taskId!==taskId || !['uncertain','dispatching','prepared'].includes(effect.status) || !task.session_id)throw new Error('REVIEW_UNAVAILABLE');
-      const snapshot=await bridge.browser.snapshot(task.session_id);
+      if(!task || task.status!=='needsHuman' || effect.taskId!==taskId || !['uncertain','dispatching','prepared'].includes(effect.status))throw new Error('REVIEW_UNAVAILABLE');
+      const snapshot=task.session_id?await bridge.browser.snapshot(task.session_id):null;
       let payload:any;
       if(snapshot)payload={taskId,effectId,intentHash:effect.intentHash,status,reviewedBy:owner.userId,currentSnapshot:snapshot};
-      else{
+      else if(!task.session_id){
+        // No session was ever recorded — the task poll clears the id when
+        // the in-memory session map is lost (DO eviction), so a missing id
+        // is itself the session-gone evidence. Record it and let the
+        // reviewer decide, instead of leaving the task unresolvable.
+        const current=await foundation.registry.read(owner,owner);
+        payload={taskId,effectId,intentHash:effect.intentHash,status,reviewedBy:owner.userId,sessionGone:true,sessionId:null,effectIncarnation:effect.incarnation,currentIncarnation:current.incarnation};
+      }else{
         // The session is gone. If the effect belongs to an incarnation the
         // workspace no longer runs (a rebind replaced it), the outcome cannot
         // be checked in the browser — record that fact as the review evidence
