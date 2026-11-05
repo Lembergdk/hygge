@@ -73,7 +73,7 @@ struct BrowserLiveAttachment: View {
                         .allowsHitTesting(false)
                     HStack(spacing: 6) {
                         Circle().fill(session.connected ? HyggeTheme.sageDeep : HyggeTheme.secondary).frame(width: 7, height: 7)
-                        Text("\(store.siteName(id: task.siteID)) · \(waiting ? "Waiting for you" : session.status)").font(.caption)
+                        Text("\(store.siteName(id: task.siteID)) · \(waiting ? "Waiting for you" : session.status)").font(.caption).lineLimit(1)
                         Spacer()
                         Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption)
                     }.foregroundStyle(HyggeTheme.ink).padding(12)
