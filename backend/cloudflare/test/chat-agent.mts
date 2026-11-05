@@ -32,6 +32,18 @@ test('one reasoning loop consumes both native results before replying; duplicate
  await assert.rejects(turn(s,'different message',id),/MESSAGE_ID_CONFLICT/);
 });
 
+test('only the reply round streams into the bubble; tool-round narration is dropped',async()=>{
+ const events:any[]=[];
+ const s=setup((a,n)=>{
+   if(n===1){a.onDelta?.('Let me check your sites first. ');return calls('r1',[{name:'list_sites'}]);}
+   a.onDelta?.('Both setup drafts are ready.');
+   return answer('r2','Both setup drafts are ready.');
+ });
+ const result=await s.agent.turn({id:crypto.randomUUID(),generation:s.store.meta().generation,text:'Add both'},(e:any)=>events.push(e));
+ assert.deepEqual(events.filter((e)=>e.type==='reply-delta').map((e)=>e.text),['Both setup drafts are ready.']);
+ assert.equal(result.reply,'Both setup drafts are ready.');
+});
+
 test('persisted response pointer and full untruncated message survive a new agent instance',async()=>{
  const s=setup(()=>answer('previous','Which ones?'));await turn(s,'x'.repeat(12000));
  const next=setup(a=>{assert.equal(a.previousResponseId,'previous');assert.equal(a.input[0].content[0].text,'both');return answer('next');},s.storage);

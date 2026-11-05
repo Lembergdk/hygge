@@ -427,7 +427,7 @@ struct HomeFeedView: View {
             Color.clear
             VStack(alignment: .trailing, spacing: 0) {
                 ZStack(alignment: .top) {
-                    ConversationView(background: HyggeTheme.card, showsHeader: false)
+                    ConversationView(background: HyggeTheme.card, bubbleBackground: HyggeTheme.paper, showsHeader: false)
                     // Grabber: a wide hit strip across the top, not just
                     // the visible pill. It must outrank the transcript
                     // ScrollView directly underneath (plain .gesture
