@@ -3,7 +3,7 @@ import {structuredWorkspaceHash,verifyImageFiles} from './workspace-image-verifi
 import {createWorkspaceImageUpgrade,type ImageUpgrade} from './workspace-image-upgrade.ts';
 import {ownerKey} from './workspace-runtime.ts';
 import type { Env } from './env.ts';
-import type { WorkspaceIdentity, RuntimeLease } from './workspace-contract.ts';
+import type { WorkspaceIdentity, WorkspaceBinding, RuntimeLease } from './workspace-contract.ts';
 import type { WorkspaceSqlStorage } from './workspace-runtime.ts';
 import { createWorkspaceFoundation } from './workspace-foundation.ts';
 import { createContainerWorkspace, type WorkspaceContainer } from './workspace-container.ts';
@@ -46,19 +46,121 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     if(['environment','userId','workspaceId','runtimeId','incarnation','generation'].some(key=>(expected as any)[key]!==(current as any)[key]))throw new Error('STALE_MISSION_LINEAGE');
   }
   let foundation:ReturnType<typeof createWorkspaceFoundation>;
+  // A binding whose container is gone is rebound, not failed: fence the dead
+  // binding (gone or orphan evidence), move the image through the configured
+  // transition when one applies, then start fresh from the last verified
+  // checkpoint. Operation ids are derived from the dead incarnation so a
+  // retry after a partial rebind replays the same registry operations
+  // instead of starting a second fence/start. The rebind never resolves,
+  // bypasses, or hides an unresolved effect: the effects gate in
+  // assertWorkspaceReady still refuses the mission, and the effect still
+  // belongs to the review flow.
+  async function receiptForCheckpoint(checkpointId:string){
+    const prefix=`receipt/${ownerKey(owner)}/`;
+    const rows=[...storage.sql.exec('SELECT value FROM workspace_registry WHERE key LIKE ?',prefix+'%')] as {value:unknown}[];
+    for(const row of rows){const stored=JSON.parse(String(row.value)) as import('./workspace-runtime.ts').StoredWorkspaceReceipt;if(stored.receipt?.recoveryPoint?.checkpointId===checkpointId)return stored.receipt;}
+    return null;
+  }
+  // Proves the binding's checkpoint from R2 and returns the receipt the
+  // image selection needs, for a move to `target` through a configured
+  // transition. Shared by the rebind and its resume paths.
+  function verifyRepairReceipt(target:string){
+    return async (b:WorkspaceBinding)=>{
+      const receipt=await receiptForCheckpoint(b.recoveryPoint!.checkpointId);
+      if(!receipt)throw new Error('RECOVERY_POINT_REQUIRED');
+      const verified=await foundation.verifyDurability(receipt.receiptId);
+      const bytes=await objects.get(`hygge-workspaces/v1/${ownerKey(owner)}/manifests/${verified.recoveryPoint.manifestHash}`);
+      if(!bytes||await sha256(bytes)!==verified.recoveryPoint.manifestHash)throw new Error('MANIFEST_VERIFICATION_FAILED');
+      const manifest=JSON.parse(new TextDecoder().decode(bytes));
+      if(!transitions.some(p=>p.from===manifest.imageDigest&&p.to===target)||b.desiredImageDigest!==manifest.imageDigest)throw new Error('UNREVIEWED_IMAGE_TRANSITION');
+      return {receipt:verified,imageDigest:manifest.imageDigest};
+    };
+  }
+  // Moves the image (when the pinned image differs) and starts a fresh
+  // container from the checkpoint. Both steps are idempotent, so resuming
+  // after a partial rebind replays the same registry operations.
+  async function selectAndStart(fenced:WorkspaceBinding){
+    const target=env.HYGGE_WORKSPACE_IMAGE;
+    let current=fenced;
+    if(target&&target!==fenced.desiredImageDigest){
+      if(!fenced.recoveryPoint)throw new Error('RECOVERY_POINT_REQUIRED');
+      if(!transitions.some(p=>p.from===fenced.desiredImageDigest&&p.to===target))throw new Error('UNREVIEWED_IMAGE_TRANSITION');
+      current=await foundation.registry.selectImage(owner,owner,`rebind-${fenced.incarnation}-select`,fenced.revision,target,verifyRepairReceipt(target));
+    }
+    return foundation.registry.ensure(owner,owner,`rebind-${fenced.incarnation}-start`);
+  }
+  async function rebindDeadContainer(binding:WorkspaceBinding){
+    if(binding.generation>0&&!binding.recoveryPoint)throw new Error('RECOVERY_POINT_REQUIRED');
+    const target=env.HYGGE_WORKSPACE_IMAGE;
+    if(target&&target!==binding.desiredImageDigest&&!transitions.some(p=>p.from===binding.desiredImageDigest&&p.to===target))throw new Error('UNREVIEWED_IMAGE_TRANSITION');
+    const tag=`rebind-${binding.incarnation}`;
+    const fenced=await foundation.registry.fence(owner,owner,binding.generation,`${tag}-fence`);
+    return selectAndStart(fenced);
+  }
+  // Resumes a rebind that stopped part-way (a failed fence, a crash, a
+  // transient start failure). The binding's state is the record: a pending
+  // fence replays, a stopped binding continues at select/start, a starting
+  // binding retries its start. A stopped binding whose fence was not this
+  // rebind's (an image upgrade's, for example) is never hijacked.
+  async function resumeRebind(binding:WorkspaceBinding){
+    if(binding.lifecycleState==='fencing')return rebindDeadContainer(binding);
+    if(binding.lifecycleState==='stopped'){
+      const fenced=await foundation.registry.completedOperation(owner,owner,`rebind-${binding.incarnation}-fence`);
+      if(!fenced||fenced.kind!=='fence')throw new Error('WORKSPACE_NOT_READY');
+      return selectAndStart(binding);
+    }
+    if(binding.lifecycleState==='starting'){
+      const restarted=await foundation.registry.ensure(owner,owner,'initial_start');
+      if(restarted.lifecycleState==='ready')return restarted;
+      return foundation.registry.ensure(owner,owner,`rebind-${binding.incarnation}-start`);
+    }
+    throw new Error('WORKSPACE_NOT_READY');
+  }
   // The registry is authoritative even when the container/DO process restarts.
   async function ensure() {
     if(foundation.persistence.get('image_upgrade_lock','active'))throw Error('WORKSPACE_IMAGE_UPGRADE_PENDING');
     await (initialized ??= initialize().catch(error=>{initialized=undefined;throw error;}));
     if(foundation.persistence.get('image_upgrade_lock','active'))throw Error('WORKSPACE_IMAGE_UPGRADE_PENDING');
-    const binding=await foundation.registry.ensure(owner,owner,'initial_start');
+    let binding;
+    try{ binding=await foundation.registry.ensure(owner,owner,'initial_start'); }
+    catch(error){
+      if(!(error instanceof Error)||error.message!=='LIFECYCLE_OPERATION_PENDING')throw error;
+      binding=await foundation.registry.read(owner,owner);
+    }
+    // 'initial_start' completed at provisioning, so a later call replays it
+    // and returns the current binding whatever its state. A binding that is
+    // not ready is a rebind that stopped part-way; resume it from the same
+    // deterministic operation ids instead of failing it.
+    if(binding.lifecycleState!=='ready')binding=await resumeRebind(binding);
     if(foundation.persistence.get('image_upgrade_lock','active'))throw Error('WORKSPACE_IMAGE_UPGRADE_PENDING');
     if (binding.lifecycleState!=='ready') throw new Error('WORKSPACE_NOT_READY');
-    const lease=await foundation.registry.readLease(owner,owner);
-    await bridge.attach(binding);
+    let lease=await foundation.registry.readLease(owner,owner);
+    let currentBinding=binding;
+    try{await bridge.attach(binding);}
+    catch(error){
+      if(!(error instanceof Error)||error.message!=='EXACT_INCARNATION_MISMATCH')throw error;
+      // The container is gone (or an orphan stands in its place): rebind
+      // from the last verified checkpoint and attach to the fresh container.
+      currentBinding=await rebindDeadContainer(binding);
+      await bridge.attach(currentBinding);
+      lease=await foundation.registry.readLease(owner,owner);
+    }
     if(foundation.persistence.get('image_upgrade_lock','active'))throw Error('WORKSPACE_IMAGE_UPGRADE_PENDING');
-    if(Date.parse(lease.expiresAt)<=Date.now())await foundation.registry.reattachVerified(owner,owner,binding.revision,b=>bridge.attach(b));
+    if(Date.parse(lease.expiresAt)<=Date.now())await foundation.registry.reattachVerified(owner,owner,currentBinding.revision,b=>bridge.attach(b));
     else if (Date.parse(lease.expiresAt)-Date.now()<60_000) await foundation.registry.heartbeat(owner,lease);
+  }
+  // Starts the workspace when the app opens (rebinding a dead container)
+  // and renews the container lease while the app is foregrounded. Best
+  // effort: a failure never blocks the UI; the mission path retries the
+  // same start as a fallback.
+  async function keepalive(){
+    const before=await foundation.registry.read(owner,owner).catch(()=>null);
+    await ensure();
+    const binding=await foundation.registry.read(owner,owner);
+    const rebound=!!before&&before.incarnation!==binding.incarnation;
+    await bridge.refreshLease();
+    const lease=await foundation.registry.readLease(owner,owner);
+    return {ok:true,rebound,incarnation:binding.incarnation,generation:binding.generation,leaseExpiresAt:lease.expiresAt,recoveryPoint:binding.recoveryPoint?{checkpointId:binding.recoveryPoint.checkpointId,sequence:binding.recoveryPoint.sequence}:null};
   }
   const imagePolicy={allowedImages,allowIncompleteRestoreRetry:transitions.length>0,authorizeImageRestore:(binding:import('./workspace-contract.ts').WorkspaceBinding,sourceImage:string)=>foundation.registry.assertCompatibleRestore(owner,binding,sourceImage),
     fenceJournal:{get:(key:string)=>foundation.persistence.get('image_fence',key)?.value,put:(key:string,value:any)=>{const old=foundation.persistence.get('image_fence',key);foundation.persistence.put('image_fence',key,old?.revision??0,value);}}};
@@ -154,7 +256,14 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     },
     verifyReviewedOutcome:async input=>{
       const proof=foundation.persistence.get<any>('runner_evidence',input.evidenceRef)?.value;
-      return !!proof && proof.reviewedBy===owner.userId && proof.taskId===input.taskId && proof.effectId===input.effectId && proof.status===input.status && !!proof.currentSnapshot;
+      // A live snapshot proves the outcome was checked in the browser. A
+      // session-gone marker proves the opposite: the session's container is
+      // gone (the effect's incarnation no longer runs) and the reviewer
+      // decided knowing the outcome cannot be checked. Either one is
+      // evidence; neither is an inference.
+      const live=!!proof?.currentSnapshot;
+      const gone=!!proof?.sessionGone&&!!proof?.effectIncarnation&&!!proof?.currentIncarnation&&proof.effectIncarnation!==proof.currentIncarnation;
+      return !!proof && proof.reviewedBy===owner.userId && proof.taskId===input.taskId && proof.effectId===input.effectId && proof.status===input.status && (live||gone);
     },
   });
   // This private bridge can work under the maintenance lock; normal runtime RPCs
@@ -226,7 +335,7 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
         }finally{lineagePins.delete(pin);}
       });
     }
-  return {browser:bridge.browser,foundation,skills,runner,ensure,
+  return {browser:bridge.browser,foundation,skills,runner,ensure,keepalive,
     imageUpgrade:{run:async(input:{operationId:string;expectedGeneration:number;targetImage:string})=>{if(!imageReleaseEnabled(env)||!transitions.length)throw Error('IMAGE_UPGRADE_DISABLED');if(!transitions.some(p=>p.to===input.targetImage))throw Error('UNREVIEWED_IMAGE_TRANSITION');const account=await env.DB.prepare('SELECT contact_email FROM users WHERE id=?').bind(owner.userId).first<{contact_email:string}>();if(!imageReleaseOwnerAllowed(env,input.targetImage,account?.contact_email??''))throw Error('IMAGE_UPGRADE_NOT_AUTHORIZED');return images.run(input);},
       locked:()=>!!foundation.persistence.get('image_upgrade_lock','active'),
       abort:(id:string)=>{if(!imageReleaseEnabled(env))throw Error('IMAGE_UPGRADE_DISABLED');return images.abort(id);},
@@ -298,9 +407,19 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       // accepts dispatching or uncertain with the same reviewed evidence.
       if(!task || task.status!=='needsHuman' || effect.taskId!==taskId || !['uncertain','dispatching','prepared'].includes(effect.status) || !task.session_id)throw new Error('REVIEW_UNAVAILABLE');
       const snapshot=await bridge.browser.snapshot(task.session_id);
-      if(!snapshot)throw new Error('CURRENT_PAGE_REQUIRED');
+      let payload:any;
+      if(snapshot)payload={taskId,effectId,intentHash:effect.intentHash,status,reviewedBy:owner.userId,currentSnapshot:snapshot};
+      else{
+        // The session is gone. If the effect belongs to an incarnation the
+        // workspace no longer runs (a rebind replaced it), the outcome cannot
+        // be checked in the browser — record that fact as the review evidence
+        // and let the reviewer decide with it. A session that vanished inside
+        // the live container still needs a live page, so it keeps refusing.
+        const current=await foundation.registry.read(owner,owner);
+        if(effect.incarnation===current.incarnation)throw new Error('CURRENT_PAGE_REQUIRED');
+        payload={taskId,effectId,intentHash:effect.intentHash,status,reviewedBy:owner.userId,sessionGone:true,sessionId:task.session_id,effectIncarnation:effect.incarnation,currentIncarnation:current.incarnation};
+      }
       const ref=`review_${crypto.randomUUID().replaceAll('-','')}`;
-      const payload={taskId,effectId,intentHash:effect.intentHash,status,reviewedBy:owner.userId,currentSnapshot:snapshot};
       foundation.persistence.storage.transactionSync(()=>foundation.persistence.put('runner_evidence',ref,0,payload));
       await save({task,runId:effect.runId,reason:'pause',evidence:[{ref,payload}],requiresBrowserFreeze:true});
       return runner.reconcile({taskId,effectId,status,evidenceRef:ref});
@@ -311,8 +430,10 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
      * retrying anything. Every section is best-effort: a failed section
      * reports its error instead of failing the whole read, so a wedged
      * workspace still shows its state. Attaching the container (ensure) is
-     * the same call /sandbox/verify already makes; it writes nothing to
-     * the effect ledger. */
+     * the same call /sandbox/verify already makes; ensure now also rebinds a
+     * dead container (fence + start from the checkpoint), so opening
+     * diagnostics can warm a wedged workspace. It still resolves no effect
+     * and dispatches nothing. */
     async diagnostics() {
       const startedAt = Date.now();
       const errorOf = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -325,7 +446,11 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
           out.container = { ok: true, initialized: s.initialized, frozen: s.frozen, humanControlled: s.humanControlled, filesystemRevision: s.filesystemRevision, browserProfileRevision: s.browserProfileRevision, recoveredCheckpointId: s.recoveredCheckpointId };
         } catch (error) { out.container = { ok: false, error: errorOf(error) }; }
       } else out.container = { ok: false, error: 'ensure failed' };
-      try { const b = await foundation.registry.read(owner, owner); out.binding = { ok: true, lifecycleState: b.lifecycleState, incarnation: b.incarnation, generation: b.generation, desiredImageDigest: b.desiredImageDigest }; }
+      try {
+        const info = await options.container.inspect();
+        out.containerInspect = { ok: true, present: !!info, image: info?.image ?? null, incarnation: info?.labels?.incarnation ?? null, generation: info?.labels?.generation ?? null };
+      } catch (error) { out.containerInspect = { ok: false, error: errorOf(error) }; }
+      try { const b = await foundation.registry.read(owner, owner); out.binding = { ok: true, lifecycleState: b.lifecycleState, incarnation: b.incarnation, generation: b.generation, desiredImageDigest: b.desiredImageDigest, recoveryPoint: b.recoveryPoint ? { checkpointId: b.recoveryPoint.checkpointId, sequence: b.recoveryPoint.sequence } : null }; }
       catch (error) { out.binding = { ok: false, error: errorOf(error) }; }
       try { const l = await foundation.registry.readLease(owner, owner); out.lease = { ok: true, incarnation: l.incarnation, generation: l.generation, leaseId: l.leaseId, expiresAt: l.expiresAt }; }
       catch (error) { out.lease = { ok: false, error: errorOf(error) }; }
