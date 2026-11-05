@@ -78,9 +78,32 @@ export function applyHelpReply(task: any, body: any): string | null {
 
 export function mobileTask(task: any) {
   if (!task.mobile_task) {
-    if (!task._fromSnapshot || !task.help) return null;
-    return { ...task, backendTaskID: null,
-      createdAt: typeof task.createdAt === "string" ? (Date.parse(task.createdAt) / 1000 - 978307200) : task.createdAt };
+    if (task._fromSnapshot && task.help) {
+      return { ...task, backendTaskID: null,
+        createdAt: typeof task.createdAt === "string" ? (Date.parse(task.createdAt) / 1000 - 978307200) : task.createdAt };
+    }
+    // A live task that lost its mobile projection is invisible to the
+    // app — no feed card, no conversation, no review — even when it is
+    // stuck waiting on the user (Apple Fiverr, Nov 5: needsHuman with
+    // an uncertain effect, no mobile_task, no _fromSnapshot). Synthesize
+    // a projection from the task's own fields so it can be reviewed.
+    // Only a real site task asking the user something (a help, or a
+    // pending effect); internal work (probes, fixtures, document saves)
+    // has neither and stays hidden.
+    const host = siteHost(task.target_url);
+    if (!host || task.web_probe || typeof task.id !== "string"
+        || !["needsHuman", "failed"].includes(task.status)
+        || !["discover", "signup", "buildProfile", "apply", "message", "bookCalendar"].includes(task.kind)
+        || (!task.help && !task.workspace_pending_effect_id)) return null;
+    const createdAt = typeof task.createdAt === "string" ? (Date.parse(task.createdAt) / 1000 - 978307200)
+      : (typeof task.createdAt === "number" ? task.createdAt : Date.now() / 1000 - 978307200);
+    return { id: task.id, kind: task.kind, siteID: host, targetURLString: task.target_url,
+      goal: task.goal ?? "", title: task.title ?? host, draftedPayload: task.drafted_payload ?? {},
+      browserTrace: task.browser_trace ?? [], informationRequests: task.information_requests ?? [],
+      status: task.status === "awaiting_approval" ? "awaitingApproval" : task.status,
+      log: task.log ?? [], createdAt, backendTaskID: task.id,
+      browserSessionID: task.session_id ?? null, help: task.help ?? null, pendingReply: null,
+      pendingEffectID: task.workspace_pending_effect_id ?? null };
   }
   return { ...task.mobile_task, backendTaskID: task.id, status: task.status === "awaiting_approval" ? "awaitingApproval" : task.status,
     draftedPayload: task.drafted_payload, browserSessionID: task.session_id ?? null,
@@ -89,6 +112,15 @@ export function mobileTask(task: any) {
     // The step awaiting review, so the app can ask the user whether it
     // happened on the site and reconcile it. Null when nothing is stuck.
     pendingEffectID: task.workspace_pending_effect_id ?? null };
+}
+
+function siteHost(targetUrl: unknown): string | null {
+  try {
+    const u = new URL(String(targetUrl));
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    const host = u.hostname.replace(/^www\./, "");
+    return host && host !== "invalid.example" ? host : null;
+  } catch { return null; }
 }
 
 export function canResumeWithInboxCode(task: any): boolean {
