@@ -305,6 +305,50 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       await save({task,runId:effect.runId,reason:'pause',evidence:[{ref,payload}],requiresBrowserFreeze:true});
       return runner.reconcile({taskId,effectId,status,evidenceRef:ref});
     },
+    /** Read-only workspace diagnostics for the owner route. Reports the
+     * live gate state (container frozen/held, unresolved effects, admission,
+     * binding/lease, recent tasks) without dispatching, resolving, or
+     * retrying anything. Every section is best-effort: a failed section
+     * reports its error instead of failing the whole read, so a wedged
+     * workspace still shows its state. Attaching the container (ensure) is
+     * the same call /sandbox/verify already makes; it writes nothing to
+     * the effect ledger. */
+    async diagnostics() {
+      const startedAt = Date.now();
+      const errorOf = (error: unknown) => error instanceof Error ? error.message : String(error);
+      const out: any = { mode: 'retained-v2', checkedAt: new Date().toISOString(), workspaceId: owner.workspaceId };
+      try { await ensure(); out.ensure = { ok: true, ms: Date.now() - startedAt }; }
+      catch (error) { out.ensure = { ok: false, error: errorOf(error) }; }
+      if (out.ensure.ok) {
+        try {
+          const s = await bridge.status();
+          out.container = { ok: true, initialized: s.initialized, frozen: s.frozen, humanControlled: s.humanControlled, filesystemRevision: s.filesystemRevision, browserProfileRevision: s.browserProfileRevision, recoveredCheckpointId: s.recoveredCheckpointId };
+        } catch (error) { out.container = { ok: false, error: errorOf(error) }; }
+      } else out.container = { ok: false, error: 'ensure failed' };
+      try { const b = await foundation.registry.read(owner, owner); out.binding = { ok: true, lifecycleState: b.lifecycleState, incarnation: b.incarnation, generation: b.generation, desiredImageDigest: b.desiredImageDigest }; }
+      catch (error) { out.binding = { ok: false, error: errorOf(error) }; }
+      try { const l = await foundation.registry.readLease(owner, owner); out.lease = { ok: true, incarnation: l.incarnation, generation: l.generation, leaseId: l.leaseId, expiresAt: l.expiresAt }; }
+      catch (error) { out.lease = { ok: false, error: errorOf(error) }; }
+      out.admission = { runnerOwnerActive: !!foundation.persistence.get('runner_owner', 'active'), lineagePins: lineagePins.size };
+      const effects = foundation.persistence.list<any>('effect');
+      const counts: Record<string, number> = {};
+      for (const e of effects) counts[e.value.status] = (counts[e.value.status] ?? 0) + 1;
+      const unresolved = effects.filter(e => ['prepared', 'dispatching', 'uncertain'].includes(e.value.status))
+        .map(e => ({ effectId: e.value.effectId, taskId: e.value.taskId, runId: e.value.runId, status: e.value.status, revision: e.revision, incarnation: e.value.incarnation, generation: e.value.generation }));
+      out.effects = { counts, unresolved };
+      try {
+        const rows = [...storage.sql.exec('SELECT task FROM tasks ORDER BY created_at DESC LIMIT 20')] as { task: unknown }[];
+        out.tasks = rows.map(r => { const t: any = JSON.parse(String(r.task)); return { id: t.id, kind: t.kind, status: t.status, sessionId: t.session_id ?? null, helpKind: t.help?.kind ?? null }; });
+      } catch (error) { out.tasks = { ok: false, error: errorOf(error) }; }
+      const reasons: string[] = [];
+      if (out.container.ok === true && out.container.frozen) reasons.push('container frozen');
+      if (out.container.ok === true && out.container.humanControlled) reasons.push('browser held by human');
+      if (unresolved.length) reasons.push(`${unresolved.length} unresolved effect(s): ${unresolved.map(e => e.effectId).join(',')}`);
+      out.wouldBlockNewMission = reasons.length > 0 ? true : (out.container.ok === true ? false : null);
+      out.blockReasons = reasons;
+      out.ms = Date.now() - startedAt;
+      return out;
+    },
     /** Renew only while a user mission/live connection is active. Expiry never grants a replacement. */
     async run(task:any,mission:Parameters<typeof runner.run>[0]['mission'],resume=false) {
       runner.waiting(task.id);
