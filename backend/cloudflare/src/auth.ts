@@ -41,7 +41,6 @@ async function authBody(request: Request): Promise<Record<string, unknown>> {
   } catch { return {}; }
 }
 
-export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, then sign in again
 export const MAGIC_LINK_TTL_MS = 15 * 60 * 1000; // 15 minutes
 export const MAGIC_LINK_MAX_SENDS_PER_HOUR = 5;
 export const MAGIC_LINK_MAX_REQUESTS_PER_IP_PER_HOUR = 20;
@@ -205,7 +204,7 @@ export interface AuthSessionRow {
   userId: string;
   tokenHash: string;
   createdAt: string;
-  expiresAt: string;
+  expiresAt: string | null;
   revokedAt: string | null;
 }
 
@@ -406,7 +405,7 @@ export function d1AuthDb(db: D1Database): AuthDb {
         userId: String(r.user_id),
         tokenHash: String(r.token_hash),
         createdAt: String(r.created_at),
-        expiresAt: String(r.expires_at),
+        expiresAt: r.expires_at == null ? null : String(r.expires_at),
         revokedAt: r.revoked_at ? String(r.revoked_at) : null,
       };
     },
@@ -481,7 +480,7 @@ export function d1AuthDb(db: D1Database): AuthDb {
 
 export interface IssuedSession {
   token: string;
-  expiresAt: string;
+  expiresAt: string | null;
   userId: string;
 }
 
@@ -489,7 +488,8 @@ export async function issueSession(db: AuthDb, userId: string, nowMs = Date.now(
   passwordMethod?: { id: string; hash: string }): Promise<IssuedSession> {
   const token = b64url(crypto.getRandomValues(new Uint8Array(32)));
   const createdAt = new Date(nowMs).toISOString();
-  const expiresAt = new Date(nowMs + SESSION_TTL_MS).toISOString();
+  // Sessions never expire: sign-ins persist until sign-out or account closure.
+  const expiresAt: string | null = null;
   const row = {
     id: crypto.randomUUID(),
     userId,
@@ -508,7 +508,7 @@ export async function resolveSessionUserId(db: AuthDb, token: string, nowMs = Da
   if (!token) return null;
   const row = await db.findSessionByHash(await sha256Hex(token));
   if (!row || row.revokedAt) return null;
-  if (Date.parse(row.expiresAt) <= nowMs) return null;
+  if (row.expiresAt && Date.parse(row.expiresAt) <= nowMs) return null;
   return row.userId;
 }
 
@@ -950,7 +950,7 @@ export async function setEmailPassword(db: AuthDb, token: string, methodId: stri
   nowMs = Date.now()): Promise<PublicMethod[]> {
   const sessionHash = await sha256Hex(token);
   const session = await db.findSessionByHash(sessionHash);
-  if (!session || session.revokedAt || Date.parse(session.expiresAt) <= nowMs) {
+  if (!session || session.revokedAt || (session.expiresAt && Date.parse(session.expiresAt) <= nowMs)) {
     throw new AuthProblem(401, "unauthorized", "Sign in first.");
   }
   const method = await db.getMethodById(methodId);

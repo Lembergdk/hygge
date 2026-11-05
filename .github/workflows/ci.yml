@@ -120,6 +120,9 @@ jobs:
       - name: Ensure shared skills V2 tables
         if: steps.current-main.outputs.current == 'true'
         run: npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --file migrations/0008_shared_skills_v2.sql
+      - name: Ensure persistent sessions
+        if: steps.current-main.outputs.current == 'true'
+        run: npx wrangler d1 execute hygge-staging -c wrangler.staging.jsonc --remote --file migrations/0010_persistent_sessions.sql
       - name: Deploy staging
         if: steps.current-main.outputs.current == 'true'
         id: deployment
@@ -166,6 +169,8 @@ jobs:
         run: npx wrangler r2 bucket info hygge-workspace-checkpoints-production >/dev/null 2>&1 || npx wrangler r2 bucket create hygge-workspace-checkpoints-production
       - name: Ensure shared skills V2 tables
         run: npx wrangler d1 execute hygge-production -c wrangler.production.jsonc --remote --file migrations/0008_shared_skills_v2.sql
+      - name: Ensure persistent sessions
+        run: npx wrangler d1 execute hygge-production -c wrangler.production.jsonc --remote --file migrations/0010_persistent_sessions.sql
       - name: Deploy production
         run: npx wrangler deploy -c wrangler.production.jsonc
       - name: Health check
