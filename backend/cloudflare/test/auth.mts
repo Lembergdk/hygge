@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   AuthProblem, requestPasswordConfirmation, confirmEmailPassword, type PasswordConfirmationRow,
-  passwordSignIn, setEmailPassword, issueSession, PASSWORD_REAUTH_MS, publicMethod,
+  passwordSignIn, setEmailPassword, issueSession, deleteUserAccount, PASSWORD_REAUTH_MS, publicMethod,
   MAGIC_LINK_MAX_SENDS_PER_HOUR,
   MAGIC_LINK_TTL_MS,
   appleAppSiteAssociation,
@@ -52,6 +52,18 @@ class MemDb {
 
   async createUser(u: { id: string; contactEmail: string | null; displayName: string | null }) {
     this.users.set(u.id, u);
+  }
+  async deleteAccount(userId: string) {
+    // The abuse ledger (hashed keys) is covered by the D1 test; this fake
+    // does not model it.
+    const emails = new Set([...this.methods.values()].filter((m) => m.userId === userId).map((m) => m.email).filter((e): e is string => !!e));
+    const user = this.users.get(userId);
+    if (user?.contactEmail) emails.add(user.contactEmail);
+    for (const [key, m] of this.methods) if (m.userId === userId) this.methods.delete(key);
+    for (const [key, s] of this.sessions) if (s.userId === userId) this.sessions.delete(key);
+    for (const [key, r] of this.magic) if (emails.has(r.email)) this.magic.delete(key);
+    for (const [key, c] of this.confirmations) if (c.userId === userId) this.confirmations.delete(key);
+    this.users.delete(userId);
   }
   async findAppleMethod(sub: string) {
     return [...this.methods.values()].find((m) => m.appleSub === sub) ?? null;
@@ -752,4 +764,25 @@ test("sessions never expire", async () => {
   const session = await issueSession(db, "owner", T0);
   assert.equal(session.expiresAt, null);
   assert.equal(await resolveSessionUserId(db, session.token, T0 + 365 * 24 * 60 * 60 * 1000), "owner");
+});
+
+test("account deletion wipes the sandbox then removes every auth row", async () => {
+  const db = new MemDb();
+  await db.createUser({ id: "owner", contactEmail: "owner@example.com", displayName: null });
+  await db.createUser({ id: "other", contactEmail: "other@example.com", displayName: null });
+  await db.addMethod({ id: "m1", userId: "owner", method: "email", email: "owner@example.com", appleSub: null, appleEmail: null, passwordHash: null, emailVerified: true });
+  await db.addMethod({ id: "m2", userId: "other", method: "email", email: "other@example.com", appleSub: null, appleEmail: null, passwordHash: null, emailVerified: true });
+  const session = await issueSession(db, "owner", T0);
+  const otherSession = await issueSession(db, "other", T0);
+  let wiped = 0;
+  await deleteUserAccount(db, "owner", async () => { wiped++; });
+  assert.equal(wiped, 1);
+  assert.equal(await resolveSessionUserId(db, session.token, T0 + 1000), null);
+  assert.equal(await resolveSessionUserId(db, otherSession.token, T0 + 1000), "other");
+  assert.deepEqual(await db.listMethods("owner"), []);
+  assert.equal(await db.findEmailMethod("owner@example.com"), null);
+  assert.equal((await db.findEmailMethod("other@example.com"))?.userId, "other");
+  // A second delete is a safe no-op for already-removed rows.
+  await deleteUserAccount(db, "owner", async () => { wiped++; });
+  assert.equal(wiped, 2);
 });

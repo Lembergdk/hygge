@@ -6,6 +6,8 @@ struct ProfileHubView: View {
     @Environment(\.openURL) private var openURL
     @State private var signingOut = false
     @State private var confirmSignOut = false
+    @State private var deletingAccount = false
+    @State private var confirmDeleteAccount = false
     @State private var showPlus = false
 
     var body: some View {
@@ -48,6 +50,10 @@ struct ProfileHubView: View {
                         Button { confirmSignOut = true } label: {
                             SettingsRow(title: signingOut ? "Signing out…" : "Sign out", icon: "rectangle.portrait.and.arrow.right", destructive: true, chevron: false)
                         }.disabled(signingOut)
+                        Divider()
+                        Button { confirmDeleteAccount = true } label: {
+                            SettingsRow(title: deletingAccount ? "Deleting…" : "Delete account", icon: "trash", destructive: true, chevron: false)
+                        }.disabled(deletingAccount || signingOut)
                     }
                 }
                 .padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 24)
@@ -61,6 +67,17 @@ struct ProfileHubView: View {
                     signingOut = true
                     Task { await store.signOut(); dismiss() }
                 }
+            }
+            .confirmationDialog("Delete your Hygge account?", isPresented: $confirmDeleteAccount, titleVisibility: .visible) {
+                Button("Delete account", role: .destructive) {
+                    deletingAccount = true
+                    Task {
+                        if await store.deleteAccount() { dismiss() } else { deletingAccount = false }
+                    }
+                }
+                Button("Keep my account", role: .cancel) {}
+            } message: {
+                Text("This permanently deletes your profile, bookings, messages, and job-site sign-ins from Hygge. Your accounts on the job sites themselves stay untouched. Cancel Hygge Plus separately in your device settings to stop renewal.")
             }
             .task { await store.syncProfilePhoto(); await store.refreshSessionProfiles(); await store.refreshHyggeEmail() }
             .sheet(isPresented: $showPlus) {
