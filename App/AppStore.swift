@@ -832,7 +832,8 @@ final class AppStore {
         if tasks[index].help == nil {
             let task = tasks[index]
             tasks[index].help = TaskHelp(kind: task.status == .failed ? .recovery : task.informationRequests.isEmpty ? .verification : .information,
-                message: task.status == .failed ? "I couldn't finish this step. Let's check where it stopped before continuing."
+                message: task.pendingEffectID != nil && task.status == .failed ? "I couldn't confirm whether the last step went through. Did it happen on the site?"
+                    : task.status == .failed ? "I couldn't finish this step. Let's check where it stopped before continuing."
                     : task.informationRequests.isEmpty ? "This site has a check I couldn't finish. Your progress is saved."
                     : "I need a detail to continue.",
                 questions: task.informationRequests.map { .init(text: $0) },
@@ -878,6 +879,31 @@ final class AppStore {
         await approveAndRun(taskID: taskID)
     }
 
+    /// Review the outcome of a step whose browser session is gone: the
+    /// user says whether it happened on the site, and that review clears
+    /// the stuck step. The task comes back still waiting, with a new help
+    /// request — the next tap ("Check and continue") resumes it.
+    func reviewTask(taskID: UUID, helpID: UUID, effectID: String, confirmed: Bool) async {
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }),
+              tasks[index].help?.id == helpID,
+              let backendID = tasks[index].backendTaskID else { return }
+        appendChat(fromAgent: false, text: confirmed ? "It worked." : "It didn't work.")
+        do {
+            _ = try await backend.reconcileTask(id: backendID, effectID: effectID,
+                                                status: confirmed ? "confirmed" : "not_applied")
+        } catch {
+            appendChat(fromAgent: true, text: "I couldn't save that. Please try again.")
+            return
+        }
+        if let remote = try? await backend.setupTasks(),
+           let current = remote.first(where: { $0.id == taskID }),
+           let currentIndex = tasks.firstIndex(where: { $0.id == taskID }) {
+            tasks[currentIndex] = current
+        }
+        surfaceTaskHelp(taskID: taskID)
+        save()
+    }
+
     func declineTaskHelp(taskID: UUID, helpID: UUID, choiceLabel: String? = nil) async {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].help?.id == helpID else { return }
         if let id = tasks[index].backendTaskID {
@@ -895,6 +921,19 @@ final class AppStore {
 
     @ObservationIgnored private var browserResumeIDs: Set<UUID> = []
     @ObservationIgnored private var browserSessions: [String: LiveBrowserSession] = [:]
+    /// Last warm signal sent, so the poll loops in several views don't
+    /// each fire one: at most one keepalive a minute across all of them.
+    @ObservationIgnored private var lastKeepaliveAt: Date?
+
+    /// The workspace stays warm while the app is open: a keepalive on
+    /// foreground pull and at most once a minute from the task poll.
+    /// Best-effort and idempotent; a missed beat costs nothing because
+    /// the next call rebinds a dead container instead of failing.
+    func sendKeepaliveIfDue() async {
+        if let last = lastKeepaliveAt, Date().timeIntervalSince(last) < 50 { return }
+        lastKeepaliveAt = Date()
+        await backend.keepWorkspaceWarm()
+    }
     func browserSession(_ id: String) -> LiveBrowserSession {
         if let session = browserSessions[id], session.accountToken == backend.apiToken { return session }
         let session = LiveBrowserSession(id: id, backend: backend)
@@ -904,6 +943,7 @@ final class AppStore {
     /// Read running session IDs without overwriting a locally owned task request.
     func observeBrowserTasks() async {
         while !Task.isCancelled {
+            await sendKeepaliveIfDue()
             let token = backend.apiToken
             if let remote = try? await backend.setupTasks(), token == backend.apiToken {
                 for task in remote {
@@ -2050,6 +2090,10 @@ final class AppStore {
     @discardableResult
     func pullFromServer(reconcilingConversation: Bool = false) async -> Bool {
         guard isBackendFirst, !isSyncing else { return false }
+        // Opening the app starts the workspace; the poll loop keeps it
+        // warm afterwards. Fire-and-forget so a cold start never slows
+        // the pull itself.
+        Task { await sendKeepaliveIfDue() }
         isSyncing = true
         defer { isSyncing = false }
         if pendingProfileEdit && !conversationNeedsReconciliation { await pushStateNow() }
