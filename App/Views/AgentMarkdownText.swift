@@ -114,7 +114,7 @@ struct AgentMarkdownText: View {
         return Text(string)
     }
 
-    private func bodyText(_ string: String) -> Text {
+    private func bodyText(_ string: String) -> some View {
         inline(string).font(.body).foregroundStyle(HyggeTheme.ink).lineSpacing(3)
     }
 
