@@ -612,6 +612,15 @@ final class AppStore {
         lastMessage = "Signed out. Your Hygge account is still there whenever you sign back in."
     }
 
+    /// Deletes the account server-side, then runs the same local wipe as
+    /// sign-out. Returns false when the server request fails, leaving the
+    /// app signed in so the user can retry.
+    func deleteAccount() async -> Bool {
+        guard await backend.deleteAccount() else { return false }
+        await signOut()
+        return true
+    }
+
     // MARK: - Onboarding
 
     func completeOnboarding(profile: EarningsProfile) {
