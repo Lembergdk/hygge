@@ -89,7 +89,7 @@ class MemDb {
     const m = this.methods.get(method.id);
     const session = this.sessions.get(sessionHash);
     if (!m || m.passwordHash !== method.passwordHash || !session || session.revokedAt ||
-      Date.parse(session.expiresAt) <= nowMs || nowMs - Date.parse(session.createdAt) > PASSWORD_REAUTH_MS) return false;
+      (session.expiresAt && Date.parse(session.expiresAt) <= nowMs) || nowMs - Date.parse(session.createdAt) > PASSWORD_REAUTH_MS) return false;
     m.passwordHash = hash;
     for (const s of this.sessions.values()) {
       if (s.userId === method.userId && s.tokenHash !== sessionHash) s.revokedAt = new Date(nowMs).toISOString();
@@ -745,4 +745,11 @@ test("confirmation HTTP routes enforce auth, keep GET scanner-safe and preserve 
   assert.match(await landing.text(), /action=password/);
   assert.equal(f.db.methods.get("email-method")!.passwordHash, null);
   assert.equal((await handleAuthRequest(request("methods/password/confirm", { token: f.token() }), env, f.db)).status, 200);
+});
+
+test("sessions never expire", async () => {
+  const db = new MemDb();
+  const session = await issueSession(db, "owner", T0);
+  assert.equal(session.expiresAt, null);
+  assert.equal(await resolveSessionUserId(db, session.token, T0 + 365 * 24 * 60 * 60 * 1000), "owner");
 });
