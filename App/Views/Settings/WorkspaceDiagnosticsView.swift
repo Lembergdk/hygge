@@ -286,6 +286,7 @@ struct DiagnosticsSection: Decodable {
 
 struct ContainerSection: Decodable {
     var ok: Bool = false
+    var error: String?
     var initialized: Bool?
     var frozen: Bool?
     var humanControlled: Bool?
@@ -296,6 +297,7 @@ struct ContainerSection: Decodable {
 
 struct BindingSection: Decodable {
     var ok: Bool = false
+    var error: String?
     var lifecycleState: String?
     var incarnation: String?
     var generation: Int?
