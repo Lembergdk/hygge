@@ -45,6 +45,12 @@ struct HomeFeedView: View {
     @State private var updateGate = FeedUpdateGate()
     @State private var isAtTop = true
     @State private var scrollAnchor: String?
+    /// IDs seen on the last scroll-to-top check. The 3s browser-task
+    /// poll rewrites tasks in place, which can change visibleIDs
+    /// without adding a card; re-anchoring on every such change
+    /// nudges the offset by a few points each time, and the nudge
+    /// sticks. Only a genuinely new card earns a re-anchor.
+    @State private var lastVisibleIDs: [String] = []
 
     var body: some View {
         GeometryReader { geo in
@@ -191,8 +197,15 @@ struct HomeFeedView: View {
             }
             .refreshable { await store.refreshFeed() }
             .scrollPosition(id: $scrollAnchor, anchor: .top)
-            .onChange(of: updateGate.visibleIDs) { _, _ in
-                if isAtTop { proxy.scrollTo("feed-top", anchor: .top) }
+            .onChange(of: updateGate.visibleIDs) { _, newIDs in
+                let seen = Set(lastVisibleIDs)
+                lastVisibleIDs = newIDs
+                // Pin to the top only when a card actually arrived;
+                // a poll update to an existing card must not move
+                // the scroll position at all.
+                if isAtTop && newIDs.contains(where: { !seen.contains($0) }) {
+                    proxy.scrollTo("feed-top", anchor: .top)
+                }
             }
             .coordinateSpace(name: "feedScroll")
             .modifier(FeedScrollTracking(onOffset: trackScroll))
