@@ -16,10 +16,8 @@ for(let attempt=0;attempt<60;attempt++){
  if(state!==previous){console.log(`TestFlight build ${version}: ${state}`);previous=state;}
  if(state==='VALID'){
   if(build.attributes.expired)throw Error('TESTFLIGHT_BUILD_EXPIRED');
-  const groups=await api(`/v1/builds/${build.id}/betaGroups?limit=100`);const internal=groups.data?.filter(g=>g.attributes.isInternalGroup)??[];
-  console.log(`TestFlight processing verified: build ${version}; internal groups=${internal.length}`);
-  if(!internal.length)console.warn('::warning::Build processed but no internal tester group is assigned. Assign the intended group in App Store Connect.');
-  if(process.env.GITHUB_STEP_SUMMARY)await fs.appendFile(process.env.GITHUB_STEP_SUMMARY,`\n### TestFlight receipt\n\nBuild **${version}** processed successfully. Internal groups: **${internal.length}**.\n`);
+  console.log(`TestFlight processing verified: build ${version}`);
+  if(process.env.GITHUB_STEP_SUMMARY)await fs.appendFile(process.env.GITHUB_STEP_SUMMARY,`\n### TestFlight receipt\n\nBuild **${version}** processed successfully.\n`);
   process.exit(0);
  }
  if(['FAILED','INVALID'].includes(state))throw Error('TESTFLIGHT_PROCESSING_'+state);
