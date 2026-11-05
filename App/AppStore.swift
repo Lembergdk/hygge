@@ -831,13 +831,25 @@ final class AppStore {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].needsChatHelp else { return }
         if tasks[index].help == nil {
             let task = tasks[index]
-            tasks[index].help = TaskHelp(kind: task.status == .failed ? .recovery : task.informationRequests.isEmpty ? .verification : .information,
-                message: task.pendingEffectID != nil && task.status == .failed ? "I couldn't confirm whether the last step went through. Did it happen on the site?"
+            // A stuck step is a review, whatever the status: the user is
+            // the only one who can say whether it happened on the site.
+            // Keying the review off the pending effect (not the help kind)
+            // is what makes the buttons render for a needsHuman task with
+            // no help. The id is derived from the help's content, so the
+            // 3s poll re-synthesizes the same help instead of minting a
+            // fresh id — and a duplicate chat entry — on every pull.
+            let reviewing = task.pendingEffectID != nil
+            tasks[index].help = TaskHelp(
+                id: TaskHelp.stableSynthesizedID(taskID: task.id, status: task.status.rawValue,
+                                                 pendingEffectID: task.pendingEffectID,
+                                                 informationRequests: task.informationRequests),
+                kind: reviewing || task.status == .failed ? .recovery : task.informationRequests.isEmpty ? .verification : .information,
+                message: reviewing ? "I couldn't confirm whether the last step went through. Did it happen on the site?"
                     : task.status == .failed ? "I couldn't finish this step. Let's check where it stopped before continuing."
                     : task.informationRequests.isEmpty ? "This site has a check I couldn't finish. Your progress is saved."
                     : "I need a detail to continue.",
                 questions: task.informationRequests.map { .init(text: $0) },
-                actionLabel: task.status == .failed ? "Check and continue" : "Complete check")
+                actionLabel: reviewing || task.status == .failed ? "Check and continue" : "Complete check")
         }
         guard let help = tasks[index].help, !chatTranscript.contains(where: { $0.helpID == help.id }) else { return }
         chatTranscript.append(ChatEntry(id: help.id, fromAgent: true,
