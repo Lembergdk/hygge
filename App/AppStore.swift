@@ -254,10 +254,20 @@ final class AppStore {
     private(set) var activeRunCount = 0
     private(set) var liveBrowserSessionCount = 0
     var isAgentWorking: Bool { activeRunCount > 0 || tasks.contains { $0.status == .running || $0.status == .approved } }
-    /// A browser session is being kept open for a task (the backend
-    /// returns a nil session id once it closes). Drives the Home
-    /// flame's laptop typing.
-    var hasActiveBrowserSession: Bool { tasks.contains { $0.browserSessionID != nil } }
+    /// A browser session is being kept open for a task that is still
+    /// live: a running or approved run, or a human check waiting on
+    /// the person (the backend returns a nil session id once a session
+    /// closes). A paused run (recovery help) or a finished task is
+    /// not an active run, even if its session id is still present —
+    /// a blocked or failed session must not hold the laptop on.
+    /// Drives the laptop on both flames.
+    var hasActiveBrowserSession: Bool {
+        tasks.contains {
+            $0.browserSessionID != nil
+            && $0.status != .succeeded && $0.status != .failed && $0.status != .rejected
+            && $0.help?.kind != .recovery
+        }
+    }
 
     func noteRunStarted() { activeRunCount += 1 }
     func noteRunFinished() { activeRunCount = max(0, activeRunCount - 1) }
