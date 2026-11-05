@@ -160,7 +160,6 @@ struct FeedTaskReview: View {
     /// feed's live attachment uses); set by the feed, no-op elsewhere.
     var openBrowser: () -> Void = {}
     @State private var submitting = false
-    @State private var audit = false
     private var task: AgentTask? { store.tasks.first { $0.id == taskID } }
     private let visibleKeys = ["profileHeadline", "profileBio", "coverLetter", "message", "displayName", "hourlyRate", "skills", "eventTitle", "eventStartISO8601", "location", "searchTerms"]
     var body: some View {
@@ -189,7 +188,6 @@ struct FeedTaskReview: View {
                         }.padding(18).hyggeCard(radius: 18)
                     }
                 }
-                Button("Full details") { audit = true }.foregroundStyle(HyggeTheme.sageDeep).frame(minHeight: 44)
                 if task.browserSessionID == nil, task.status == .running {
                     Text("No live browser open yet — the watch button appears below once the run starts browsing.")
                         .foregroundStyle(HyggeTheme.secondary)
@@ -214,7 +212,7 @@ struct FeedTaskReview: View {
                     FeedPrimaryButton(title: "Watch live browser") { openBrowser() }
                 }
             }
-        }.sheet(isPresented: $audit) { NavigationStack { TaskDetailView(taskID: taskID) } }
+        }
     }
     private func label(_ key: String) -> String {
         switch key {
