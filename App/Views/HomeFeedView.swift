@@ -825,7 +825,7 @@ struct HomeFeedView: View {
                     chatAbout(context)
                 })
             } else { FeedEventDetail(event: event) }
-        case .task(let task): FeedTaskReview(close: { closeFocus() }, taskID: task.id)
+        case .task(let task): FeedTaskReview(close: { closeFocus() }, taskID: task.id, openBrowser: { openFocus(.browser(task)) })
         case .browser(let task): CloudBrowserView(urlString: task.targetURLString, existingSessionID: task.browserSessionID, taskID: task.id, onClose: { closeFocus() })
         case .paused:
             FeedDetailContent {
