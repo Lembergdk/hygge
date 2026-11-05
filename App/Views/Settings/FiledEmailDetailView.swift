@@ -5,6 +5,9 @@ import SwiftUI
 struct FiledEmailDetailView: View {
     let mail: FiledEmailSummary
     var isFeedCard = false
+    /// When set (feed card detail), discussing opens the caller's chat
+    /// surface instead of this view's own sheet.
+    var discussInChat: ((ChatContextRef) -> Void)? = nil
     @State private var showOriginal = false
     @Environment(AppStore.self) private var store
     private var current: FiledEmailSummary {
@@ -282,11 +285,14 @@ private struct EmailMessageActions: ViewModifier {
                     .foregroundStyle(HyggeTheme.emberDeep)
             }
             Button("Discuss in chat") {
-                store.pendingChatContext = ChatContextRef(
+                let context = ChatContextRef(
                     kind: "mail", id: mail.id, title: current.displayTitle,
                     subtitle: current.senderAddress, siteID: mail.siteID,
                     siteDomain: mail.senderDomain)
-                showConversation = true
+                if let discussInChat { discussInChat(context) } else {
+                    store.pendingChatContext = context
+                    showConversation = true
+                }
             }.buttonStyle(SettingsActionStyle())
         }
     }
