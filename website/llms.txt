@@ -1,0 +1,20 @@
+# Hygge
+
+> Hygge (pronounced [hoo-gah]) is an iOS app that finds jobs and gigs you like, so you can earn a little extra for the life you want to live. Hygge means being cozy and spending quality time with the people you love.
+
+## About
+
+- Hygge searches job sites for work that matches what you like doing, applies with your approval, and keeps track of bookings. You only get involved when you are booked.
+- The app is currently in beta, distributed through TestFlight, and is free until $100 confirmed earnings in a month. The paid plan (Plus) is $9.99/month or $99/year for unlimited earnings.
+- Hygge is made by Get BOB, Inc., a Delaware corporation. Contact: support@usehygge.app
+
+## Pages
+
+- [Hygge — home](https://usehygge.app/)
+- [Privacy](https://usehygge.app/privacy)
+- [Terms](https://usehygge.app/terms)
+- [Join the beta on TestFlight](https://testflight.apple.com/join/VQwBCNSP)
+
+## Source
+
+- [Hygge on GitHub](https://github.com/Lembergdk/hygge) — the app is open source.
