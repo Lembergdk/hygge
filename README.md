@@ -79,14 +79,6 @@ Hygge opens the site in its cloud browser and starts signing you up, with its `@
 
 From then on, Hygge checks your approved sites several times daily. That evening it finds a weekend dog-walk that fits your rate and your neighborhood. You get a notification. You read the draft reply Hygge wrote, tweak a word, and tap approve. Hygge sends it, and when the owner confirms, the walk lands in your calendar. Your journal gets a sentence about what happened.
 
-## Screenshots
-
-Design direction (product visuals):
-
-| Home feed | Watching Hygge work live |
-| --- | --- |
-| <img src="outputs/feed-redesign/visual-feed.jpg" alt="Current home feed with a site suggestion, a found opportunity and live profile building" width="240"> | <img src="outputs/feed-redesign/foreground-browser.jpg" alt="Live cloud-browser view with a Take control button while Hygge builds a profile" width="240"> |
-
 ## How it works, step by step
 
 1. **Tell Hygge what you're good at.** Onboarding is a short conversation — what work you enjoy, your lowest rate, roughly where and when. It also asks for notification and calendar permission in context. Everything else is learned gradually, so the more you use it, the better it gets at finding work you love.
