@@ -70,7 +70,13 @@ export type RuntimeFenceEvidence =
   | (FenceBase & {
       readonly provider: 'cloudflare';
       readonly providerRuntimeId: string;
-      readonly result: 'exact_incarnation_stopped';
+      // 'exact_incarnation_absent' proves the container is already gone:
+      // inspect() found nothing and no fence intent exists, so there was
+      // nothing to destroy. 'orphanIncarnation' names a destroyed container
+      // that belonged to this workspace (owner label matched) but carried a
+      // different incarnation than the binding.
+      readonly result: 'exact_incarnation_stopped' | 'exact_incarnation_absent';
+      readonly orphanIncarnation?: string;
     })
   | (FenceBase & {
       readonly provider: 'gcp';
