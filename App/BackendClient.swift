@@ -836,7 +836,10 @@ struct BackendClient {
 
     struct AuthSessionResponse: Decodable {
         var token: String
-        var expiresAt: String
+        // Sessions never expire server-side (backend commit 1d9ad9c1):
+        // expiresAt arrives as null, so this must stay optional or
+        // every sign-in decode fails and the user stays on the card.
+        var expiresAt: String?
         var userId: String
         var isNewUser: Bool?
         var methods: [LinkedLoginMethod]?
