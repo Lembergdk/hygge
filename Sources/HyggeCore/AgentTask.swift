@@ -54,6 +54,10 @@ public struct AgentTask: Codable, Identifiable, Equatable, Sendable {
     /// check (CAPTCHA/2FA/ID). Resume continues in this same session;
     /// nil once the task finishes. An identifier only — never a secret.
     public var browserSessionID: String?
+    /// The workspace step awaiting the user's review — did it happen on
+    /// the site? — after its browser session vanished. Nil when nothing
+    /// is stuck. An identifier only, never a secret.
+    public var pendingEffectID: String?
     public var browserTrace: [BrowserTraceEvent]
     public var informationRequests: [String]
     public var help: TaskHelp?
@@ -69,6 +73,7 @@ public struct AgentTask: Codable, Identifiable, Equatable, Sendable {
                 draftedPayload: [String: String] = [:],
                 memoryID: UUID? = nil, credentialRefID: UUID? = nil,
                 browserSessionID: String? = nil,
+                pendingEffectID: String? = nil,
                 browserTrace: [BrowserTraceEvent] = [], informationRequests: [String] = [],
                 status: AgentTaskStatus = .awaitingApproval,
                 log: [String] = [], createdAt: Date = Date()) {
@@ -83,6 +88,7 @@ public struct AgentTask: Codable, Identifiable, Equatable, Sendable {
         self.memoryID = memoryID
         self.credentialRefID = credentialRefID
         self.browserSessionID = browserSessionID
+        self.pendingEffectID = pendingEffectID
         self.browserTrace = browserTrace
         self.informationRequests = informationRequests
         self.status = status
