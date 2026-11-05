@@ -1312,7 +1312,12 @@ export class UserSandbox extends DurableObject<Env> {
       // mission resumes from its durable state. (Legacy failures
       // are already classified inside runInteractiveTaskInner and
       // return normally; a throw here is V2 or infrastructure.)
-      return json({ error: String((e as Error)?.message ?? e).slice(0, 300) }, 500);
+      const message = String((e as Error)?.message ?? e).slice(0, 300);
+      // The queue consumer cancels the 500 body without reading it,
+      // so without this line a failed start is invisible in
+      // telemetry except for its status code.
+      console.error(`MISSION_JOB_FAILED task=${taskId} job=${jobId} error=${message}`);
+      return json({ error: message }, 500);
     }
     finishMissionJob(this.ctx.storage, jobId, "done", new Date().toISOString());
     return json({ ok: true, jobState: "done", taskStatus: result?.status ?? task.status });
