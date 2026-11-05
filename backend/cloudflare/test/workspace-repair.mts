@@ -211,6 +211,28 @@ test('a dead-session effect resolves through the task review, and the gate clear
   assert.equal(diagAfter.wouldBlockNewMission,false);
 });
 
+test('a task whose session id was already cleared still resolves through the review',async()=>{
+  const {f,w,before}=await wedgedMain();
+  const db=w.foundation.persistence;
+  // The real Apple task: needsHuman, no help at all, and the session id
+  // already cleared by the task poll after the in-memory session map was
+  // lost. The review must still resolve it from the session-gone evidence.
+  const task:any={id:'task-apple',kind:'discover',target_url:'https://fiverr.example',goal:'Scan',status:'needsHuman',drafted_payload:{},interaction_version:1,log:[],session_id:null,help:null};
+  f.projectTask(task);
+  db.put('runner_task','task-apple',0,{taskId:'task-apple',runId:'run-2abf',sequence:1,pendingEffectId:null,status:'needsHuman',task});
+  const base={...db.owner,intentHash:'h',approvalId:null,approvalScopeHash:null,incarnation:before.incarnation,generation:1};
+  db.put('effect','fx_apple_3',0,{...base,effectId:'fx_apple_3',taskId:'task-apple',runId:'run-2abf',status:'uncertain',revision:1});
+  const reviewed=await w.reconcile('task-apple','fx_apple_3','not_applied');
+  assert.equal(reviewed.status,'needsHuman');
+  const effect=db.get<any>('effect','fx_apple_3')!.value;
+  assert.equal(effect.status,'not_applied');
+  const evidence=db.list<any>('runner_evidence').map((e:any)=>e.value);
+  assert.ok(evidence.some((p:any)=>p.sessionGone===true && p.sessionId===null && p.effectId==='fx_apple_3'),'review records session-gone evidence with no session id');
+  const diagAfter:any=await w.diagnostics();
+  assert.deepEqual(diagAfter.effects.unresolved,[]);
+  assert.equal(diagAfter.wouldBlockNewMission,false);
+});
+
 test('a session that vanished inside the live container still needs a live page',async()=>{
   const f=fixture();
   const w=f.make();
