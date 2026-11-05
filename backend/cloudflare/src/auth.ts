@@ -8,7 +8,7 @@
 /// emails never reach a log line.
 import { hashPassword, verifyPassword, isValidPassword } from "./passwords.ts";
 import type { Env, MagicEmailBinding } from "./env.ts";
-import { json as responseJson, userIdFromRequest } from "./env.ts";
+import { json as responseJson, sandboxFor, userIdFromRequest } from "./env.ts";
 
 function json(body: unknown, status = 200): Response {
   const response = responseJson(body, status);
@@ -254,6 +254,10 @@ export interface AuthDb {
   recordMagicRequest(ipHash: string, at: string): Promise<void>;
   /// Atomic single-use: true exactly once per token.
   consumeMagicLink(tokenHash: string, at: string): Promise<boolean>;
+  /// Delete every D1 row owned by the user (children first, users last).
+  /// Email-keyed rows (magic tokens, attempts) are matched by the user's
+  /// linked + contact emails. Aggregate and IP-keyed rows are untouched.
+  deleteAccount(userId: string): Promise<void>;
 }
 
 type D1Row = Record<string, unknown>;
@@ -418,6 +422,37 @@ export function d1AuthDb(db: D1Database): AuthDb {
         .bind(userId, revokedAt)
         .run();
     },
+    async deleteAccount(userId) {
+      const user = await one("SELECT email FROM users WHERE id = ?1", userId);
+      const methodRows = await db.prepare("SELECT email FROM linked_methods WHERE user_id = ?1").bind(userId).all();
+      const emails = [...new Set([
+        ...((methodRows.results ?? []) as D1Row[]).map((r) => String(r.email ?? "")).filter(Boolean),
+        user?.email ? String(user.email) : "",
+      ])].filter(Boolean);
+      // Abuse-ledger rows are keyed by hashes, never raw identifiers.
+      const ledgerKeys = [
+        `password:confirmation:${await sha256Hex(userId)}`,
+        `password:setup:${await sha256Hex(userId)}`,
+        ...await Promise.all(emails.map(async (email) => `password:email:${await sha256Hex(email.trim().toLowerCase())}`)),
+      ];
+      await db.batch([
+        ...emails.flatMap((email) => [
+          db.prepare("DELETE FROM magic_link_tokens WHERE email = ?1").bind(email),
+        ]),
+        ...ledgerKeys.map((key) => db.prepare("DELETE FROM magic_link_requests WHERE ip_hash = ?1").bind(key)),
+        db.prepare("DELETE FROM password_confirmations WHERE user_id = ?1").bind(userId),
+        db.prepare("DELETE FROM auth_sessions WHERE user_id = ?1").bind(userId),
+        db.prepare("DELETE FROM device_tokens WHERE user_id = ?1").bind(userId),
+        db.prepare("DELETE FROM push_log WHERE user_id = ?1").bind(userId),
+        db.prepare("DELETE FROM usage_events WHERE user_id = ?1").bind(userId),
+        db.prepare("DELETE FROM subscriptions WHERE user_id = ?1").bind(userId),
+        db.prepare("DELETE FROM hygge_email_addresses WHERE user_id = ?1").bind(userId),
+        db.prepare("DELETE FROM hygge_email_aliases WHERE user_id = ?1").bind(userId),
+        db.prepare("DELETE FROM user_keys WHERE user_id = ?1").bind(userId),
+        db.prepare("DELETE FROM linked_methods WHERE user_id = ?1").bind(userId),
+        db.prepare("DELETE FROM users WHERE id = ?1").bind(userId),
+      ]);
+    },
     async createMagicLink(row) {
       await db
         .prepare(
@@ -515,6 +550,15 @@ export async function resolveSessionUserId(db: AuthDb, token: string, nowMs = Da
 export async function revokeSession(db: AuthDb, token: string, nowMs = Date.now()): Promise<void> {
   if (!token) return;
   await db.revokeSessionByHash(await sha256Hex(token), new Date(nowMs).toISOString());
+}
+
+/// Delete a user completely: wipe the sandbox first (vault, chat, mail,
+/// tasks, profile), then delete every D1 row. Sandbox-first keeps retries
+/// safe: if the D1 batch fails, the session is still valid and the delete
+/// can run again; the D1 batch itself is atomic.
+export async function deleteUserAccount(db: AuthDb, userId: string, wipeSandbox: () => Promise<void>): Promise<void> {
+  await wipeSandbox();
+  await db.deleteAccount(userId);
 }
 
 // ---- identity service ---------------------------------------------------
@@ -1088,6 +1132,17 @@ export async function handleAuthRequest(
     }
     if (request.method === "POST" && parts.join("/") === "auth/signout") {
       await revokeSession(db, bearerToken(request));
+      return json({ ok: true });
+    }
+    if (request.method === "DELETE" && parts.join("/") === "auth/account") {
+      const userId = await requireUser(request, env, db);
+      await deleteUserAccount(db, userId, async () => {
+        const res = await sandboxFor(env, userId).fetch(new Request("https://hygge.internal/internal/account/delete", {
+          method: "POST",
+          headers: { "x-hygge-user-id": userId },
+        }));
+        if (!res.ok) throw new AuthProblem(500, "delete_failed", "Couldn't delete your account just now. Try again in a moment.");
+      });
       return json({ ok: true });
     }
     if (request.method === "GET" && parts.join("/") === "auth/methods") {
