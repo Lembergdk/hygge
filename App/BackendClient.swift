@@ -959,6 +959,14 @@ struct BackendClient {
         clearSessionToken()
     }
 
+    /// Deletes the whole account server-side. Returns false when the
+    /// request fails, in which case the app stays signed in.
+    func deleteAccount() async -> Bool {
+        struct Deleted: Decodable { var ok: Bool }
+        let response: Deleted? = try? await authRequest("auth/account", method: "DELETE", body: Optional<String>.none)
+        return response?.ok == true
+    }
+
     private struct AuthErrorBody: Decodable { var error: String?; var message: String? }
 
     /// Like get/post, but surfaces the backend's plain-language message
