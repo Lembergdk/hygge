@@ -20,7 +20,7 @@ const owner={environment:'staging' as const,userId:'repair-user',workspaceId:'re
 const CHUNK=256*1024;
 
 function fakeContainer(){
-  let running=false,image='',labels:any=null,identity:any=null;
+  let running=false,hasContainer=false,image='',labels:any=null,identity:any=null;
   let initialized=false,frozen=false,recoveredCheckpointId:string|null=null;
   let fsRevision=0,profileRevision=0;
   const files=new Map<string,Buffer>();
@@ -60,23 +60,29 @@ function fakeContainer(){
   }
   const container:any={
     get running(){return running;},
-    start(o:any){if(failStartOnce){failStartOnce=false;throw new Error('START_TRANSIENT');}starts++;running=true;image=o.image;labels=o.labels;identity=JSON.parse(o.env.HYGGE_IDENTITY);initialized=false;frozen=false;recoveredCheckpointId=null;fsRevision=0;profileRevision=0;files.clear();for(const k of Object.keys(artifacts))delete artifacts[k];},
+    start(o:any){if(failStartOnce){failStartOnce=false;throw new Error('START_TRANSIENT');}starts++;running=true;hasContainer=true;image=o.image;labels=o.labels;identity=JSON.parse(o.env.HYGGE_IDENTITY);initialized=false;frozen=false;recoveredCheckpointId=null;fsRevision=0;profileRevision=0;files.clear();for(const k of Object.keys(artifacts))delete artifacts[k];},
     async inspect(){return running?{image,labels}:null;},
     async destroy(){destroys++;running=false;},
-    async monitor(){},async setInactivityTimeout(){},async interceptOutboundHttp(){},async interceptOutboundHttps(){},
+    // The real container API: monitor() settles when the container stops,
+    // including after destroy(), but throws when this instance has no
+    // container at all (never started, or reclaimed out-of-band). The
+    // fence used to call it unconditionally, which bricked the rebind of
+    // a workspace whose container was already gone (Apple, Nov 5).
+    async monitor(){if(!hasContainer)throw new Error('monitor() cannot be called on a container that is not running');},async setInactivityTimeout(){},async interceptOutboundHttp(){},async interceptOutboundHttps(){},
     getTcpPort(){return{fetch:async(req:any)=>{const q=JSON.parse(await req.text());try{return new Response(JSON.stringify({result:await handle(q.op,q.args??{})}));}catch(e){return new Response(JSON.stringify({error:e instanceof Error?e.message:String(e)}),{status:409});}}};},
   };
   return {container,ops,stats:()=>({destroys,starts}),
     // The platform reclaims the container out-of-band: no fence, no notice.
-    kill(){running=false;},
+    // The instance no longer has a container, so monitor() throws.
+    kill(){running=false;hasContainer=false;},
     // A start that fails once, so a rebind can be left starting.
     failNextStart(){failStartOnce=true;},
     async plantOrphan(incarnation:string,generation:number){
       const ownerHash=(await digest(new TextEncoder().encode(ownerKey(owner)))).slice(0,32);
-      running=true;image=oldImage;labels={owner:ownerHash,operation:'orphan',incarnation,generation:String(generation)};
+      running=true;hasContainer=true;image=oldImage;labels={owner:ownerHash,operation:'orphan',incarnation,generation:String(generation)};
     },
     async plantForeign(){
-      running=true;image=oldImage;labels={owner:'0'.repeat(32),operation:'foreign',incarnation:'foreign-inc',generation:'1'};
+      running=true;hasContainer=true;image=oldImage;labels={owner:'0'.repeat(32),operation:'foreign',incarnation:'foreign-inc',generation:'1'};
     },
   };
 }

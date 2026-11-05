@@ -84,6 +84,7 @@ export function createContainerWorkspace(options:ContainerWorkspaceOptions){
  async fence(binding:WorkspaceBinding,operationId:string):Promise<RuntimeFenceEvidence>{assertOwner(owner,binding);const key=`${operationId}:${binding.incarnation}:${binding.generation}`,info=await options.container.inspect();
   const ownerHash=(await digest(new TextEncoder().encode(ownerKey(owner)))).slice(0,32);
   let result:'exact_incarnation_stopped'|'exact_incarnation_absent'='exact_incarnation_stopped';
+  let destroyed=false;
   let previousIncarnation=binding.incarnation,previousGeneration=binding.generation,requestId=`destroy:${operationId}:${binding.incarnation}`,orphanIncarnation:string|undefined;
   if(!info){
    // The container is already gone: nothing to destroy. A prior fence intent
@@ -97,12 +98,16 @@ export function createContainerWorkspace(options:ContainerWorkspaceOptions){
    // names the orphan so the registry can tell it from the exact case. A
    // foreign owner label, or a generation newer than the binding, refuses.
    previousIncarnation=info.labels.incarnation;previousGeneration=Number(info.labels.generation);orphanIncarnation=info.labels.incarnation;requestId=`destroy:${operationId}:${info.labels.incarnation}`;
-   options.fenceJournal?.put(key,{incarnation:info.labels.incarnation,generation:Number(info.labels.generation),image:info.image});await options.container.destroy();
+   options.fenceJournal?.put(key,{incarnation:info.labels.incarnation,generation:Number(info.labels.generation),image:info.image});await options.container.destroy();destroyed=true;
   }else{
    if(info.image!==imageFor(binding)||info.labels.owner!==ownerHash||info.labels.incarnation!==binding.incarnation||binding.providerRuntimeId!==binding.incarnation||info.labels.generation!==String(binding.generation))throw Error('FENCE_UNCONFIRMED');
-   options.fenceJournal?.put(key,{incarnation:binding.incarnation,generation:binding.generation,image:binding.desiredImageDigest});await options.container.destroy();
+   options.fenceJournal?.put(key,{incarnation:binding.incarnation,generation:binding.generation,image:binding.desiredImageDigest});await options.container.destroy();destroyed=true;
   }
-await options.container.monitor();if(options.container.running||await options.container.inspect()!==null)throw Error('FENCE_UNCONFIRMED');active=null;return{...owner,provider:'cloudflare',previousRuntimeId:binding.runtimeId!,previousIncarnation,previousGeneration,providerRuntimeId:binding.providerRuntimeId!,browserRetired:true,result,verifiedAt:new Date(now()).toISOString(),providerRequestIds:[requestId],...(orphanIncarnation?{orphanIncarnation}:{})};}};
+ // monitor() settles when a destroyed container stops, but throws when
+ // this instance has no container at all. When nothing was destroyed the
+ // container was already absent, so there is nothing to wait for: the
+ // null inspect() in the confirmation below is the evidence.
+ if(destroyed)await options.container.monitor();if(options.container.running||await options.container.inspect()!==null)throw Error('FENCE_UNCONFIRMED');active=null;return{...owner,provider:'cloudflare',previousRuntimeId:binding.runtimeId!,previousIncarnation,previousGeneration,providerRuntimeId:binding.providerRuntimeId!,browserRetired:true,result,verifiedAt:new Date(now()).toISOString(),providerRequestIds:[requestId],...(orphanIncarnation?{orphanIncarnation}:{})};}};
  const captureDriver:NativeCaptureDriver={async capture(lease:RuntimeLease,request:CaptureWrite){assertOwner(owner,lease);const live=await current();if(live.leaseId!==lease.leaseId)throw Error('STALE_LEASE');const begin=await call<any>('capture.begin',{filesystemRevision:request.filesystemRevision,browserProfileRevision:request.browserProfileRevision});try{validateTree(begin.tree);const files=[];for(const f of begin.tree.files){const bytes=new Uint8Array(f.size);for(let offset=0;offset<f.size;offset+=CHUNK_BYTES){const chunk=await call<{data:string}>('capture.chunk',{captureId:begin.captureId,path:f.path,offset});const b=unb64(chunk.data);if(b.length!==Math.min(CHUNK_BYTES,f.size-offset))throw Error('CAPTURE_CHUNK_MISMATCH');bytes.set(b,offset);}if(await digest(bytes)!==f.hash)throw Error('CAPTURE_INTEGRITY');files.push({path:f.path,mode:f.mode,bytes});}const snapshot:NativeCapture={incarnation:lease.incarnation,generation:lease.generation,filesystemRevision:begin.filesystemRevision,browserProfileRevision:begin.browserProfileRevision,browserState:begin.browserState,files,directories:begin.tree.directories,symlinks:begin.tree.symlinks,artifacts:begin.tree.artifacts};return{snapshot,release:async()=>{await call('capture.release',{captureId:begin.captureId});}};}catch(e){await call('capture.release',{captureId:begin.captureId}).catch(()=>{});throw e;}}};
  const browser=new WorkspaceBrowser({call,async stream(id){const lease=await current();const expected=Object.freeze({...owner,incarnation:lease.incarnation,generation:lease.generation});assertActive(expected);const path=`/live?session=${encodeURIComponent(id)}&expires=${Date.parse(lease.expiresAt)}`;const token=await signRpc(secret,expected,path,'',now());assertActive(expected);return options.container.getTcpPort(8080).fetch(new Request(`http://container${path}`,{headers:{Upgrade:'websocket','x-hygge-rpc':token}}));}});
  async function writeArtifact(ref:string,bytes:Uint8Array){
