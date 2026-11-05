@@ -2173,6 +2173,15 @@ export class UserSandbox extends DurableObject<Env> {
           return json({ ok: true, snapshotId: snapshot.id, size: snapshot.size });
         });
       }
+      // Read-only workspace diagnostics for the owner. No mutation, no
+      // dispatch, no retry: it reports the live gate state (container
+      // frozen/held, unresolved effects, admission, binding/lease) so a
+      // wedged workspace can be seen instead of inferred from telemetry.
+      if (path.endsWith("/sandbox/diagnostics")) {
+        if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)!=='retained-v2') return json({error:'retained-v2 required'},409);
+        if (request.method!=='GET') return json({error:'Method not allowed'},405);
+        return json(await this.workspace().diagnostics());
+      }
 
       // Brief 04 inbox (receive only). Inbound accepts only the
       // Email Worker delivery marker; reads are this user's filed
