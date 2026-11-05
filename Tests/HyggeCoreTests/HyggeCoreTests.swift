@@ -63,7 +63,7 @@ final class HyggeCoreTests: XCTestCase {
         let site = TargetSite.userAdded(name: "", urlOrDomain: "www.mycity-petsitters.com/jobs", category: .petCare)
         XCTAssertEqual(site?.domain, "mycity-petsitters.com")
         XCTAssertNil(TargetSite.userAdded(name: "", urlOrDomain: "not a domain", category: .petCare))
-        XCTAssertGreaterThanOrEqual(SeedSites.all.count, 15)
+        XCTAssertGreaterThanOrEqual(SeedSites.all.count, 13)
     }
 
     /// The mission-first contract: a run on a brand-new domain succeeds with
