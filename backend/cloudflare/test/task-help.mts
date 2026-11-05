@@ -104,3 +104,37 @@ test('a waiting secure-login request can be restored from the imported snapshot'
   assert.equal(projected.help.id, request.id);
   assert.equal(typeof projected.createdAt, 'number');
 });
+
+test('a stuck live task without a mobile projection is synthesized so it can be reviewed', () => {
+  // Apple Fiverr, Nov 5: needsHuman with an uncertain effect, but no
+  // mobile_task and no _fromSnapshot, so the app dropped it entirely —
+  // no feed card, no conversation, no review.
+  const stuck: any = { id: 'task-fiverr', kind: 'discover', target_url: 'https://www.fiverr.com/search', goal: 'Find work', title: 'Scheduled look at Fiverr', status: 'needsHuman', help: help('recovery', 'This work could not start after several tries.'), workspace_pending_effect_id: 'fx_1', session_id: 'fx_run1_0', drafted_payload: {}, log: [], createdAt: '2026-11-04T12:00:00Z' };
+  const projected = mobileTask(stuck);
+  assert.ok(projected);
+  assert.equal(projected.id, 'task-fiverr');
+  assert.equal(projected.backendTaskID, 'task-fiverr');
+  assert.equal(projected.pendingEffectID, 'fx_1');
+  assert.equal(projected.status, 'needsHuman');
+  assert.equal(projected.siteID, 'fiverr.com');
+  assert.equal(projected.targetURLString, 'https://www.fiverr.com/search');
+  assert.equal(projected.help.id, stuck.help.id);
+  assert.equal(typeof projected.createdAt, 'number');
+  // The app decodes exactly these required AgentTask fields.
+  for (const k of ['id', 'kind', 'siteID', 'targetURLString', 'goal', 'title', 'draftedPayload', 'browserTrace', 'informationRequests', 'status', 'log', 'createdAt']) assert.ok(k in projected, k);
+});
+
+test('a stuck live task with a pending effect but no help is still reviewable', () => {
+  const t: any = { id: 't', kind: 'discover', target_url: 'https://fiverr.com/', goal: 'g', title: 't', status: 'needsHuman', help: null, workspace_pending_effect_id: 'fx_9', createdAt: '2026-11-04T12:00:00Z' };
+  assert.equal(mobileTask(t).pendingEffectID, 'fx_9');
+});
+
+test('internal and unreviewable tasks without a mobile projection stay hidden', () => {
+  const base: any = { id: 't', kind: 'discover', target_url: 'https://fiverr.com/', goal: 'g', title: 't', status: 'needsHuman', help: help('recovery', 'm'), createdAt: '2026-11-04T12:00:00Z' };
+  assert.equal(mobileTask({ ...base, target_url: 'https://invalid.example' }), null); // fixture/document work
+  assert.equal(mobileTask({ ...base, web_probe: true }), null); // probe
+  assert.equal(mobileTask({ ...base, status: 'running' }), null); // not stuck
+  assert.equal(mobileTask({ ...base, help: null }), null); // nothing asking the user
+  assert.equal(mobileTask({ ...base, kind: 'unknown-kind' }), null); // undecodable kind
+  assert.equal(mobileTask({ ...base, target_url: 'not a url' }), null);
+});
