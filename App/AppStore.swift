@@ -933,12 +933,13 @@ final class AppStore {
 
     @ObservationIgnored private var browserResumeIDs: Set<UUID> = []
     @ObservationIgnored private var browserSessions: [String: LiveBrowserSession] = [:]
-    /// Last warm signal sent, so the poll loops in several views don't
-    /// each fire one: at most one keepalive a minute across all of them.
+    /// Last warm signal sent, so the foreground loop and the poll loops
+    /// in several views don't each fire one: at most one keepalive a
+    /// minute across all of them.
     @ObservationIgnored private var lastKeepaliveAt: Date?
 
-    /// The workspace stays warm while the app is open: a keepalive on
-    /// foreground pull and at most once a minute from the task poll.
+    /// The workspace stays warm while the app is open: the foreground
+    /// loop beats every minute, and the task poll calls this too.
     /// Best-effort and idempotent; a missed beat costs nothing because
     /// the next call rebinds a dead container instead of failing.
     func sendKeepaliveIfDue() async {
@@ -2102,9 +2103,9 @@ final class AppStore {
     @discardableResult
     func pullFromServer(reconcilingConversation: Bool = false) async -> Bool {
         guard isBackendFirst, !isSyncing else { return false }
-        // Opening the app starts the workspace; the poll loop keeps it
-        // warm afterwards. Fire-and-forget so a cold start never slows
-        // the pull itself.
+        // Opening the app starts the workspace; the foreground loop
+        // keeps it warm afterwards. Fire-and-forget so a cold start
+        // never slows the pull itself.
         Task { await sendKeepaliveIfDue() }
         isSyncing = true
         defer { isSyncing = false }
