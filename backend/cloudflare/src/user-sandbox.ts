@@ -7,7 +7,7 @@ import { ChatStore, sqlChatStorage, type ChatDocument } from './chat-store.ts';
 import { chatServices } from './chat-services.ts';
 import { latestMissionJob } from './jobs.ts';
 import { classifyBrowserFailure } from "./browser-failure.ts";
-import { help, applyHelpReply, mobileTask, canResumeWithInboxCode, reconcileEndedSession, rejectTaskHelp } from "./task-help.ts";
+import { help, helpRoutesToChat, applyHelpReply, mobileTask, canResumeWithInboxCode, reconcileEndedSession, rejectTaskHelp } from "./task-help.ts";
 import { bindWorkspaceOwner, workspaceMode } from './workspace-owner.ts';
 import { migrateCredentialSchema } from './schema-migrations.ts';
 import { createWorkspaceExecution, type WorkspaceExecution } from './workspace-execution.ts';
@@ -543,7 +543,12 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   private saveTask(task: any) {
-    if (task.help && task.mobile_task) {
+    // Feed/chat routing (policy Nov 5, 2026): information questions
+    // and deadline-free approvals surface in the feed only — the
+    // feed decision card is their entry point, and opening it still
+    // surfaces the question in chat (AppStore.surfaceTaskHelp), so
+    // skipping this mirror never strands an answer.
+    if (task.help && task.mobile_task && helpRoutesToChat(task.help)) {
       const now = new Date().toISOString();
       const store = this.stateStore();
       if (!store.get("messages", task.help.id)) store.upsert("messages", task.help.id, {
@@ -1609,12 +1614,14 @@ export class UserSandbox extends DurableObject<Env> {
     // Brief 05: a mission that succeeded proves the sign-in works
     // again — end any scheduled-scan login-failure episode here.
     if (result.status === "succeeded") this.healScanEpisodes(domain);
-    // Brief 07: a fresh needsHuman entry (approval, human check, or
-    // information request) is push trigger #1. Scan missions are
+    // Brief 07: a fresh needsHuman entry (a chat-routed approval
+    // or a human-only check) is push trigger #1. Scan missions are
     // excluded — their episodes notify once per tick instead. The
     // body is the same words the chat card shows: the site, the
-    // ask, and the first question.
-    if (shouldNotifyNeedsHuman(statusBeforeRun, task.status, { scheduledScan: task.scheduled_scan === true })) {
+    // ask, and the first question. Feed-only helps (information,
+    // deadline-free approvals) never push.
+    if (shouldNotifyNeedsHuman(statusBeforeRun, task.status, { scheduledScan: task.scheduled_scan === true })
+        && helpRoutesToChat(task.help)) {
       const helpText = (task.help?.message as string | undefined)?.trim() ?? "";
       const firstQuestion = (task.help?.questions?.[0]?.text as string | undefined)?.trim() ?? "";
       const siteRow = this.stateStore().list("sites")
@@ -2521,8 +2528,9 @@ export class UserSandbox extends DurableObject<Env> {
         const now = effectiveTickNow(body.now, request.headers.get("x-hygge-scheduled-sweep") === "1");
         const summary = await this.exclusive(() =>
           runScheduledTick(this.scanDeps(browser), { slot, now }));
-        // Brief 07: push trigger #2 — at most one push per tick
-        // (needs-you episode wins over new work; see push.ts).
+        // Brief 07: push trigger #2 — at most one push per tick:
+        // the new-work chat message only (see push.ts). Needs-you
+        // episodes stay in the feed and never push.
         this.schedulePush(planTickNotifications(summary));
         return json(summary);
       }

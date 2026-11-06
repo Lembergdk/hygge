@@ -51,10 +51,15 @@ struct ConversationView: View {
                             VStack(alignment: .leading, spacing: 13) {
                                 ForEach(store.chatTranscript) { entry in
                                     VStack(alignment: .leading, spacing: 8) {
-                                        if !entry.fromAgent, let context = entry.context {
-                                            HStack { Spacer(minLength: 44); chatContextCard(context) }
-                                        }
                                         bubble(entry)
+                                        // The card a message is about sits at
+                                        // the BOTTOM of its bubble, in both
+                                        // directions — so it is clear which
+                                        // message it belongs to, with no
+                                        // scrolling to the top to tap it.
+                                        if let context = entry.context {
+                                            contextCardRow(context, fromAgent: entry.fromAgent)
+                                        }
                                         if let taskID = entry.taskID,
                                            let task = store.tasks.first(where: { $0.id == taskID }),
                                            entry.helpID != nil {
@@ -176,7 +181,7 @@ struct ConversationView: View {
     }
 
     /// The mini-card a message is about — attached above the
-    /// composer before sending, stamped above its bubble after.
+    /// composer before sending, stamped below its bubble after.
     private func chatContextCard(_ context: ChatContextRef) -> some View {
         HStack(spacing: 10) {
             if let domain = context.siteDomain {
@@ -201,6 +206,65 @@ struct ConversationView: View {
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(HyggeTheme.hairline, lineWidth: 1))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("About: \(context.title)")
+    }
+
+    /// A message's card, below its bubble: trailing-aligned for the
+    /// user (as the bubble is), under the bubble text for Hygge.
+    /// A card whose feed element still exists is a button into the
+    /// feed; anything unresolvable renders untappable.
+    @ViewBuilder
+    private func contextCardRow(_ context: ChatContextRef, fromAgent: Bool) -> some View {
+        if fromAgent {
+            HStack(spacing: 0) {
+                contextCard(context).padding(.leading, 33)
+                Spacer(minLength: 36)
+            }
+        } else {
+            HStack(spacing: 0) {
+                Spacer(minLength: 44)
+                contextCard(context)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func contextCard(_ context: ChatContextRef) -> some View {
+        if isResolvableContext(context) {
+            Button { openContextInFeed(context) } label: { chatContextCard(context) }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens in the feed")
+        } else {
+            chatContextCard(context)
+        }
+    }
+
+    private func isResolvableContext(_ context: ChatContextRef) -> Bool {
+        guard let id = UUID(uuidString: context.id) else { return false }
+        switch context.kind {
+        case "opportunity": return store.opportunities.contains(where: { $0.id == id })
+        case "task": return store.tasks.contains(where: { $0.id == id })
+        case "mail": return store.filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() })
+        default: return false
+        }
+    }
+
+    /// Sets the feed-open flag and lets HomeFeedView close this chat
+    /// (sheet or bubble) before opening the card. ConversationView's
+    /// own dismiss only covers the sheet, so it is not called here.
+    private func openContextInFeed(_ context: ChatContextRef) {
+        guard let id = UUID(uuidString: context.id) else { return }
+        switch context.kind {
+        case "opportunity":
+            guard store.opportunities.contains(where: { $0.id == id }) else { return }
+            store.pendingOpportunityOpenID = id
+        case "task":
+            guard store.tasks.contains(where: { $0.id == id }) else { return }
+            store.pendingTaskFocusOpenID = id
+        case "mail":
+            guard store.filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() }) else { return }
+            store.pendingEmailOpenID = id
+        default: return
+        }
     }
 
     private var composer: some View {

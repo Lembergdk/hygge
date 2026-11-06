@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { help, informationHelp, applyHelpReply, actionFingerprint, needsActionApproval, mobileTask, canResumeWithInboxCode } from '../src/task-help.ts';
+import { help, helpRoutesToChat, informationHelp, applyHelpReply, actionFingerprint, needsActionApproval, mobileTask, canResumeWithInboxCode } from '../src/task-help.ts';
 import { runMission } from '../src/agent.ts';
 const task = () => ({ id: 'task', kind: 'signup', target_url: 'https://example.com', goal: 'Connect account', status: 'approved', interaction_version: 1, drafted_payload: { location: 'Austin', setupMode: 'connect' } });
 const snapshot = (labels = ['Account settings']) => ({ sessionID: 'kept', currentURLString: 'https://example.com', title: 'Account', elements: labels.map(label => ({ label, kind: 'click' })), humanControlled: false });
@@ -10,6 +10,19 @@ class Browser {
   async snapshot() { return snapshot(this.labels); }
   async act(_id: string, action: any) { this.actions.push(action); return snapshot(this.labels); }
 }
+test('feed/chat routing: information and deadline-free approvals stay in the feed; deadline approvals reach chat', () => {
+  assert.equal(helpRoutesToChat(null), true, "a help-less needsHuman keeps its existing route");
+  assert.equal(helpRoutesToChat(help('information', 'Details', [{ text: 'Where?' }])), false);
+  assert.equal(helpRoutesToChat(help('approval', 'Publish?')), false, "no producer sets a deadline yet, so approvals are feed-only");
+  assert.equal(helpRoutesToChat(help('approval', 'Publish?', [], 'Approve and continue', '2026-11-06T12:00:00.000Z')), true);
+  assert.equal(helpRoutesToChat(help('approval', 'Publish?', [], 'Approve and continue', '  ')), false, "a blank deadline is no deadline");
+  assert.equal(helpRoutesToChat(help('verification', 'Finish the check')), true);
+  assert.equal(helpRoutesToChat(help('credentials', 'Check your saved login')), true);
+  assert.equal(helpRoutesToChat(help('recovery', 'Check where we left off')), true);
+  const dated = help('approval', 'Publish?', [], 'Approve and continue', '2026-11-06T12:00:00.000Z');
+  assert.equal(dated.deadline, '2026-11-06T12:00:00.000Z');
+  assert.equal(help('approval', 'Publish?').deadline, null);
+});
 test('personal suggestions use known facts, never invented literals or secrets', () => {
   const result = informationHelp({ questions: [{ text: 'Where?', suggestedRefs: ['draft.location', 'draft.missing', 'draft.password'], suggestions: ['Paris'] }] }, { location: 'Austin', password: 'secret' });
   assert.deepEqual(result.questions[0].suggestions, ['Austin']);

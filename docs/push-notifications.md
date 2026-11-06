@@ -6,28 +6,26 @@ else notifies. No marketing, no digests, no re-engagement, ever.
 
 Format (user's call, 2026-11-03, superseding the brief's
 title-only draft): messages from Hygge wear the sender's name
-(`Hygge`) with the actual message as the body; feed pushes name
-their content. Every tap opens the exact element that triggered
-it.
+(`Hygge`) with the actual message as the body; the new-work chat
+push names its listing. Every tap opens the exact element that
+triggered it. Feed items never push (policy Nov 5, 2026).
 
 ## Triggers (the complete list)
 
 | # | Server event | Where it fires | Push |
 |---|---|---|---|
-| 1 | A task freshly enters `needsHuman` (approval checkpoint, human-only check, or information request) | `UserSandbox.runTask` → `shouldNotifyNeedsHuman` | `needs_you`, title `Hygge`, body = the chat card's own words, deep link to the task |
-| 2 | A scheduled-scan tick surfaces new feed items | `POST /scheduled-scan/tick` → `planTickNotifications(summary)` | `new_work`, title `New work on <site>`, body names the first listing (title · its own pay label · place) + count, deep link to that listing |
-| 2b | A scheduled-scan tick opens a needs-you episode (login failure / human check) | same tick hook | `needs_you`, title `<Site> needs you`, body = the episode card's title, deep link to the episode item |
+| 1 | A task freshly enters `needsHuman` with a chat-routed help (a deadline approval, a human-only check) | `UserSandbox.runTask` → `shouldNotifyNeedsHuman` + `helpRoutesToChat` | `needs_you`, title `Hygge`, body = the chat card's own words, deep link to the task. Information questions and deadline-free approvals stay in the feed and never push |
+| 2 | A scheduled-scan tick surfaces new feed items | `POST /scheduled-scan/tick` → `planTickNotifications(summary)` | `new_work`, title `Hygge`, body `New work on <site>:` + first listing (title · its own pay label · place) + count, deep link `chat/<message-id>` opening the conversation the message lives in |
+| 2b | A scheduled-scan tick opens a needs-you episode (login failure / human check) | same tick hook | none — the episode waits in the feed, no push |
 | 3 | Authenticated mail from a tracked (or work-ruled) sender mentions a client message | `UserSandbox.handleEmailInbound` → triage highlights | `message_waiting`, title `Hygge`, body `<Site> emailed: "<subject>"`, deep link to that filed mail; at most one per sender per day |
 
 Rules that bound both:
 
-- **At most one push per scan tick.** If a tick both surfaces work
-  and opens a needs-you episode, only the needs-you push is sent;
-  the new work is waiting in the feed when the user opens the app.
-  A scan batch never produces one push per item.
+- **At most one push per scan tick.** A tick sends at most the
+  one new-work chat message; a scan batch never produces one
+  push per item, and a needs-you episode never pushes at all.
 - **Scan missions never double-notify.** Trigger 1 excludes
-  scheduled-scan tasks; their episodes go through trigger 2b once
-  per tick.
+  scheduled-scan tasks; a tick's only push is trigger 2.
 - **Fresh transitions only.** A task already sitting in
   `needsHuman` does not re-notify. A resumed run that hits a
   further check is a new entry and does notify.
@@ -64,7 +62,7 @@ The only shape `buildPushPayload` (backend `src/push.ts`) can emit:
   the exact key set, the truncation, and the code redaction.
 - **No badge number is sent**: the server keeps no badge count,
   and an invented one would drift from the feed.
-- Routes: `task/<uuid>`, `feed/<uuid>`, `email/<uuid>`, `home`.
+- Routes: `task/<uuid>`, `chat/<uuid>`, `feed/<uuid>`, `email/<uuid>`, `home`.
   The app parses them in `PushDeepLink` (HyggeCore); anything
   unknown lands on Home. Each route opens the exact element it
   names, after a fresh pull: the task's chat help card, the

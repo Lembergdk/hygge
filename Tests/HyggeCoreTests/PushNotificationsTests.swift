@@ -7,6 +7,7 @@ final class PushNotificationsTests: XCTestCase {
 
     func testPushRouteParsing() {
         XCTAssertEqual(PushDeepLink.parse(route: "task/\(taskID.uuidString.lowercased())"), .task(taskID))
+        XCTAssertEqual(PushDeepLink.parse(route: "chat/\(feedID.uuidString.lowercased())"), .chat(feedID))
         XCTAssertEqual(PushDeepLink.parse(route: "feed/\(feedID.uuidString.lowercased())"), .feedItem(feedID))
         XCTAssertEqual(PushDeepLink.parse(route: "email/\(feedID.uuidString.lowercased())"), .email(feedID))
         XCTAssertEqual(PushDeepLink.parse(route: "email/not-a-uuid"), .home)
@@ -14,6 +15,7 @@ final class PushNotificationsTests: XCTestCase {
         XCTAssertEqual(PushDeepLink.parse(route: nil), .home)
         XCTAssertEqual(PushDeepLink.parse(route: ""), .home)
         XCTAssertEqual(PushDeepLink.parse(route: "task/not-a-uuid"), .home)
+        XCTAssertEqual(PushDeepLink.parse(route: "chat/not-a-uuid"), .home)
         XCTAssertEqual(PushDeepLink.parse(route: "settings/\(taskID.uuidString)"), .home)
         XCTAssertEqual(PushDeepLink.parse(route: "task"), .home)
     }
@@ -21,6 +23,8 @@ final class PushNotificationsTests: XCTestCase {
     func testPushRouteFallbackNeverGuessesAmbiguousNeedsYou() {
         XCTAssertEqual(PushDeepLink.parse(kind: "new_work", ref: feedID.uuidString.lowercased(), refKind: nil),
                        .feedItem(feedID))
+        XCTAssertEqual(PushDeepLink.parse(kind: "new_work", ref: feedID.uuidString.lowercased(), refKind: "chat"),
+                       .chat(feedID))
         XCTAssertEqual(PushDeepLink.parse(kind: "needs_you", ref: taskID.uuidString.lowercased(), refKind: "task"),
                        .task(taskID))
         // needs_you without a reference kind could be a task or a

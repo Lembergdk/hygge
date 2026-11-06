@@ -1,14 +1,16 @@
 /// Push notifications (Brief 07, descriptive format by the user's
 /// call 2026-11-03): device-token registration, the APNs sender,
 /// and the trigger rules. Transactional only — a task entering
-/// `needsHuman`, a scheduled-scan batch (new work or a blocked
-/// look), and tracked-site mail mentioning a client message are
-/// the only events that can ever notify. There is no digest, no
-/// marketing path, and no other caller.
+/// `needsHuman` with a chat-routed help, a new-work chat message
+/// from a scheduled scan, and tracked-site mail mentioning a client
+/// message are the only events that can ever notify. Feed items
+/// never push (policy Nov 5, 2026): durable items wait in the feed,
+/// and urgency reaches the user as a chat message instead. There
+/// is no digest, no marketing path, and no other caller.
 ///
 /// Format: messages from Hygge wear the sender's name (`Hygge`)
-/// with the actual message as the body; feed pushes name the
-/// content (site, listing, the listing's own pay words). Bodies
+/// with the actual message as the body; the new-work chat push
+/// names the listing (site, the listing's own pay words). Bodies
 /// are built only by the bounded builders below: text is
 /// whitespace-collapsed, code-shaped digit runs are redacted, and
 /// everything truncates at a word boundary. A code, a login
@@ -31,7 +33,11 @@ import type { ScanTickSummary } from "./scan.ts";
 // ---- trigger vocabulary ------------------------------------------------
 
 export type PushKind = "needs_you" | "new_work" | "message_waiting";
-export type PushRefKind = "task" | "feed" | "email";
+/// Where the tap lands: a task's chat, the bare conversation, a
+/// feed item, or a filed mail. `feed` survives only for payloads
+/// already sent; nothing in this codebase plans a feed push
+/// anymore (policy Nov 5, 2026 — feed items never push).
+export type PushRefKind = "task" | "chat" | "feed" | "email";
 
 export interface PushEvent {
   kind: PushKind;
@@ -83,9 +89,9 @@ export function messageWaitingEvent(
 }
 
 /// A task run notifies only on a *fresh* entry into needsHuman, and
-/// never for scheduled-scan missions: scan episodes notify once per
-/// tick through `planTickNotifications`, so the same episode can
-/// never produce two pushes.
+/// never for scheduled-scan missions: scan episodes stay in the
+/// feed, and a tick's only push is the new-work chat message
+/// planned by `planTickNotifications` below.
 export function shouldNotifyNeedsHuman(
   previousStatus: string | null | undefined,
   nextStatus: string | null | undefined,
@@ -95,45 +101,41 @@ export function shouldNotifyNeedsHuman(
   return nextStatus === "needsHuman" && previousStatus !== "needsHuman";
 }
 
-/// At most ONE push per scan tick, whatever the tick found. A
-/// needs-you episode outranks new work (it blocks future scans);
-/// the new items are still waiting in the feed when the user opens
-/// the app from the needs-you push.
+/// The new-work chat message, as a push: it opens the conversation
+/// the message lives in (refKind "chat"), never the feed item
+/// directly — the listing itself is reached from the message's
+/// embedded card. The body names the first listing and counts the
+/// rest, mirroring the old new-work shape.
+export function newWorkChatEvent(
+  messageId: string,
+  first: { siteName: string; title: string; payLabel: string; locationLabel: string; isRemote: boolean },
+  more: number,
+): PushEvent {
+  const parts = [
+    first.title,
+    first.payLabel && first.payLabel !== "See listing" ? first.payLabel : "",
+    first.isRemote ? "Remote" : (first.locationLabel && first.locationLabel !== "See listing" ? first.locationLabel : ""),
+  ].filter(Boolean);
+  return {
+    kind: "new_work", refKind: "chat", refId: messageId,
+    title: "Hygge",
+    body: `New work on ${first.siteName}: ${parts.join(" · ")}${more > 0 ? ` (+${more} more)` : ""}`,
+  };
+}
+
+/// At most ONE push per scan tick, whatever the tick found — and
+/// only for new work, as a chat message. Needs-you episodes and
+/// bare feed surfacing never push: they wait in the feed until
+/// the user opens the app. A tick with nothing new plans nothing.
 export function planTickNotifications(
-  summary: Pick<ScanTickSummary, "paused" | "surfacedIds" | "needsYouItemIds" | "firstSurfaced" | "firstNeedsYou">,
+  summary: Pick<ScanTickSummary, "paused" | "surfacedIds" | "needsYouItemIds" | "firstSurfaced" | "firstNeedsYou" | "offerChatMessageId">,
 ): PushEvent[] {
   if (summary.paused) return [];
-  const needsYou = summary.needsYouItemIds?.[0];
-  if (needsYou) {
-    const detail = summary.firstNeedsYou;
-    return [{
-      kind: "needs_you", refKind: "feed", refId: needsYou,
-      title: detail ? `${detail.siteName} needs you` : "Hygge needs you",
-      body: detail?.title || "Something in your feed needs you.",
-    }];
-  }
-  const surfaced = summary.surfacedIds?.[0];
-  if (surfaced) {
-    const first = summary.firstSurfaced;
-    if (!first) {
-      return [{
-        kind: "new_work", refKind: "feed", refId: surfaced,
-        title: "New work found", body: "Fresh work is waiting in your feed.",
-      }];
-    }
-    const parts = [
-      first.title,
-      first.payLabel && first.payLabel !== "See listing" ? first.payLabel : "",
-      first.isRemote ? "Remote" : (first.locationLabel && first.locationLabel !== "See listing" ? first.locationLabel : ""),
-    ].filter(Boolean);
-    const more = (summary.surfacedIds?.length ?? 1) - 1;
-    return [{
-      kind: "new_work", refKind: "feed", refId: surfaced,
-      title: `New work on ${first.siteName}`,
-      body: parts.join(" · ") + (more > 0 ? ` (+${more} more)` : ""),
-    }];
-  }
-  return [];
+  const messageId = summary.offerChatMessageId;
+  const first = summary.firstSurfaced;
+  if (!messageId || !first || !(summary.surfacedIds?.length ?? 0)) return [];
+  const more = (summary.surfacedIds?.length ?? 1) - 1;
+  return [newWorkChatEvent(messageId, first, more)];
 }
 
 // ---- payload -------------------------------------------------------------

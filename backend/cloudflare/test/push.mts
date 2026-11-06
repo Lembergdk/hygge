@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import {
   APNS_JWT_TTL_MS, ApnsJwtCache, MemoryPushDb, apnsConfigFromEnv, apnsHostFor,
   buildPushPayload, consecutiveFailures, handleDeviceTokenRequest, importApnsKey,
-  isBadTokenResult, messageWaitingEvent, needsHumanEvent, normalizeDeviceToken, notifyUser,
+  isBadTokenResult, messageWaitingEvent, needsHumanEvent, newWorkChatEvent, normalizeDeviceToken, notifyUser,
   pemToPkcs8, planTickNotifications, sendToToken, shouldNotifyNeedsHuman,
   signApnsJwt, type ApnsConfig, type PushFetch,
 } from "../src/push.ts";
@@ -146,32 +146,41 @@ test("needsHuman notifies only on a fresh, non-scan transition", () => {
   assert.equal(shouldNotifyNeedsHuman("approved", "needsHuman", { scheduledScan: true }), false);
 });
 
-test("a scan tick plans at most one push; needs-you wins; paused/empty plan none", () => {
-  assert.deepEqual(planTickNotifications({ paused: true, surfacedIds: ["s1"], needsYouItemIds: ["n1"] }), []);
-  assert.deepEqual(planTickNotifications({ paused: false, surfacedIds: [], needsYouItemIds: [] }), []);
-  // Descriptive feed push: the first listing named, the rest counted.
+test("a scan tick plans at most one push — the new-work chat message only; feed items never push", () => {
+  assert.deepEqual(planTickNotifications({ paused: true, surfacedIds: ["s1"], needsYouItemIds: ["n1"], offerChatMessageId: "m1" }), []);
+  assert.deepEqual(planTickNotifications({ paused: false, surfacedIds: [], needsYouItemIds: [], offerChatMessageId: null }), []);
+  // A needs-you episode is durable: it waits in the feed, no push.
+  assert.deepEqual(planTickNotifications({
+    paused: false, surfacedIds: [], needsYouItemIds: ["n1", "n2"], offerChatMessageId: null,
+    firstNeedsYou: { siteName: "Rover", title: "Your saved login for Rover needs you" },
+  }), []);
+  // Surfacing without a chat message plans nothing (defensive: the
+  // tick always writes the message first).
+  assert.deepEqual(planTickNotifications({
+    paused: false, surfacedIds: ["s1"], needsYouItemIds: [], offerChatMessageId: null,
+    firstSurfaced: { siteName: "Rover", title: "Weekend dog sitting for Milo", payLabel: "£25/night", locationLabel: "Leeds", isRemote: false },
+  }), []);
+  // New work: one chat push, naming the first listing and counting
+  // the rest, opening the conversation — never the feed item.
   const work = planTickNotifications({
-    paused: false, surfacedIds: ["s1", "s2", "s3"], needsYouItemIds: [],
+    paused: false, surfacedIds: ["s1", "s2", "s3"], needsYouItemIds: [], offerChatMessageId: "m1",
     firstSurfaced: { siteName: "Rover", title: "Weekend dog sitting for Milo", payLabel: "£25/night", locationLabel: "Leeds", isRemote: false },
   });
   assert.equal(work.length, 1);
   assert.equal(work[0].kind, "new_work");
-  assert.equal(work[0].refId, "s1");
-  assert.equal(work[0].title, "New work on Rover");
-  assert.equal(work[0].body, "Weekend dog sitting for Milo · £25/night · Leeds (+2 more)");
-  // Needs-you wins and names the site.
-  const both = planTickNotifications({
-    paused: false, surfacedIds: ["s1"], needsYouItemIds: ["n1", "n2"],
-    firstNeedsYou: { siteName: "Rover", title: "Your saved login for Rover needs you" },
-  });
-  assert.equal(both.length, 1);
-  assert.equal(both[0].kind, "needs_you");
-  assert.equal(both[0].refId, "n1");
-  assert.equal(both[0].title, "Rover needs you");
-  assert.match(both[0].body, /saved login for Rover/);
-  // Without details the fallbacks stay calm and generic.
-  const plain = planTickNotifications({ paused: false, surfacedIds: ["s1"], needsYouItemIds: [] });
-  assert.equal(plain[0].title, "New work found");
+  assert.equal(work[0].refKind, "chat");
+  assert.equal(work[0].refId, "m1");
+  assert.equal(work[0].title, "Hygge");
+  assert.equal(work[0].body, "New work on Rover: Weekend dog sitting for Milo · £25/night · Leeds (+2 more)");
+  assert.equal(buildPushPayload(work[0]).hyggeRoute, "chat/m1");
+});
+
+test("newWorkChatEvent names the listing the same way, with no feed route", () => {
+  const event = newWorkChatEvent("m9",
+    { siteName: "Rover", title: "Cat visits daily", payLabel: "See listing", locationLabel: "See listing", isRemote: true }, 0);
+  assert.equal(event.refKind, "chat");
+  assert.equal(event.body, "New work on Rover: Cat visits daily · Remote");
+  assert.equal(buildPushPayload(event).hyggeRoute, "chat/m9");
 });
 
 // ---- token registration -------------------------------------------------------

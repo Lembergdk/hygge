@@ -9,7 +9,7 @@ import { MemoryStateDb, StateStore } from "../src/state.ts";
 import {
   CRON_SLOTS_UTC, MemoryScanDb, ScanStore, categoriesToReopen,
   checkExhaustion, clearStaleEpisode, dailyCap, effectiveTickNow, evaluateGate,
-  extractProfile, isTierDueAtSlot, needsYouItemId, parseListings,
+  extractProfile, isTierDueAtSlot, needsYouItemId, offerChatMessageId, parseListings,
   runScheduledTick, scanOpportunityId, scanSchemaSQL, slotForCron,
   sweepOrder, validCategory,
   type GateContext, type ScanDeps, type ScanMissionInput, type ScanMissionOutcome, type ScanSite,
@@ -196,6 +196,39 @@ test("manual tick surfaces a new listing as a real server feed item without any 
   assert.equal(h.scansDb.runs[0].itemsSurfaced, 1);
   assert.equal(h.calls[0].tier, "logged");
   assert.equal(h.calls[0].credentialId, "cred-rover");
+});
+
+test("a surfacing tick also writes one chat message for the first listing, carrying the opportunity card", async () => {
+  const h = harness(() => ok(["Weekend dog sitting | $35/hr | Leeds", "Cat visits daily | $30/hr | Leeds"]));
+  seedUser(h.state, { sites: [ROVER] });
+  const summary = await runScheduledTick(h.deps, { slot: 0, now: D(DAY1) });
+  assert.equal(summary.surfacedIds.length, 2);
+  assert.equal(summary.offerChatMessageId, offerChatMessageId(summary.surfacedIds[0]));
+  const messages = h.state.list("messages");
+  assert.equal(messages.length, 1, "one message per tick, for the first listing only");
+  const msg = messages[0].data as Record<string, unknown>;
+  assert.equal(msg.id, summary.offerChatMessageId);
+  assert.equal(msg.fromAgent, true);
+  assert.match(String(msg.text), new RegExp(summary.firstSurfaced!.title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(String(msg.text), /\(\+1 more\)/);
+  const context = msg.context as Record<string, unknown>;
+  assert.equal(context.kind, "opportunity");
+  assert.equal(context.id, summary.surfacedIds[0]);
+  assert.equal(context.title, summary.firstSurfaced!.title);
+  assert.equal(context.siteID, "rover");
+  // A re-tick surfaces nothing new and writes no second message.
+  const second = await runScheduledTick(h.deps, { slot: 1, now: D("2026-11-02T13:00:00.000Z") });
+  assert.equal(second.surfacedIds.length, 0);
+  assert.equal(second.offerChatMessageId, null);
+  assert.equal(h.state.list("messages").length, 1);
+});
+
+test("a tick that surfaces nothing writes no chat message", async () => {
+  const h = harness(() => ok([]));
+  seedUser(h.state, { sites: [ROVER] });
+  const summary = await runScheduledTick(h.deps, { slot: 0, now: D(DAY1) });
+  assert.equal(summary.offerChatMessageId, null);
+  assert.equal(h.state.list("messages").length, 0);
 });
 
 test("cadence tiers: logged 3x/day, public 1x/day, proposed 0x", async () => {

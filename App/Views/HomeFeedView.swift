@@ -158,6 +158,23 @@ struct HomeFeedView: View {
             dismissPresented()
             emailOpenItem = mail
         }
+        // A chat card tapped in the conversation: whatever is
+        // presented closes first, then its feed card opens.
+        .onChange(of: store.pendingTaskFocusOpenID, initial: true) { _, id in
+            guard let id else { return }; store.pendingTaskFocusOpenID = nil
+            guard let task = store.tasks.first(where: { $0.id == id }) else { return }
+            dismissPresented()
+            receiveFeedUpdates()
+            openFocus(.task(task))
+        }
+        // A tapped new-work push: the conversation the message lives
+        // in, with no task attached — the message's card opens the
+        // listing from there.
+        .onChange(of: store.pendingChatOpenID, initial: true) { _, id in
+            guard let id else { return }; store.pendingChatOpenID = nil
+            dismissPresented()
+            showConversation = true
+        }
         .onChange(of: store.conversationTaskID) { _, id in
             guard id != nil else { return }
             if focus != nil { closeFocus(openChat: true) }

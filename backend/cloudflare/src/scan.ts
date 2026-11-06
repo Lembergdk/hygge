@@ -574,6 +574,25 @@ export function scanOpportunityId(siteId: string, title: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+/// Deterministic id for the one chat message a surfaced listing
+/// gets: the same listing always maps to the same message row, so
+/// a re-tick upserts it instead of writing a second message.
+export function offerChatMessageId(listingId: string): string {
+  const key = `offer-chat|${listingId}`;
+  let h1 = 0xcbf29ce484222325n;
+  for (const ch of `offer|${key}`) {
+    h1 ^= BigInt(ch.codePointAt(0) ?? 0);
+    h1 = (h1 * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  let h2 = 0xcbf29ce484222325n;
+  for (const ch of `chat|${key}`) {
+    h2 ^= BigInt(ch.codePointAt(0) ?? 0);
+    h2 = (h2 * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  const hex = (h1.toString(16).padStart(16, "0") + h2.toString(16).padStart(16, "0")).slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 /// Deterministic id for the single needs-you item of a login-failure
 /// episode: one per site per site-state, like the opportunity id a
 /// repeat failure maps to the same row and never stacks cards.
@@ -1106,8 +1125,14 @@ export interface ScanTickSummary {
   firstSurfaced: {
     siteName: string; title: string; payLabel: string;
     locationLabel: string; isRemote: boolean;
+    siteID?: string; siteDomain?: string;
   } | null;
   firstNeedsYou: { siteName: string; title: string } | null;
+  /// The chat message the tick wrote for the first surfaced
+  /// listing (deterministic id, one per listing) — the new-work
+  /// push opens the conversation this message lives in. Null
+  /// when the tick surfaced nothing.
+  offerChatMessageId: string | null;
   /// Site proposals withdrawn because their site became ineligible.
   withdrawnProposalIds: string[];
   /// "Ignored" feedback events derived this tick (ids).
@@ -1131,7 +1156,7 @@ export async function runScheduledTick(
   const say = (m: string) => { log.push(m); deps.log?.(m); };
   const summary: ScanTickSummary = {
     slot: opts.slot, runDate, paused: false, scanned: [], skipped: [],
-    surfacedIds: [], needsYouItemIds: [], firstSurfaced: null, firstNeedsYou: null, withdrawnProposalIds: [],
+    surfacedIds: [], needsYouItemIds: [], firstSurfaced: null, firstNeedsYou: null, offerChatMessageId: null, withdrawnProposalIds: [],
     ignoredEventIds: [], filtered: [], writeTasksCreated: 0, log,
   };
 
@@ -1462,6 +1487,7 @@ export async function runScheduledTick(
         payLabel: listing.payLabel || "See listing",
         locationLabel: listing.locationLabel || "",
         isRemote: listing.isRemote,
+        siteID: site.siteID, siteDomain: site.domain,
       };
       surfaced += 1;
     }
@@ -1493,6 +1519,35 @@ export async function runScheduledTick(
     if (updated.exhaustedUntil && !categoryBefore.exhaustedUntil) {
       say(`${site.name}: nothing new for a while in this kind of work; I will check again around ${updated.exhaustedUntil.slice(0, 10)}`);
     }
+  }
+
+  // New work is immediate, not durable: one chat message for the
+  // first listing this tick surfaced (naming +N more), carrying
+  // the opportunity as its context so the app renders the embedded
+  // card. The id is deterministic per listing, so a re-tick upserts
+  // the same row instead of messaging twice. Feed items are
+  // untouched — this only adds the chat side.
+  if (summary.surfacedIds.length > 0 && summary.firstSurfaced) {
+    const first = summary.firstSurfaced;
+    const listingId = summary.surfacedIds[0];
+    const messageId = offerChatMessageId(listingId);
+    const parts = [
+      first.title,
+      first.payLabel && first.payLabel !== "See listing" ? first.payLabel : "",
+      first.isRemote ? "Remote" : (first.locationLabel && first.locationLabel !== "See listing" ? first.locationLabel : ""),
+    ].filter(Boolean);
+    const more = summary.surfacedIds.length - 1;
+    deps.state.upsert("messages", messageId, {
+      id: messageId, fromAgent: true,
+      text: `I found new work on ${first.siteName}: ${parts.join(" · ")}${more > 0 ? ` (+${more} more)` : ""}. It's in your feed.`,
+      createdAt: nowIso,
+      context: {
+        kind: "opportunity", id: listingId, title: first.title,
+        subtitle: `${first.siteName} · ${first.payLabel}`,
+        siteID: first.siteID ?? null, siteDomain: first.siteDomain ?? null,
+      },
+    }, nowIso);
+    summary.offerChatMessageId = messageId;
   }
 
   return summary;

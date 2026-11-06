@@ -1,7 +1,23 @@
 // Conversation-first handoffs, grounded suggestions, and exact-action consent.
 // Kept pure so the same policy is tested independently of storage and UI.
-export function help(kind: string, message: string, questions: any[] = [], actionLabel = "Continue") {
-  return { id: crypto.randomUUID(), kind, message, questions, actionLabel };
+export function help(kind: string, message: string, questions: any[] = [], actionLabel = "Continue",
+                     deadline: string | null = null) {
+  return { id: crypto.randomUUID(), kind, message, questions, actionLabel, deadline };
+}
+
+/// Feed/chat routing for a task help (policy settled Nov 5, 2026):
+/// information questions live in the feed only, and an approval
+/// reaches chat only when it carries a deadline — a short-deadline
+/// approval gets both feed and chat, a deadline-free one feed only.
+/// Every other kind routes as before. A help-less needsHuman keeps
+/// its existing push (there is no kind to route on).
+export function helpRoutesToChat(help: any): boolean {
+  if (!help) return true;
+  if (help.kind === "information") return false;
+  if (help.kind === "approval") {
+    return typeof help.deadline === "string" && help.deadline.trim().length > 0;
+  }
+  return true;
 }
 
 export function informationHelp(decision: any, draft: Record<string, string>) {

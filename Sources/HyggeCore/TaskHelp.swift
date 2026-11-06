@@ -9,6 +9,11 @@ public struct TaskHelp: Codable, Equatable, Sendable, Identifiable {
     public var message: String
     public var questions: [Question]
     public var actionLabel: String
+    /// Optional ISO-8601 deadline for an approval: a deadline-free
+    /// approval surfaces in the feed only; one with a deadline also
+    /// reaches chat (with a push). No producer sets this yet — it is
+    /// the extension point for short-deadline approvals.
+    public var deadline: String?
     public struct Question: Codable, Equatable, Sendable, Identifiable {
         public var id: String { text }
         public var text: String
@@ -18,9 +23,9 @@ public struct TaskHelp: Codable, Equatable, Sendable, Identifiable {
         }
     }
     public init(id: UUID = UUID(), kind: Kind, message: String,
-                questions: [Question] = [], actionLabel: String = "Continue") {
+                questions: [Question] = [], actionLabel: String = "Continue", deadline: String? = nil) {
         self.id = id; self.kind = kind; self.message = message
-        self.questions = questions; self.actionLabel = actionLabel
+        self.questions = questions; self.actionLabel = actionLabel; self.deadline = deadline
     }
 
     /// A stable id for a synthesized help request, derived from the help's

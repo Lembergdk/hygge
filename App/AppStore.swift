@@ -197,6 +197,12 @@ final class AppStore {
     var pendingTaskOpenID: UUID?
     var pendingOpportunityOpenID: UUID?
     var pendingEmailOpenID: UUID?
+    /// A chat card tapped in the conversation: the feed card it is
+    /// about, opened as a feed focus (not as chat).
+    var pendingTaskFocusOpenID: UUID?
+    /// A tapped new-work push: the chat message it names — open the
+    /// bare conversation, no task attached.
+    var pendingChatOpenID: UUID?
     var highlightedOpportunityID: UUID?
     static let pushTokenKey = "hyggePushTokenV1"
     static let pushPrimerResolvedKey = "hyggePushPrimerResolvedV1"
@@ -579,6 +585,10 @@ final class AppStore {
             } else {
                 lastMessage = "That one is already sorted. Everything waiting for you is below."
             }
+        case .chat(let id):
+            // The message itself is the landing: open the
+            // conversation it lives in (HomeFeedView observes this).
+            pendingChatOpenID = id
         case .feedItem(let id):
             highlightedOpportunityID = id
             if opportunities.contains(where: { $0.id == id }) {
@@ -616,6 +626,8 @@ final class AppStore {
         pendingTaskOpenID = nil
         pendingOpportunityOpenID = nil
         pendingEmailOpenID = nil
+        pendingTaskFocusOpenID = nil
+        pendingChatOpenID = nil
         highlightedOpportunityID = nil
         await backend.signOut()
         isSignedIn = false
