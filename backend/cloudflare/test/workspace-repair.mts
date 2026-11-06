@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {createWorkspaceExecution} from '../src/workspace-execution.ts';
+import {createWorkspaceExecution,scanRegistryPrefix} from '../src/workspace-execution.ts';
 import {sqliteWorkspace} from './helpers/workspace-sqlite.mts';
 import {ownerKey} from '../src/workspace-runtime.ts';
 import {digest} from '../src/workspace-container-protocol.ts';
@@ -93,7 +93,7 @@ function fakeContainer(){
   };
 }
 
-function fixture(){
+function fixture(customOwner: typeof owner = owner){
   const {storage}=sqliteWorkspace();
   for(const q of ['CREATE TABLE tasks(id TEXT PRIMARY KEY,task TEXT NOT NULL,created_at TEXT NOT NULL)','CREATE TABLE session_profiles(domain TEXT PRIMARY KEY,has_profile INTEGER)','CREATE TABLE credentials(id TEXT PRIMARY KEY,username TEXT)','CREATE TABLE profile(id TEXT PRIMARY KEY,payload TEXT)'])storage.sql.exec(q);
   const loadTask=(id:string)=>{const row=[...storage.sql.exec('SELECT task FROM tasks WHERE id=?',id)][0] as any;return row?JSON.parse(String(row.task)):null;};
@@ -102,27 +102,31 @@ function fixture(){
   const bucket:any={put:async(k:string,v:Uint8Array)=>{blobs.set(k,Uint8Array.from(v));},get:async(k:string)=>{const v=blobs.get(k);return v?{arrayBuffer:async()=>Uint8Array.from(v).buffer}:null;}};
   const env:any={SELF:{fetch:async()=>new Response('denied',{status:403})},WORKSPACE_CHECKPOINTS:bucket,HYGGE_WORKSPACE_IMAGE:newImage,HYGGE_WORKSPACE_NAMESPACE:'hygge-test',HYGGE_WORKSPACE_IMAGE_TRANSITIONS:JSON.stringify([{from:oldImage,to:newImage,policy:'workspace-filesystem-v1'},{from:newImage,to:oldImage,policy:'workspace-filesystem-v1'}]),HYGGE_ENV:'staging',DB:{prepare(){throw new Error('No shared registry configured');}}};
   const fake=fakeContainer();
-  const make=()=>createWorkspaceExecution({owner,env,storage,container:fake.container,loadTask,projectTask});
-  return {storage,env,blobs,bucket,fake,make,loadTask,projectTask};
+  const make=()=>createWorkspaceExecution({owner:customOwner,env,storage,container:fake.container,loadTask,projectTask});
+  return {storage,env,blobs,bucket,fake,make,loadTask,projectTask,owner:customOwner};
 }
 
 // Provision on the OLD image (main's state), write a document, and wedge
 // the workspace the way production wedged: container gone, binding ready.
-async function wedgedMain(){
-  const f=fixture();
+async function wedgedMainAs(testOwner: typeof owner){
+  const f=fixture(testOwner);
   // Start on the old image: the pinned env image is new, so point the
   // fixture at old first, then flip the pin to new before the rebind.
   f.env.HYGGE_WORKSPACE_IMAGE=oldImage;
   const w=f.make();
   await w.ensure();
   await w.saveDocument('generation/notes/plan.md',1,new TextEncoder().encode('Initial note'));
-  const before=await w.foundation.registry.read(owner,owner);
+  const before=await w.foundation.registry.read(testOwner,testOwner);
   assert.equal(before.generation,1);
   assert.equal(before.desiredImageDigest,oldImage);
   assert.ok(before.recoveryPoint);
   f.env.HYGGE_WORKSPACE_IMAGE=newImage;
   f.fake.kill();
   return {f,w,before};
+}
+
+async function wedgedMain(){
+  return wedgedMainAs(owner);
 }
 
 test('a dead container is rebound from the checkpoint and moves to the pinned image',async()=>{
@@ -378,6 +382,37 @@ test('a rebind whose start failed transiently resumes its start and moves to the
   assert.equal(diag.container.recoveredCheckpointId,before.recoveryPoint!.checkpointId);
 });
 
+
+test('the rebind receipt scan matches the owner prefix exactly, not LIKE wildcards',async()=>{
+  // Production DO SQLite rejects the rebind's receipt scan with LIKE or
+  // GLOB pattern too complex (main, Nov 6). The scan must be an
+  // exact-prefix match: `_` is a LIKE single-character wildcard that
+  // encodeURIComponent leaves unescaped, so the old
+  // `receipt/.../repair_do/%` pattern also matched the `repairXdo`
+  // neighbor's receipts. The decoy must never be returned.
+  const {storage}=sqliteWorkspace();
+  storage.sql.exec('CREATE TABLE workspace_registry (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  const put=(key:string)=>storage.sql.exec('INSERT INTO workspace_registry(key,value) VALUES (?,?)',key,JSON.stringify({digest:'d',receipt:{receiptId:'r',recoveryPoint:{checkpointId:'cp'}}}));
+  put('receipt/staging/repair-user/repair_do/write-1');
+  put('receipt/staging/repair-user/repairXdo/decoy-write');
+  put('receipt/staging/repair-user/repair_do%2Fescaped/write-2');
+  put('workspace/staging/repair-user/repair_do');
+  const keys=scanRegistryPrefix(storage,'receipt/staging/repair-user/repair_do/').map(r=>r.key);
+  assert.deepEqual(keys,['receipt/staging/repair-user/repair_do/write-1']);
+});
+
+test('a rebind with a wildcard character in the owner id still moves to the pinned image',async()=>{
+  // `_` is legal in a workspace id and must not disturb the rebind's
+  // receipt lookup.
+  const underscored={environment:'staging' as const,userId:'repair-user',workspaceId:'repair_do'};
+  const {w,before}=await wedgedMainAs(underscored);
+  await w.ensure();
+  const after=await w.foundation.registry.read(underscored,underscored);
+  assert.equal(after.lifecycleState,'ready');
+  assert.equal(after.generation,2);
+  assert.equal(after.desiredImageDigest,newImage);
+  assert.equal(after.recoveryPoint?.checkpointId,before.recoveryPoint!.checkpointId);
+});
 
 test('no unresolved effect blocks a new mission', async () => {
   // The Nov 5 Apple state, generalized: a task left an uncertain
