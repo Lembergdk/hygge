@@ -36,18 +36,20 @@ test('diagnostics reports unresolved effects and the gate verdict without a cont
   assert.equal(diag.effects.counts.confirmed, 1);
   assert.deepEqual(diag.effects.unresolved.map((e: any) => e.effectId), ['eff-stuck']);
   assert.equal(diag.effects.unresolved[0].taskId, 'task-1');
-  assert.equal(diag.tasks[0].id, 'task-1');
-  assert.equal(diag.tasks[0].status, 'needsHuman');
+  // Look both tasks up by id: they share a created_at timestamp, so
+  // their order in the created_at DESC list is not stable.
+  const taskRow = diag.tasks.find((t: any) => t.id === 'task-1');
+  assert.equal(taskRow.status, 'needsHuman');
   // The task has no stored mobile projection, but it is stuck waiting
   // on the user with a help, so GET /tasks synthesizes one — and the
   // diagnostics says so. A task the server lists but the app never
   // sees is diagnosed here first: mobileTaskPresent false names the
   // server side, true points at the app's pull/decode.
-  assert.equal(diag.tasks[0].mobileTaskPresent, true);
-  assert.equal(diag.tasks[0].mobileTaskPendingEffectID, null);
-  assert.equal(diag.tasks[0].pendingEffectID, null);
-  assert.equal(diag.tasks[0].targetHost, 'example.invalid');
-  assert.equal(diag.tasks[0].webProbe, false);
+  assert.equal(taskRow.mobileTaskPresent, true);
+  assert.equal(taskRow.mobileTaskPendingEffectID, null);
+  assert.equal(taskRow.pendingEffectID, null);
+  assert.equal(taskRow.targetHost, 'example.invalid');
+  assert.equal(taskRow.webProbe, false);
   const internalRow = diag.tasks.find((t: any) => t.id === 'task-internal');
   assert.equal(internalRow.mobileTaskPresent, false);
   assert.equal(internalRow.targetHost, 'invalid.example');
