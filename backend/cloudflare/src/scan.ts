@@ -27,7 +27,7 @@
 ///   existing user-approval flow in user-sandbox.ts.
 /// - Secrets never appear here: credentials are referenced by id
 ///   only; the vault resolution stays inside runTask.
-import { PROFILE_ROW_ID, normalizeId, type StateStore } from "./state.ts";
+import { PROFILE_ROW_ID, lastChatMessageId, normalizeId, type StateStore } from "./state.ts";
 import {
   SURFACING_THRESHOLD, deriveIgnoredEvents, pruneExpiredInferredBeliefs,
   rankItem, sortByRank, type LearningProfile,
@@ -1618,6 +1618,9 @@ export async function runScheduledTick(
             subtitle: `${facts.siteName} · ${facts.payLabel}`,
             siteID: facts.siteID ?? null, siteDomain: facts.siteDomain ?? null,
           },
+          // Strict previous_response_id policy (Nov 5, 2026):
+          // chain to the previous last message, resolved now.
+          previousResponseId: lastChatMessageId(deps.state.list("messages")),
         }, nowIso);
       } catch (error) {
         say(`offer message write failed for ${facts.title} (${error instanceof Error ? error.message : "unknown"}); trying the next surfaced listing`);

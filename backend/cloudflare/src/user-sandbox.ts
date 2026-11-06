@@ -23,7 +23,7 @@ import { BrowserRunBrowser } from "./browser.ts";
 import { handleProfilePhoto, profilePhotoAllowedForTask, type ProfilePhoto, type ProfilePhotoStore } from "./profile-photo.ts";
 import { makeDecider, runMission, distillHints, emailCodeAllowedForTask } from "./agent.ts";
 import * as vault from "./vault.ts";
-import { PROFILE_ROW_ID, STATE_ROUTES, StateStore, createSqliteStateDb, ensureStateSchema, normalizeId } from "./state.ts";
+import { PROFILE_ROW_ID, STATE_ROUTES, StateStore, createSqliteStateDb, ensureStateSchema, lastChatMessageId, normalizeId } from "./state.ts";
 import {
   D1SkillRepository, applySkillOutcome, missionOutcomeVerified, outcomeForTaskKind, promoteCandidate,
   requiresApprovalForKind, shouldPromote, skillBodyHash, skillImplicatedByFailure,
@@ -57,7 +57,7 @@ import {
   apnsConfigFromEnv, d1PushDb, chatMessageEvent, messageWaitingEvent, needsHumanEvent, notifyUser, planTickNotifications,
   shouldNotifyDecisionHelp, type PushEvent,
 } from "./push.ts";
-import { createCardMessageComposer, recentChatContext } from "./chat-composer.ts";
+import { createCardMessageComposer, recentChatContext, type CardMessageComposer } from "./chat-composer.ts";
 import {
   claimMissionJob, enqueueMissionJob, finishMissionJob, getMissionJob,
   isTerminalJobState, type MissionJobMessage,
@@ -124,6 +124,17 @@ export class UserSandbox extends DurableObject<Env> {
   private workspaceExecution: WorkspaceExecution | null = null;
   private dekPromise: Promise<CryptoKey> | null = null;
   private schemaReady: Promise<unknown> | null = null;
+  /// The one composer (and its one LLMClient) for this sandbox:
+  /// mail, offer, help-upgrade, and draft messages all compose
+  /// through it instead of constructing a fresh client per call.
+  /// `undefined` means not built yet; null means built and the
+  /// model is unconfigured. Callers treat null as "skip the
+  /// message" (or, for a static help, the logged static fallback).
+  private cardComposerInstance: CardMessageComposer | null | undefined;
+  /// Message ids with a composed-chat job in flight (help upgrade
+  /// or draft notice), so two concurrent saves of the same task
+  /// cannot compose twice and push twice for one message.
+  private composedChatPending = new Set<string>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -547,19 +558,31 @@ export class UserSandbox extends DurableObject<Env> {
     // The previously stored status, read before this save: the
     // decision-help push below fires only on a FRESH entry into a
     // help-awaiting state, so a re-save of a task already waiting
-    // never re-pushes. No previous row (snapshot import) never
-    // pushes either — an import is not a fresh entry.
+    // never re-pushes. A snapshot import is not a fresh entry
+    // either: an import replays a stored task and must never
+    // message or push — the gates below AND `!isImport` into every
+    // notify path, because shouldNotifyDecisionHelp(null,
+    // "needsHuman") is true for a first-seen row and an imported
+    // needsHuman task would otherwise push about a card the user
+    // already has.
     const previousStatus = task.id ? (this.loadTask(task.id)?.status ?? null) : null;
+    const isImport = task._fromSnapshot === true;
     // Feed/chat routing (policy Nov 5, 2026, as revised Nov 5,
     // 21:07 CST): EVERY decision card gets a chat message linking
-    // to it. The mirror writes the help's own model-composed words
-    // verbatim (decisionHelpMessageText) — no static text remains.
-    // The mirror id and fields are the app dedupe's contract
-    // (id == help.id, taskID, helpID — no context field): do not
-    // rename them without accounting for the app side.
+    // to it. The mirror writes the help's own words verbatim
+    // (decisionHelpMessageText) — for a model-composed help that
+    // IS the message; for a help marked `staticText` it is only
+    // the immediately-written text, upgraded to a composed
+    // version by upgradeHelpMessage below. The mirror id and
+    // fields are the app dedupe's contract (id == help.id, taskID,
+    // helpID — no context field): do not rename them without
+    // accounting for the app side.
     // A deleted message's tombstone (MESSAGE_DELETED) must never
     // fail the task save: the write is guarded, the task row below
     // is still saved, and the feed card remains the entry point.
+    let mirrorText: string | null = null;
+    let mirrorWrote = false;
+    let mirrorCreatedAt: string | null = null;
     if (task.help && task.mobile_task && helpRoutesToChat(task.help)) {
       const now = new Date().toISOString();
       const store = this.stateStore();
@@ -569,9 +592,23 @@ export class UserSandbox extends DurableObject<Env> {
           store.upsert("messages", task.help.id, {
             id: task.help.id, fromAgent: true, text,
             taskID: task.mobile_task.id, helpID: task.help.id, createdAt: now,
+            // Strict previous_response_id policy (Nov 5, 2026):
+            // this message chains to the previous last message in
+            // the chat, resolved from the live transcript now.
+            previousResponseId: lastChatMessageId(store.list("messages")),
           });
         } catch { /* a deleted message stays deleted; the feed card remains */ }
       }
+      // The push below fires only when the message row actually
+      // exists after the write attempt: a null relay text (empty
+      // help.message) or a tombstoned id leaves no row, and a push
+      // about a message that does not exist would fall back to a
+      // generic body. A pre-existing row (a re-save) counts — the
+      // message was written by an earlier save.
+      mirrorText = text;
+      const row = text ? store.get("messages", task.help.id) : null;
+      mirrorWrote = Boolean(row);
+      mirrorCreatedAt = row ? String((row.data as Record<string, unknown>).createdAt ?? now) : null;
     }
     if (task.mobile_task?.siteID && ["signup", "buildProfile"].includes(task.kind)) {
       const siteID = task.mobile_task.siteID;
@@ -606,19 +643,318 @@ export class UserSandbox extends DurableObject<Env> {
     // excluded — their episodes never notify (a tick's only push
     // is the new-work chat message). A help-less task never pushes:
     // helpRoutesToChat(null) is false, because there is no chat
-    // message to push about. The body is the same words the chat
-    // card shows: the site, the ask, and the first question.
+    // message to push about. Snapshot imports never push (see
+    // isImport above). And the push fires only when the mirror
+    // actually wrote: if decisionHelpMessageText was null or the
+    // write hit a tombstone, there is no message row to push
+    // about, so no push goes out at all.
+    // The body is the same words the chat message shows: for a
+    // model-composed help, the site plus the ask and first
+    // question, pushed at once. For a help marked `staticText`,
+    // the push waits for the composer: upgradeHelpMessage replaces
+    // the row's text with the composed version and pushes its
+    // words, or — when composition fails — logs and pushes the
+    // static relay instead (documented fallback). Either way the
+    // push body is the message's own words, never a generic
+    // fallback for a message that exists.
     if (shouldNotifyDecisionHelp(previousStatus, task.status, { scheduledScan: task.scheduled_scan === true })
-        && helpRoutesToChat(task.help)) {
-      const helpText = (task.help?.message as string | undefined)?.trim() ?? "";
+        && helpRoutesToChat(task.help) && mirrorWrote && !isImport) {
+      if (task.help.staticText) {
+        this.runAfterSave(this.upgradeHelpMessage(task, mirrorText ?? "", mirrorCreatedAt ?? new Date().toISOString()));
+      } else {
+        const helpText = (task.help?.message as string | undefined)?.trim() ?? "";
+        const firstQuestion = (task.help?.questions?.[0]?.text as string | undefined)?.trim() ?? "";
+        const message = [helpText, firstQuestion].filter(Boolean).join(" ");
+        this.schedulePush([needsHumanEvent(String(task.id), message ? `${this.helpSiteName(task)}: ${message}` : undefined)]);
+      }
+    }
+    // Draft / awaitingApproval (policy Nov 5, 22:03 CST): a draft
+    // entering review is a decision card too — it gets an
+    // agent-composed chat message (deterministic id, idempotent)
+    // with the task context so the app renders the embedded card,
+    // plus a push. Same fresh-transition rule as the help push, and
+    // snapshot imports are excluded. A draft inherits a deadline
+    // only from an explicit deadline on the underlying
+    // opportunity/action (task.deadline, when a producer sets one)
+    // — never invented; neither current producer sets one.
+    if (!isImport && task.status === "awaiting_approval" && previousStatus !== "awaiting_approval"
+        && task.mobile_task) {
+      this.runAfterSave(this.notifyDraftReady(task));
+    }
+  }
+
+  /// The one composer (and its one LLMClient) for this sandbox.
+  private cardComposer(): CardMessageComposer | null {
+    if (this.cardComposerInstance === undefined) {
+      this.cardComposerInstance = createCardMessageComposer(new LLMClient(this.llmConfig("hygge-browser-agent")));
+    }
+    return this.cardComposerInstance;
+  }
+
+  /// A composition failure must be detectable server-side, not
+  /// just a log line: a model outage silently kills new-work, mail,
+  /// help, draft, and expiry notifications (each fails closed with
+  /// no message and no push). The repo has no metrics helper; the
+  /// observable surface is a structured console.error plus a row
+  /// in this object's `events` table (kind
+  /// `chat-composer-failure`, payload {surface, reason}),
+  /// queryable like the existing `scheduled-scan` event rows.
+  /// Never throws: reporting must not fail the work it reports on.
+  private reportComposerFailure(surface: string, reason: string): void {
+    console.error(`chat-composer-failure surface=${surface} reason=${reason}`);
+    try {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO events (kind, payload) VALUES (?, ?)",
+        "chat-composer-failure", JSON.stringify({ surface, reason }),
+      );
+    } catch { /* observability must never fail user work */ }
+  }
+
+  /// Run async chat work (help upgrade, draft notice, expiry
+  /// notice) after the synchronous save returns, without failing
+  /// the save: same waitUntil-with-floating-fallback shape as
+  /// schedulePush. The work itself never throws (each method
+  /// guards its own failures), and the catch here is the last net.
+  private runAfterSave(work: Promise<unknown>): void {
+    const guarded = work.catch(() => {});
+    try {
+      this.ctx.waitUntil(guarded);
+    } catch {
+      void guarded;
+    }
+  }
+
+  /// The site name for a task's push bodies and composed facts:
+  /// the known site's name when the task's domain matches one,
+  /// else the bare domain. Shared by the saveTask push and the
+  /// help upgrade so the two cannot drift apart.
+  private helpSiteName(task: any): string {
+    const domain = domainOf(task.target_url ?? "");
+    const siteRow = this.stateStore().list("sites")
+      .map((row) => scanSiteFromRow(String(row.id), row.data))
+      .find((site) => site && domainOfUrl(site.startURLString) === domain);
+    return siteRow?.name ?? domain;
+  }
+
+  /// Compose the chat message for a static-literal help and
+  /// replace the mirror row's text with the composed version
+  /// (same id, same createdAt — the app dedupes on the id, so the
+  /// message upgrades in place rather than duplicating). The push
+  /// waits for the composition, so the push body is the composed
+  /// message's own words; the composer names the site from the
+  /// facts, so no site prefix is added. On composition failure or
+  /// an unconfigured model, the row keeps the literal relay and
+  /// the push goes out with today's `${site}: ${relay}` body —
+  /// that fallback is logged (reportComposerFailure + warn), not
+  /// silent. If the message row is gone by then (deleted), there
+  /// is no push at all: a push only ever comes from a chat
+  /// message that exists.
+  private async upgradeHelpMessage(task: any, mirrorText: string, mirrorCreatedAt: string): Promise<void> {
+    const helpId = String(task.help?.id ?? "");
+    if (!helpId || this.composedChatPending.has(helpId)) return;
+    this.composedChatPending.add(helpId);
+    try {
+      const store = this.stateStore();
+      if (!store.get("messages", helpId)) return;
+      const composer = this.cardComposer();
       const firstQuestion = (task.help?.questions?.[0]?.text as string | undefined)?.trim() ?? "";
-      const domain = domainOf(task.target_url ?? "");
-      const siteRow = this.stateStore().list("sites")
-        .map((row) => scanSiteFromRow(String(row.id), row.data))
-        .find((site) => site && domainOfUrl(site.startURLString) === domain);
-      const siteName = siteRow?.name ?? domain;
-      const message = [helpText, firstQuestion].filter(Boolean).join(" ");
-      this.schedulePush([needsHumanEvent(String(task.id), message ? `${siteName}: ${message}` : undefined)]);
+      let composed: string | null = null;
+      let failureReason: string | null = null;
+      if (!composer) {
+        failureReason = "model_unconfigured";
+      } else {
+        composed = await composer({
+          surface: "help",
+          facts: {
+            site: this.helpSiteName(task),
+            kind: String(task.help?.kind ?? ""),
+            ask: String(task.help?.message ?? "").trim(),
+            ...(firstQuestion ? { question: firstQuestion } : {}),
+          },
+          recentChat: recentChatContext(store.list("messages")),
+        }).catch(() => null);
+        if (!composed) failureReason = "compose_failed";
+      }
+      if (composed) {
+        try {
+          // An in-place text upgrade is not a new message: it keeps
+          // the row's original previousResponseId (and createdAt),
+          // so the transcript chain never re-points.
+          const existing = store.get("messages", helpId);
+          store.upsert("messages", helpId, {
+            id: helpId, fromAgent: true, text: composed,
+            taskID: task.mobile_task.id, helpID: helpId, createdAt: mirrorCreatedAt,
+            previousResponseId: (existing?.data as Record<string, unknown> | null)?.previousResponseId ?? null,
+          }, new Date().toISOString());
+        } catch { /* deleted meanwhile; the feed card remains */ }
+        if (store.get("messages", helpId)) {
+          this.schedulePush([needsHumanEvent(String(task.id), composed)]);
+        }
+        return;
+      }
+      this.reportComposerFailure("help", failureReason ?? "compose_failed");
+      console.warn(`help chat: composition failed for ${task.help?.kind ?? "help"}; falling back to the static relay text`);
+      if (store.get("messages", helpId)) {
+        this.schedulePush([needsHumanEvent(String(task.id), `${this.helpSiteName(task)}: ${mirrorText}`)]);
+      }
+    } finally {
+      this.composedChatPending.delete(helpId);
+    }
+  }
+
+  /// The draft-ready chat message (policy Nov 5, 22:03 CST):
+  /// "Ready for your review" as an agent-composed message with the
+  /// task context, so the app renders the embedded card, plus a
+  /// push. Deterministic id (`draft-chat-<taskId>`) and the
+  /// row-exists check make it idempotent across re-saves and
+  /// re-approvals; a draft inherits a deadline only from an
+  /// explicit deadline on the underlying opportunity/action
+  /// (task.deadline when a producer sets one — none does today),
+  /// never an invented one. Composition failure or an
+  /// unconfigured model means no message and no push (there is no
+  /// pre-existing text to fall back to); the feed card remains
+  /// the durable surface, and the failure is reported.
+  private async notifyDraftReady(task: any): Promise<void> {
+    const messageId = `draft-chat-${String(task.id).toLowerCase()}`;
+    if (this.composedChatPending.has(messageId)) return;
+    this.composedChatPending.add(messageId);
+    try {
+      const store = this.stateStore();
+      if (store.get("messages", messageId)) return;
+      const composer = this.cardComposer();
+      if (!composer) {
+        this.reportComposerFailure("draft", "model_unconfigured");
+        console.warn(`draft chat: model not configured, skipping message for ${task.id}`);
+        return;
+      }
+      const text = await composer({
+        surface: "draft",
+        facts: {
+          site: this.helpSiteName(task),
+          task: String(task.title ?? task.kind ?? "task"),
+          ...(typeof task.deadline === "string" && task.deadline ? { deadline: task.deadline } : {}),
+        },
+        recentChat: recentChatContext(store.list("messages")),
+      }).catch(() => null);
+      if (!text) {
+        this.reportComposerFailure("draft", "compose_failed");
+        console.warn(`draft chat: composition failed for ${task.id}; no message, no push`);
+        return;
+      }
+      try {
+        store.upsert("messages", messageId, {
+          id: messageId, fromAgent: true, text, createdAt: new Date().toISOString(),
+          context: { kind: "task", taskId: String(task.id) },
+          // Strict previous_response_id policy (Nov 5, 2026): chain
+          // to the previous last message, resolved now.
+          previousResponseId: lastChatMessageId(store.list("messages")),
+        });
+      } catch {
+        console.warn(`draft chat: message write failed for ${task.id}; no message, no push`);
+        return;
+      }
+      this.schedulePush([chatMessageEvent(messageId, text)]);
+    } finally {
+      this.composedChatPending.delete(messageId);
+    }
+  }
+
+  /// Expiry lifecycle (policy Nov 5, 22:14 CST): when a decision
+  /// card reaches its expiry, the agent is prompted to send a
+  /// message about it — agent-composed, as a chat message with its
+  /// card, + push — exactly once per card. This is a lifecycle
+  /// notice, not an urgency treatment: expiry never affects
+  /// routing (all decision cards go to chat anyway), and the
+  /// expired display itself is derived lazily client-side from
+  /// the expiry time — no server `expired` field.
+  ///
+  /// Trigger: the scheduled tick calls this (fire-and-forget, so
+  /// the tick's response never waits on model composition). No
+  /// new scheduler.
+  ///
+  /// Exactly-once: the dedupe flag (`expiryNotifiedAt` +
+  /// `expiryNotifiedFor`, the deadline it fired for) is written
+  /// to the task row by saveTask BEFORE any composition, so a
+  /// retry/tick overlap can never double-send; the in-memory
+  /// pending set below closes the race between two ticks that
+  /// scanned before either flag landed. The price is that a
+  /// failed composition means no notice ever for that deadline —
+  /// the failure is reported, and the feed card remains. Keying
+  /// the flag by the deadline value (not just the task) means a
+  /// later re-asked help with a NEW deadline still gets its own
+  /// notice.
+  ///
+  /// Scope: only still-pending cards — needsHuman / failed with a
+  /// help, awaitingApproval drafts — carrying a deadline (the
+  /// help's deadline, or a draft's explicit task.deadline). A card
+  /// the user already acted on is gone from the feed (its status
+  /// moved on), so it never reaches this path. Scheduled-scan
+  /// episodes are excluded: scan missions never notify. Snapshot
+  /// imports are excluded. A task whose card the app cannot render
+  /// (mobileTask null) gets no notice and no push.
+  private async notifyExpiredCards(now: Date = new Date()): Promise<void> {
+    const rows = [...this.ctx.storage.sql.exec("SELECT task FROM tasks ORDER BY created_at")] as Row[];
+    const store = this.stateStore();
+    for (const row of rows) {
+      let task: any;
+      try { task = JSON.parse(String(row.task)); } catch { continue; }
+      if (!task || typeof task.id !== "string" || task._fromSnapshot === true) continue;
+      if (task.scheduled_scan === true) continue;
+      if (!["needsHuman", "failed", "awaiting_approval"].includes(task.status)) continue;
+      if (task.status === "failed" && !task.help) continue;
+      const deadline = typeof task.help?.deadline === "string" && task.help.deadline
+        ? task.help.deadline
+        : typeof task.deadline === "string" && task.deadline ? task.deadline : null;
+      if (!deadline) continue;
+      const expiresMs = Date.parse(deadline);
+      if (!Number.isFinite(expiresMs) || expiresMs > now.getTime()) continue;
+      if (task.expiryNotifiedFor === deadline) continue;
+      if (!mobileTask(task)) continue;
+      const messageId = task.help?.id
+        ? `expiry-chat-${String(task.help.id).toLowerCase()}`
+        : `expiry-chat-${String(task.id).toLowerCase()}`;
+      if (this.composedChatPending.has(messageId)) continue;
+      // Flag first (see header): exactly-once wins over retry.
+      task.expiryNotifiedAt = now.toISOString();
+      task.expiryNotifiedFor = deadline;
+      this.saveTask(task);
+      this.composedChatPending.add(messageId);
+      try {
+        if (store.get("messages", messageId)) continue;
+        const composer = this.cardComposer();
+        if (!composer) {
+          this.reportComposerFailure("expiry", "model_unconfigured");
+          console.warn(`expiry chat: model not configured, skipping notice for ${task.id}`);
+          continue;
+        }
+        const text = await composer({
+          surface: "expiry",
+          facts: {
+            site: this.helpSiteName(task),
+            item: String(task.title ?? task.kind ?? "task"),
+            expiredAt: deadline,
+          },
+          recentChat: recentChatContext(store.list("messages")),
+        }).catch(() => null);
+        if (!text) {
+          this.reportComposerFailure("expiry", "compose_failed");
+          console.warn(`expiry chat: composition failed for ${task.id}; no message, no push (flag already set, no retry)`);
+          continue;
+        }
+        try {
+          store.upsert("messages", messageId, {
+            id: messageId, fromAgent: true, text, createdAt: now.toISOString(),
+            context: { kind: "task", taskId: String(task.id) },
+            previousResponseId: lastChatMessageId(store.list("messages")),
+          });
+        } catch {
+          console.warn(`expiry chat: message write failed for ${task.id}; no message, no push`);
+          continue;
+        }
+        this.schedulePush([chatMessageEvent(messageId, text)]);
+      } finally {
+        this.composedChatPending.delete(messageId);
+      }
     }
   }
 
@@ -750,14 +1086,14 @@ export class UserSandbox extends DurableObject<Env> {
   private async composeAndWriteMailChat(input: {
     surface: "mail-question" | "mail";
     facts: Record<string, string>;
-    atIso: string;
     id: string;
     context?: Record<string, unknown>;
   }): Promise<{ id: string; text: string } | null> {
     const store = this.stateStore();
     if (store.get("messages", input.id)) return null;
-    const composer = createCardMessageComposer(new LLMClient(this.llmConfig("hygge-browser-agent")));
+    const composer = this.cardComposer();
     if (!composer) {
+      this.reportComposerFailure(input.surface, "model_unconfigured");
       console.warn(`mail chat: model not configured, skipping ${input.surface} message`);
       return null;
     }
@@ -767,14 +1103,27 @@ export class UserSandbox extends DurableObject<Env> {
       recentChat: recentChatContext(store.list("messages")),
     }).catch(() => null);
     if (!text) {
+      this.reportComposerFailure(input.surface, "compose_failed");
       console.warn(`mail chat: composition failed for ${input.surface}; no message, no push`);
       return null;
     }
     try {
+      // The question is written now: its createdAt is the write
+      // time, NOT the mail's receivedAt. The transcript chain
+      // (previous_response_id) resolves "the last message" by
+      // createdAt, so a backdated stamp would let a later message
+      // chain past this one — and display order follows the same
+      // stamp, so the question would also appear above messages
+      // written after it arrived. The mail's own arrival time
+      // lives on the filed mail card and the journal entry.
+      const writtenAt = new Date().toISOString();
       store.upsert("messages", input.id, {
-        id: input.id, fromAgent: true, text, createdAt: input.atIso,
+        id: input.id, fromAgent: true, text, createdAt: writtenAt,
         ...(input.context ? { context: input.context } : {}),
-      }, input.atIso);
+        // Strict previous_response_id policy (Nov 5, 2026): chain
+        // to the previous last message, resolved now.
+        previousResponseId: lastChatMessageId(store.list("messages")),
+      }, writtenAt);
     } catch {
       console.warn(`mail chat: message write failed for ${input.surface}; no message, no push`);
       return null;
@@ -1115,7 +1464,6 @@ export class UserSandbox extends DurableObject<Env> {
                 sender: s.senderDomain,
                 subject: s.subject || "(no subject)",
               },
-              atIso: delivery.receivedAt,
               id: UserSandbox.uuidFromSeed(`${delivery.contentHash}chat`),
             });
             if (asked) {
@@ -1154,7 +1502,6 @@ export class UserSandbox extends DurableObject<Env> {
             summary: s.summary,
             ...(titles.length ? { roles: titles.join(", "), roleCount: String(titles.length) } : {}),
           },
-          atIso: delivery.receivedAt,
           id: UserSandbox.uuidFromSeed(`${delivery.contentHash}chat`),
         });
         if (asked) {
@@ -1181,10 +1528,14 @@ export class UserSandbox extends DurableObject<Env> {
       // message, never the filed mail directly and never without
       // a message. Authenticated tracked (or work-ruled) senders
       // only, at most one per sender per day — the rest stay in
-      // the journal.
+      // the journal. One mail pushes once: when the mail already
+      // produced a chat question above (outcome "chat_asked"), the
+      // backing push is skipped — the question's push is the
+      // mail's one push.
       const mentionsMessage = (delivery.triage?.highlights ?? []).some((h) => h.kind === "client_message")
         || readingMentions.some((m) => m.kind === "client_message");
       if (mentionsMessage && triage.decision === "work" && triage.relation !== "owner"
+        && outcome !== "chat_asked"
         && delivery.triage?.senderAuthenticated === true) {
         const day = delivery.receivedAt.slice(0, 10);
         const capKey = `mailPush:${s.senderDomain.toLowerCase()}:${day}`;
@@ -1197,7 +1548,6 @@ export class UserSandbox extends DurableObject<Env> {
               subject: s.subject || "(no subject)",
               summary: s.summary,
             },
-            atIso: delivery.receivedAt,
             id: summaryId,
             context: { kind: "mail", id: summaryId },
           });
@@ -1484,7 +1834,7 @@ export class UserSandbox extends DurableObject<Env> {
       task.failure = { code: "job_delivery_exhausted" };
       task.help = help("recovery",
         "I couldn't get this started again after several tries. I can check where we left off in a new session, or you can stop here.",
-        [], "Open new session");
+        [], "Open new session", null, { staticText: true });
       const sessionID = task.session_id;
       task.session_id = null;
       task.pending_action = null;
@@ -1535,7 +1885,7 @@ export class UserSandbox extends DurableObject<Env> {
       if(workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2')throw error;
       task.status = "failed";
       task.failure = classifyBrowserFailure(error);
-      task.help = help("recovery", `${task.failure.userMessage} I can check where we left off in a new session, or you can stop here.`, [], "Open new session");
+      task.help = help("recovery", `${task.failure.userMessage} I can check where we left off in a new session, or you can stop here.`, [], "Open new session", null, { staticText: true });
       const sessionID = task.session_id;
       task.session_id = null;
       task.pending_action = null;
@@ -1678,7 +2028,7 @@ export class UserSandbox extends DurableObject<Env> {
     // projection together. Legacy outcome/promotions never run on this path.
     if (workspaceHooks) return result;
     task.help = result.help ?? (result.status === "failed"
-      ? help("recovery", "I couldn't finish this step after trying another route. We can check the site before trying again.", [], "Try again") : null);
+      ? help("recovery", "I couldn't finish this step after trying another route. We can check the site before trying again.", [], "Try again", null, { staticText: true }) : null);
     task.pending_action = result.pendingAction ?? null;
     task.checkpoint = result.checkpoint ?? null;
     task.information_requests = result.informationRequests ?? [];
@@ -1729,7 +2079,7 @@ export class UserSandbox extends DurableObject<Env> {
     if (browser.controlState(result.sessionID)?.human) {
       task.status = "needsHuman";
       if (task.help?.kind !== "approval") {
-        task.help = help("verification", "You’re in control. Let me know when I can continue.", [], "Continue in browser");
+        task.help = help("verification", "You’re in control. Let me know when I can continue.", [], "Continue in browser", null, { staticText: true });
       }
     } else if (result.status !== "needs_human" && result.status !== "needs_info") {
       await browser.closeSession(result.sessionID).catch(() => {});
@@ -2036,10 +2386,16 @@ export class UserSandbox extends DurableObject<Env> {
       // The tick's one chat message is composed by the model from
       // the listing facts (chat-composer.ts) — never a canned
       // string. No model configured means no message and no push.
+      // A composition failure is reported (not just logged) so a
+      // model outage silently killing new-work notifications is
+      // detectable server-side.
       composeOfferMessage: async (input) => {
-        const composer = createCardMessageComposer(new LLMClient(this.llmConfig("hygge-browser-agent")));
-        if (!composer) return null;
-        return composer({
+        const composer = this.cardComposer();
+        if (!composer) {
+          this.reportComposerFailure("offer", "model_unconfigured");
+          return null;
+        }
+        const text = await composer({
           surface: "offer",
           facts: {
             site: input.siteName,
@@ -2050,6 +2406,8 @@ export class UserSandbox extends DurableObject<Env> {
           },
           recentChat: input.recentChat,
         });
+        if (!text) this.reportComposerFailure("offer", "compose_failed");
+        return text;
       },
       log: (message) => {
         this.ctx.storage.sql.exec(
@@ -2671,6 +3029,13 @@ export class UserSandbox extends DurableObject<Env> {
         // the new-work chat message only (see push.ts). Needs-you
         // episodes stay in the feed and never push.
         this.schedulePush(planTickNotifications(summary));
+        // Expiry lifecycle (policy Nov 5, 22:14 CST): the tick is
+        // the server-side trigger that notices newly-expired
+        // still-pending cards and prompts the agent. Fire-and-
+        // forget so the tick's response never waits on model
+        // composition; the exactly-once flag is written before any
+        // compose, so overlaps cannot double-send.
+        this.runAfterSave(this.notifyExpiredCards());
         return json(summary);
       }
       if (request.method === "GET" && parts.join("/") === "scheduled-scan/status") {

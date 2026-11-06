@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { help, helpRoutesToChat, decisionHelpMessageText, parseHelpDeadline, isShortDeadline, DEADLINE_WINDOW_HOURS, informationHelp, applyHelpReply, actionFingerprint, needsActionApproval, mobileTask, canResumeWithInboxCode } from '../src/task-help.ts';
+import { help, helpRoutesToChat, decisionHelpMessageText, parseHelpDeadline, informationHelp, applyHelpReply, actionFingerprint, needsActionApproval, mobileTask, canResumeWithInboxCode } from '../src/task-help.ts';
 import { runMission } from '../src/agent.ts';
 const task = () => ({ id: 'task', kind: 'signup', target_url: 'https://example.com', goal: 'Connect account', status: 'approved', interaction_version: 1, drafted_payload: { location: 'Austin', setupMode: 'connect' } });
 const snapshot = (labels = ['Account settings']) => ({ sessionID: 'kept', currentURLString: 'https://example.com', title: 'Account', elements: labels.map(label => ({ label, kind: 'click' })), humanControlled: false });
@@ -44,24 +44,39 @@ test('feed/chat routing: an unknown or missing kind is made visible, not silentl
   }
 });
 
-test('deadline validation: garbage, past, and blank dates are no deadline; far-future is a deadline but not short', () => {
-  assert.equal(DEADLINE_WINDOW_HOURS, 24, "Mikael's call to change — the short window is one named constant");
+test('deadline validation: garbage, past, and blank dates are no deadline; any valid future date is display-only', () => {
+  // The deadline is an OPTIONAL EXPIRY TIME, FOR DISPLAY ONLY
+  // (policy Nov 5, 2026, simplified Nov 5, 22:08 CST): no "short"
+  // concept, no window, no escalation or enforcement. Validation
+  // is display hygiene only — a deadline already past when set is
+  // rejected; one that lapses later renders as a past "Expires"
+  // date on a still-live card (accepted).
   const now = new Date('2026-11-05T12:00:00.000Z');
-  const inWindow = new Date(now.getTime() + 6 * 60 * 60 * 1000).toISOString();
+  const soon = new Date(now.getTime() + 6 * 60 * 60 * 1000).toISOString();
   const farFuture = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
   const past = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
-  assert.equal(parseHelpDeadline(inWindow, now)?.toISOString(), inWindow);
+  assert.equal(parseHelpDeadline(soon, now)?.toISOString(), soon);
   assert.equal(parseHelpDeadline(farFuture, now)?.toISOString(), farFuture, "a far-future date is still a real expiration date");
   assert.equal(parseHelpDeadline(past, now), null, "a past date is no deadline");
   assert.equal(parseHelpDeadline('not a date', now), null, "garbage is no deadline");
   assert.equal(parseHelpDeadline('  ', now), null, "a blank deadline is no deadline");
   assert.equal(parseHelpDeadline(null, now), null);
-  assert.equal(isShortDeadline(inWindow, now), true, "a valid in-window deadline is short");
-  assert.equal(isShortDeadline(farFuture, now), false, "a far-future date must NOT escalate");
-  assert.equal(isShortDeadline(past, now), false);
-  assert.equal(isShortDeadline('garbage', now), false);
-  assert.equal(isShortDeadline(new Date(now.getTime() + DEADLINE_WINDOW_HOURS * 60 * 60 * 1000).toISOString(), now), true, "exactly at the window edge is still short");
-  assert.equal(isShortDeadline(new Date(now.getTime() + (DEADLINE_WINDOW_HOURS + 1) * 60 * 60 * 1000).toISOString(), now), false);
+});
+
+test('static helps are marked at the producer; model-composed helps carry no marker', () => {
+  // The mirror composes the chat message for a marked help from
+  // its facts instead of relaying the literal verbatim; an
+  // unmarked help relays verbatim.
+  assert.equal(help('recovery', 'Literal', [], 'Try again', null, { staticText: true }).staticText, true);
+  assert.equal('staticText' in help('information', 'Model reason', [{ text: 'Model question?' }]), false);
+  const secret = informationHelp({ questions: ['What is your verification code?'] }, {});
+  assert.equal(secret.staticText, true, "the secret-question literal is static");
+  const noReason = informationHelp({ questions: [{ text: 'Where?' }] }, {});
+  assert.equal(noReason.staticText, true, "no model reason means the literal fallback message");
+  const modelled = informationHelp({ reason: 'Need your city', questions: [{ text: 'Which city?' }] }, {});
+  assert.equal('staticText' in modelled, false, "model reason + model question relays verbatim");
+  const noQuestion = informationHelp({ reason: 'Need a detail', questions: [] }, {});
+  assert.equal(noQuestion.staticText, true, "the literal fallback question marks the help static");
 });
 
 test('help() normalizes deadlines: valid future dates are stored, garbage/past are dropped and logged', () => {

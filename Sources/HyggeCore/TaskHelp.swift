@@ -9,10 +9,12 @@ public struct TaskHelp: Codable, Equatable, Sendable, Identifiable {
     public var message: String
     public var questions: [Question]
     public var actionLabel: String
-    /// Optional ISO-8601 deadline for an approval: a deadline-free
-    /// approval surfaces in the feed only; one with a deadline also
-    /// reaches chat (with a push). No producer sets this yet — it is
-    /// the extension point for short-deadline approvals.
+    /// Optional ISO-8601 expiry for a help, display only: the chat
+    /// card shows "Expires <date>" when it parses. It never drives
+    /// routing, escalation, or enforcement — every decision card
+    /// reaches chat anyway — and there is no window and no "short"
+    /// deadline concept. The agent sets it where an expiry applies;
+    /// cases with no expiry leave it unset.
     public var deadline: String?
     public struct Question: Codable, Equatable, Sendable, Identifiable {
         public var id: String { text }
@@ -28,15 +30,33 @@ public struct TaskHelp: Codable, Equatable, Sendable, Identifiable {
         self.questions = questions; self.actionLabel = actionLabel; self.deadline = deadline
     }
 
+    /// Whether the display-only expiry has passed. Derived lazily
+    /// from the deadline timestamp — there is no server expired flag
+    /// and no enforcement; this only drives the expired rendering.
+    /// A help with no deadline, or one that does not parse, never
+    /// expires. Whether the card is still pending is the caller's
+    /// job: every render site only shows this for pending cards.
+    public var isExpired: Bool {
+        guard let deadline, let date = Self.expiryDate(deadline) else { return false }
+        return date < Date()
+    }
+
+    /// A deadline is an ISO-8601 string; parse it leniently (with or
+    /// without fractional seconds) and return nil when it does not
+    /// parse — the deadline's validity is the server's job.
+    public static func expiryDate(_ deadline: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: deadline) { return date }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: deadline)
+    }
+
     /// A stable id for a synthesized help request, derived from the help's
     /// content: the same situation re-synthesizes the same id across polls
     /// (so the transcript guard dedupes it and a review tap never goes
-    /// stale), while a changed situation mints a different id. The
-    /// deadline is part of the situation: attaching (or changing) one
-    /// must mint a different id, or the old chat entry would stand
-    /// for a help whose urgency changed.
-    public static func stableSynthesizedID(taskID: UUID, status: String, pendingEffectID: String?, informationRequests: [String], deadline: String? = nil) -> UUID {
-        let input = [taskID.uuidString, status, pendingEffectID ?? "", informationRequests.joined(separator: "\n"), deadline ?? ""].joined(separator: "\u{1F}")
+    /// stale), while a changed situation mints a different id.
+    public static func stableSynthesizedID(taskID: UUID, status: String, pendingEffectID: String?, informationRequests: [String]) -> UUID {
+        let input = [taskID.uuidString, status, pendingEffectID ?? "", informationRequests.joined(separator: "\n")].joined(separator: "\u{1F}")
         var bytes = Array(SHA256.hash(data: Data(input.utf8)).prefix(16))
         bytes[6] = (bytes[6] & 0x0F) | 0x50
         bytes[8] = (bytes[8] & 0x3F) | 0x80

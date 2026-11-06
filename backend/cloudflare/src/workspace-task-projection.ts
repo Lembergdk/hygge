@@ -1,6 +1,6 @@
 import type { RunCompletionReceipt } from './workspace-contract.ts';
 import { WorkspacePersistence, canonical, fail, type WorkspaceStorage } from './workspace-persistence.ts';
-import { StateStore, createSqliteStateDb, ensureStateSchema } from './state.ts';
+import { StateStore, createSqliteStateDb, ensureStateSchema, lastChatMessageId } from './state.ts';
 import { helpRoutesToChat, decisionHelpMessageText } from './task-help.ts';
 export type WorkspaceTask = Record<string, any> & { id:string; status:string };
 export interface TaskProjectionMeta { runId:string; requestId:string; completionReceiptId?:string }
@@ -38,7 +38,12 @@ export function createWorkspaceTaskProjection(storage:WorkspaceStorage,db:Worksp
     // the write is guarded and the task row above is already saved.
     if(task.help&&task.mobile_task&&helpRoutesToChat(task.help)&&!store.get('messages',task.help.id)){
       const text=decisionHelpMessageText(task);
-      if(text){try{store.upsert('messages',task.help.id,{id:task.help.id,fromAgent:true,text,taskID:task.mobile_task.id,helpID:task.help.id,createdAt:timestamp},timestamp);}catch{/* a deleted message stays deleted; the feed card remains */}}
+      // Strict previous_response_id policy (Nov 5, 2026): chain
+      // to the previous last message, resolved now. (This
+      // projector is the fallback mirror; in production the
+      // saveTask override is the mirror and this line does not
+      // run — both carry the same chain field.)
+      if(text){try{store.upsert('messages',task.help.id,{id:task.help.id,fromAgent:true,text,taskID:task.mobile_task.id,helpID:task.help.id,createdAt:timestamp,previousResponseId:lastChatMessageId(store.list('messages'))},timestamp);}catch{/* a deleted message stays deleted; the feed card remains */}}
     }
     if(task.mobile_task?.siteID&&['signup','buildProfile'].includes(task.kind)){
       const siteID=task.mobile_task.siteID;

@@ -112,6 +112,13 @@ struct ConversationView: View {
                             store.markChatRead()
                             for task in store.chatHelpTasks { store.surfaceTaskHelp(taskID: task.id) }
                             // A tapped push names one message: land on it.
+                            // A named message that never arrived leaves a
+                            // stale id behind: drop it so a later open
+                            // does not chase it again.
+                            if let id = store.pendingChatMessageID,
+                               store.chatTranscript.first(where: { $0.id == id }) == nil {
+                                store.pendingChatMessageID = nil
+                            }
                             if let id = store.pendingChatMessageID,
                                let entry = store.chatTranscript.first(where: { $0.id == id }) {
                                 store.pendingChatMessageID = nil
@@ -125,6 +132,8 @@ struct ConversationView: View {
                             if let id, let entry = store.chatTranscript.first(where: { $0.id == id }) {
                                 store.pendingChatMessageID = nil
                                 proxy.scrollTo(entry.id, anchor: .top)
+                            } else if id != nil {
+                                store.pendingChatMessageID = nil
                             }
                         }
                         .onChange(of: store.conversationTaskID) { _, id in
@@ -250,7 +259,11 @@ struct ConversationView: View {
 
     @ViewBuilder
     private func contextCard(_ context: ChatContextRef) -> some View {
-        if isResolvableContext(context) {
+        if isExpiredTaskContext(context) {
+            // Expired decision: still viewable and marked, but no
+            // longer actionable — no button into the feed.
+            expiredContextCard(context)
+        } else if isResolvableContext(context) {
             Button { openContextInFeed(context) } label: { chatContextCard(context, showsOpenChevron: true) }
                 .buttonStyle(.plain)
                 .accessibilityHint("Opens in the feed")
@@ -259,10 +272,28 @@ struct ConversationView: View {
         }
     }
 
+    /// A context about a task whose display-only expiry has passed:
+    /// the card stays visible but its action is gone.
+    private func isExpiredTaskContext(_ context: ChatContextRef) -> Bool {
+        guard context.kind == "task", let id = UUID(uuidString: context.id),
+              let task = store.tasks.first(where: { $0.id == id }) else { return false }
+        return task.help?.isExpired == true
+    }
+
+    private func expiredContextCard(_ context: ChatContextRef) -> some View {
+        var expired = context
+        expired.subtitle = "Expired" + (context.subtitle.isEmpty ? "" : " · \(context.subtitle)")
+        return chatContextCard(expired)
+            .accessibilityLabel("Expired: \(context.title)")
+    }
+
     private func isResolvableContext(_ context: ChatContextRef) -> Bool {
         // A site context carries a site id, not a UUID-typed row id:
         // resolve it against the proposals by site, not by row.
         if context.kind == "site" { return store.proposals.contains(where: { $0.siteID == context.id }) }
+        // The notifications primer has no row id either: its card
+        // opens the notifications surface (see openContextInFeed).
+        if context.kind == "notifications" { return true }
         guard let id = UUID(uuidString: context.id) else { return false }
         switch context.kind {
         case "opportunity": return store.opportunities.contains(where: { $0.id == id })
@@ -303,15 +334,20 @@ struct ConversationView: View {
             guard let id = UUID(uuidString: context.id),
                   store.activityEvents.contains(where: { $0.id == id }) else { return missingContext() }
             store.pendingEventOpenID = id
+        case "notifications":
+            store.pendingNotificationsOpen = true
         default: return
         }
         dismiss()
     }
 
     /// The card's feed item vanished between render and tap: close
-    /// the chat so Home can say so in one line.
+    /// the chat so Home can say so in one line. The note is a
+    /// routing fallback, so Home scrolls to the top and closes the
+    /// chat bubble first — in the bubble host dismiss() is a no-op
+    /// and the open bubble would otherwise cover the note.
     private func missingContext() {
-        store.lastMessage = "That one is already sorted. Everything waiting for you is below."
+        store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
         dismiss()
     }
 
@@ -418,6 +454,10 @@ struct ConversationView: View {
         do {
             let state = try await store.backend.conversationState()
             agentState = state; agentError = nil
+            // A new generation means the thread was cleared (reset):
+            // note it before the pull, so the pull's synthesis does
+            // not regrow the decision entries cleared with it.
+            store.noteConversationGeneration(state.generation)
             _ = await store.pullFromServer(reconcilingConversation: state.activeTurn == nil && store.pendingConversationMessageID == nil)
             if let id = store.pendingConversationMessageID,
                let message = store.chatTranscript.first(where: { $0.id == id }) {
@@ -498,21 +538,14 @@ struct ConversationView: View {
         catch { agentError = "I couldn't report the calendar result. Retrying this saved action will check for an existing event first." }
     }
 
-    /// A deadline is an ISO-8601 string; parse it leniently (with or
-    /// without fractional seconds) and render nothing when it does
-    /// not parse — the deadline's validity is the server's job.
-    private static func deadlineDate(_ deadline: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        if let date = formatter.date(from: deadline) { return date }
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.date(from: deadline)
-    }
-
     @ViewBuilder
     private func taskHelpCard(_ task: AgentTask, help: TaskHelp) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let deadline = help.deadline, let date = Self.deadlineDate(deadline) {
-                Text("Expires \(date.formatted(date: .abbreviated, time: .shortened))")
+            // Display-only expiry: a lapsed deadline renders as
+            // "Expired" and the card's actions go dead — it stays
+            // visible, but nothing here acts on the task anymore.
+            if let deadline = help.deadline, let date = TaskHelp.expiryDate(deadline) {
+                Text(help.isExpired ? "Expired" : "Expires \(date.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption).foregroundStyle(HyggeTheme.secondary)
             }
             if help.kind == .information, let question = help.questions.first {
@@ -578,6 +611,7 @@ struct ConversationView: View {
                 Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id, choiceLabel: label) }
             }.buttonStyle(SettingsActionStyle(filled: false))
         }
+        .disabled(help.isExpired)
         .foregroundStyle(HyggeTheme.ink)
         .padding(16).hyggeCard(radius: 20).padding(.leading, 33)
     }

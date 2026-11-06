@@ -8,7 +8,8 @@ struct StoreSnapshot: Codable {
          proposals: [ProposedSite], accountStates: [String: SiteAccountState],
          chatTranscript: [ChatEntry], activityEvents: [ActivityEvent], isPaused: Bool,
          lastVisitAt: Date?, beliefs: BeliefBook = BeliefBook(), searchEvidence: [SearchEvidence] = [],
-         feedbackEvents: [FeedbackEvent] = [], learningProfile: LearningProfile = LearningProfile()) {
+         feedbackEvents: [FeedbackEvent] = [], learningProfile: LearningProfile = LearningProfile(),
+         clearedHelpIDs: Set<UUID> = [], lastConversationGeneration: String? = nil) {
         self.profile = profile; self.hasOnboarded = hasOnboarded; self.sites = sites
         self.siteMemory = siteMemory; self.credentialRefs = credentialRefs
         self.opportunities = opportunities; self.tasks = tasks; self.applications = applications
@@ -17,6 +18,7 @@ struct StoreSnapshot: Codable {
         self.isPaused = isPaused; self.lastVisitAt = lastVisitAt
         self.beliefs = beliefs; self.searchEvidence = searchEvidence
         self.feedbackEvents = feedbackEvents; self.learningProfile = learningProfile
+        self.clearedHelpIDs = clearedHelpIDs; self.lastConversationGeneration = lastConversationGeneration
     }
     var profile: EarningsProfile
     var profilePhotoData: Data? = nil
@@ -41,6 +43,13 @@ struct StoreSnapshot: Codable {
     var pendingConversationMessageID: UUID? = nil
     var pendingConversationGeneration: String? = nil
     var conversationNeedsReconciliation: Bool = false
+    /// Help ids cleared with a conversation reset (see
+    /// noteConversationGeneration): synthesis skips these until the
+    /// user taps the help back into chat or its situation changes.
+    var clearedHelpIDs: Set<UUID> = []
+    /// Last conversation generation seen from the server. A new one
+    /// means the thread was cleared (reset).
+    var lastConversationGeneration: String? = nil
     var activityEvents: [ActivityEvent]
     var isPaused: Bool
     var lastVisitAt: Date?
@@ -72,6 +81,8 @@ struct StoreSnapshot: Codable {
         pendingConversationMessageID = try c.decodeIfPresent(UUID.self, forKey: .pendingConversationMessageID)
         pendingConversationGeneration = try c.decodeIfPresent(String.self, forKey: .pendingConversationGeneration)
         conversationNeedsReconciliation = try c.decodeIfPresent(Bool.self, forKey: .conversationNeedsReconciliation) ?? false
+        clearedHelpIDs = try c.decodeIfPresent(Set<UUID>.self, forKey: .clearedHelpIDs) ?? []
+        lastConversationGeneration = try c.decodeIfPresent(String.self, forKey: .lastConversationGeneration)
         activityEvents = try c.decodeIfPresent([ActivityEvent].self, forKey: .activityEvents) ?? []
         isPaused = try c.decodeIfPresent(Bool.self, forKey: .isPaused) ?? false
         lastVisitAt = try c.decodeIfPresent(Date.self, forKey: .lastVisitAt)
@@ -212,6 +223,22 @@ final class AppStore {
     /// to be in the transcript: the conversation scrolls to it.
     var pendingChatMessageID: UUID?
     var highlightedOpportunityID: UUID?
+    /// Help ids cleared with a conversation reset (see
+    /// noteConversationGeneration). Synthesis skips these until the
+    /// user taps the help back into chat or its situation changes.
+    /// Persisted: a reset observed on one launch must still hold
+    /// after a relaunch.
+    var clearedHelpIDs: Set<UUID> = []
+    /// Last conversation generation seen from the server. A new one
+    /// means the thread was cleared (reset).
+    private(set) var lastConversationGeneration: String?
+    /// Bumped whenever a routing fallback writes lastMessage, so
+    /// Home can bring the note into view (scroll to top, close the
+    /// chat bubble first). Session-only.
+    var routingNoteRevision = 0
+    /// A chat card about the notifications primer: open the
+    /// notifications surface once Home has closed what is open.
+    var pendingNotificationsOpen = false
     static let pushTokenKey = "hyggePushTokenV1"
     static let pushPrimerResolvedKey = "hyggePushPrimerResolvedV1"
 
@@ -547,6 +574,14 @@ final class AppStore {
             PushInbox.pendingRoute = nil
             await handlePushRoute(route)
         }
+        if PushInbox.pendingForegroundDelivery {
+            PushInbox.pendingForegroundDelivery = false
+            // A push landed while the app was open: pull now so its
+            // message is visible (flame badge + transcript) instead
+            // of waiting for the next scheduled pull. A pull already
+            // in flight returns false here and lands it itself.
+            await pullFromServer()
+        }
         if let token = PushInbox.pendingTokenHex {
             PushInbox.pendingTokenHex = nil
             if DeviceTokenEncoding.isPlausible(token) {
@@ -579,12 +614,32 @@ final class AppStore {
         await refreshNotificationPrimer()
     }
 
+    /// A routing fallback has something to say on Home: set the
+    /// one-line note and bump the revision HomeFeedView watches to
+    /// bring it into view — the feed scrolls to the top and an open
+    /// chat bubble closes first, so the note is never left
+    /// off-screen or hidden behind the bubble.
+    func setRoutingNote(_ message: String) {
+        lastMessage = message
+        routingNoteRevision += 1
+    }
+
     /// A tapped notification lands on fresh state, then opens the
     /// exact element it named: the task's chat card, the listing's
     /// own detail, or that one filed mail. If the element is gone
     /// (handled elsewhere, dismissed), Home says so in one line —
     /// never a wrong element silently substituted.
     func handlePushRoute(_ route: String) async {
+        // A pull already in flight will land the message
+        // imminently: wait for it instead of reporting a false
+        // "couldn't reach". (Same capped wait as refreshFeed; a
+        // stuck pull still falls through to a fresh attempt.)
+        var waits = 0
+        while isSyncing, waits < 100 {
+            guard !Task.isCancelled else { return }
+            try? await Task.sleep(for: .milliseconds(100))
+            waits += 1
+        }
         // The pull's result matters: a failed pull leaves the last
         // known transcript in place, so a missing message after a
         // failed pull is "unconfirmed", not "gone".
@@ -594,7 +649,7 @@ final class AppStore {
             if tasks.contains(where: { $0.id == id }) {
                 pendingTaskOpenID = id
             } else {
-                lastMessage = "That one is already sorted. Everything waiting for you is below."
+                setRoutingNote("That one is already sorted. Everything waiting for you is below.")
             }
         case .chat(let id):
             // The message itself is the landing: open the
@@ -606,23 +661,27 @@ final class AppStore {
                 pendingChatMessageID = id
                 pendingChatOpenID = id
             } else {
-                lastMessage = pulled
+                // No message to scroll to: drop any stale id so a
+                // later open does not chase it again.
+                pendingChatMessageID = nil
+                setRoutingNote(pulled
                     ? "That message isn't here anymore. Everything waiting for you is below."
-                    : "I couldn't reach your conversation just now. Everything waiting for you is below."
+                    : "I couldn't reach your conversation just now. Everything waiting for you is below.")
             }
         case .feedItem(let id):
-            highlightedOpportunityID = id
             if opportunities.contains(where: { $0.id == id }) {
+                highlightedOpportunityID = id
                 pendingOpportunityOpenID = id
             } else {
-                lastMessage = "Fresh work is waiting in your feed below."
+                highlightedOpportunityID = nil
+                setRoutingNote("Fresh work is waiting in your feed below.")
             }
         case .email(let id):
             await refreshHyggeEmail()
             if filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() }) {
                 pendingEmailOpenID = id
             } else {
-                lastMessage = "That mail is filed under Hygge email in your profile."
+                setRoutingNote("That mail is filed under Hygge email in your profile.")
             }
         case .home:
             break
@@ -643,10 +702,12 @@ final class AppStore {
         PushInbox.pendingTokenHex = nil
         PushInbox.lastDeliveredTokenHex = nil
         PushInbox.pendingRoute = nil
+        PushInbox.pendingForegroundDelivery = false
         notificationPrimerVisible = false
         pendingTaskOpenID = nil
         pendingOpportunityOpenID = nil
         pendingEmailOpenID = nil
+        pendingNotificationsOpen = false
         pendingTaskFocusOpenID = nil
         pendingProposalOpenID = nil
         pendingEventOpenID = nil
@@ -863,7 +924,7 @@ final class AppStore {
         Task { await replyToTask(taskID: taskID, helpID: help.id, answers: answers) }
     }
 
-    func surfaceTaskHelp(taskID: UUID) {
+    func surfaceTaskHelp(taskID: UUID, userInitiated: Bool = false) {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].needsChatHelp else { return }
         if tasks[index].help == nil {
             let task = tasks[index]
@@ -888,20 +949,27 @@ final class AppStore {
                 actionLabel: reviewing || task.status == .failed ? "Check and continue" : "Complete check")
         }
         guard let help = tasks[index].help else { return }
+        // A thread cleared by a reset stays cleared: the poll and
+        // the pull must not regrow its decision entries. A tap on
+        // the feed card is the user asking for this help in chat,
+        // so it spends the suppression and the entry stays.
+        if clearedHelpIDs.contains(help.id) {
+            guard userInitiated else { return }
+            clearedHelpIDs.remove(help.id)
+            writeCache()
+        }
         // Single source for the chat entry: the message the server
         // wrote for this help already counts, so never synthesize a
         // second one beside it. The server mirror carries the help's
-        // own id (and may carry a task context); match on any of
-        // those, not just helpID, so a row that arrived without its
-        // helpID field — or in the task-context shape — still
-        // dedupes. A tap still reaches this path, and it still
-        // synthesizes when no server message exists.
+        // own id as the message id, so match on either field — a row
+        // that arrived without its helpID field still dedupes. A tap
+        // still reaches this path, and it still synthesizes when no
+        // server message exists.
         guard !chatTranscript.contains(where: {
             $0.helpID == help.id || $0.id == help.id
-                || ($0.fromAgent && $0.context?.kind == "task" && $0.context?.id == taskID.uuidString)
         }) else { return }
         chatTranscript.append(ChatEntry(id: help.id, fromAgent: true,
-            text: "\(siteName(id: tasks[index].siteID)): \(help.message)" + (help.questions.first.map { "\n\n" + $0.text } ?? ""), taskID: taskID, helpID: help.id))
+            text: help.message + (help.questions.first.map { "\n\n" + $0.text } ?? ""), taskID: taskID, helpID: help.id))
     }
 
     /// Answer a chat help request. Whatever the user tapped or typed
@@ -1527,6 +1595,8 @@ final class AppStore {
         pendingConversationMessageID = nil
         pendingConversationGeneration = nil
         conversationNeedsReconciliation = false
+        clearedHelpIDs = []
+        lastConversationGeneration = nil
         activityEvents = []
         beliefs = BeliefBook()
         searchEvidence = []
@@ -1545,6 +1615,31 @@ final class AppStore {
     }
 
     // MARK: - Thread, journal, insights, site control
+
+    /// The server's conversation generation changed since the last
+    /// refresh: the thread was cleared (reset), so the decision
+    /// messages cleared with it stay cleared instead of being
+    /// re-synthesized by the next poll. Record the helps
+    /// outstanding right now — a help whose situation later
+    /// changes mints a fresh id and synthesizes again, as it
+    /// should. The first generation seen only establishes the
+    /// baseline; a reset is a change from a known generation.
+    /// Call before the pull that follows the state fetch, so the
+    /// pull's synthesis already respects the suppression.
+    func noteConversationGeneration(_ generation: String) {
+        let changed = lastConversationGeneration != generation
+        if let last = lastConversationGeneration, last != generation {
+            for task in chatHelpTasks {
+                if let help = task.help { clearedHelpIDs.insert(help.id) }
+                else {
+                    clearedHelpIDs.insert(TaskHelp.stableSynthesizedID(taskID: task.id, status: task.status.rawValue,
+                        pendingEffectID: task.pendingEffectID, informationRequests: task.informationRequests))
+                }
+            }
+        }
+        lastConversationGeneration = generation
+        if changed { writeCache() }
+    }
 
     func saveConversationOutbox(messageID: UUID?, generation: String? = nil) {
         pendingConversationMessageID = messageID
@@ -2411,6 +2506,8 @@ final class AppStore {
         snapshot.pendingConversationMessageID = pendingConversationMessageID
         snapshot.pendingConversationGeneration = pendingConversationGeneration
         snapshot.conversationNeedsReconciliation = conversationNeedsReconciliation
+        snapshot.clearedHelpIDs = clearedHelpIDs
+        snapshot.lastConversationGeneration = lastConversationGeneration
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)
@@ -2439,6 +2536,8 @@ final class AppStore {
         pendingConversationMessageID = snapshot.pendingConversationMessageID
         pendingConversationGeneration = snapshot.pendingConversationGeneration
         conversationNeedsReconciliation = snapshot.conversationNeedsReconciliation
+        clearedHelpIDs = snapshot.clearedHelpIDs
+        lastConversationGeneration = snapshot.lastConversationGeneration
         // First run after the badge learned to count unread: treat
         // history as read rather than badging the whole past.
         if UserDefaults.standard.object(forKey: "hygge.chatLastReadAt") == nil { markChatRead() }

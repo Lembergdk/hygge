@@ -1,5 +1,6 @@
 import type { ChatServices } from './chat-agent.ts';
 import type { ChatProposal, ChatEvent, ChatDocument } from './chat-store.ts';
+import { lastChatMessageId } from './state.ts';
 import { monthlyLoggedEarnings, FREE_MONTHLY_EARNINGS_LIMIT } from './scan.ts';
 import { digest } from './workspace-persistence.ts';
 
@@ -125,7 +126,15 @@ export function chatServices(host:ChatServiceHost):ChatServices {
     mirrorFile:doc=>host.mirror(doc),
     eraseFile:doc=>host.erase?host.erase(doc):host.mirror({...doc,content:''}),
     publishMessage(event:ChatEvent){
-      host.put('messages',event.id,{id:event.id,fromAgent:event.kind==='assistant',text:String(event.value),createdAt:event.at});
+      // Strict previous_response_id policy (Nov 5, 2026): every
+      // message written here — an assistant reply AND a user
+      // message (recordMessage publishes both) — chains to the
+      // previous last message in the transcript, resolved from
+      // the live rows now, not from a cached id. The ChatAgent's
+      // provider-side chain (meta.responseId) still advances only
+      // on real agent turns; this field chains the transcript
+      // itself, so the next turn's import keeps the order.
+      host.put('messages',event.id,{id:event.id,fromAgent:event.kind==='assistant',text:String(event.value),createdAt:event.at,previousResponseId:lastChatMessageId(host.rows('messages'))});
       // An agent reply is a chat message, so it pushes — the one
       // push-per-message rule covers in-conversation replies too.
       // A push hook must never fail the turn that published the

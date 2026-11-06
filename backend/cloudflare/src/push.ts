@@ -66,7 +66,14 @@ export function pushSafeText(text: string, maxChars = PUSH_BODY_MAX_CHARS): stri
 }
 
 /// A chat message from Hygge: the sender's name, then the message
-/// itself — the same words the thread shows.
+/// itself — the same words the thread shows. The fallback body
+/// ("Something needs you.") is a documented carve-out, not a
+/// composed message: it fires only when a caller builds this event
+/// with no message text at all. Every current caller passes the
+/// message's own words (saveTask's push is gated on the mirror row
+/// existing, so a body-less event cannot come from a decision
+/// help); the fallback exists so a malformed call still notifies
+/// rather than silently dropping. See docs/push-notifications.md.
 export function needsHumanEvent(taskId: string, message?: string): PushEvent {
   return {
     kind: "needs_you", refKind: "task", refId: taskId,
@@ -80,6 +87,9 @@ export function needsHumanEvent(taskId: string, message?: string): PushEvent {
 /// body is the message's own words; the tap opens the message
 /// itself (refKind "chat"). Every chat message pushes — no
 /// exceptions — so every such message is built through this event.
+/// The fallback body is the same documented carve-out as
+/// needsHumanEvent: it fires only when no message text is given,
+/// which no current caller does.
 export function chatMessageEvent(messageId: string, body: string): PushEvent {
   return {
     kind: "needs_you", refKind: "chat", refId: messageId,
@@ -95,6 +105,9 @@ export function chatMessageEvent(messageId: string, body: string): PushEvent {
 /// message. The body is the backing message's own (composed)
 /// words; the site's subject is context for the composer, not the
 /// body. At most one per sender per day (enforced at the call site).
+/// The fallback body is the same documented carve-out as
+/// needsHumanEvent: it fires only when no message text is given,
+/// which no current caller does.
 export function messageWaitingEvent(messageId: string, body: string): PushEvent {
   return {
     kind: "message_waiting", refKind: "chat", refId: messageId,
@@ -107,6 +120,13 @@ export function messageWaitingEvent(messageId: string, body: string): PushEvent 
 /// never for scheduled-scan missions: scan episodes stay in the
 /// feed, and a tick's only push is the new-work chat message
 /// planned by `planTickNotifications` below.
+///
+/// Retained as a tested utility (no production caller — the live
+/// gate is shouldNotifyDecisionHelp below, which extends this
+/// predicate to failed-with-help): its tests pin the fresh-entry
+/// semantics both gates share, so a future change to either is
+/// caught against the same cases. Do not delete it as dead code
+/// without moving its cases onto shouldNotifyDecisionHelp first.
 export function shouldNotifyNeedsHuman(
   previousStatus: string | null | undefined,
   nextStatus: string | null | undefined,
@@ -138,9 +158,11 @@ export function shouldNotifyDecisionHelp(
 /// The new-work chat message, as a push: it opens the conversation
 /// the message lives in (refKind "chat"), never the feed item
 /// directly — the listing itself is reached from the message's
-/// embedded card. The body is the composed message's own words:
-/// no static text is built here (the old "New work on …" body is
-/// gone with the static offer message it quoted).
+/// embedded card. The body is the composed message's own words.
+/// The fallback body is the same documented carve-out as
+/// needsHumanEvent: it fires only when no message text is given,
+/// which planTickNotifications never does (it requires the
+/// composed text to plan anything).
 export function newWorkChatEvent(messageId: string, body: string): PushEvent {
   return {
     kind: "new_work", refKind: "chat", refId: messageId,

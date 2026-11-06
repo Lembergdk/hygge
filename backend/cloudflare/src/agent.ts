@@ -383,7 +383,7 @@ export async function runMission(opts: {
       if (lastFailure) result.failure.lastActionCode = lastFailure.code;
       const finalActionFailure = result.trace?.at(-1)?.failure;
       const explanation = finalActionFailure ? failureFeedback(finalActionFailure.code).userMessage : result.failure.userMessage;
-      result.help = help("recovery", `${explanation} I can open a new session and check what happened before continuing, or you can stop here.`, [], "Open new session");
+      result.help = help("recovery", `${explanation} I can open a new session and check what happened before continuing, or you can stop here.`, [], "Open new session", null, { staticText: true });
       span.setAttribute("hygge.failure.code", result.failure.code);
       if (lastFailure) span.setAttribute("hygge.failure.last_action_code", lastFailure.code);
     }
@@ -460,7 +460,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     return control && (control.human || control.epoch !== epoch);
   };
   const paused = () => ({ status: "needs_human", trace, extractedItems, log,
-    sessionID: snap!.sessionID, help: help("verification", "You're in control of the browser. Let me continue when you're ready.", [], "Open browser"), ...routing() });
+    sessionID: snap!.sessionID, help: help("verification", "You're in control of the browser. Let me continue when you're ready.", [], "Open browser", null, { staticText: true }), ...routing() });
   // Health probe for a restored trusted sign-in: a visible password
   // field means the saved sign-in expired -> fall through to the
   // normal vault login; the caller refreshes the profile on success.
@@ -514,7 +514,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       trace.push({ action: "needsHuman", target: "", urlString: snapshot!.currentURLString,
                    summary: `${cp} — tried, then paused for you in the browser`, succeeded: false, modelTier: null });
       log.push(`Tried to get through a ${cp} (${checkpointAttempts} step(s)) and could not. The browser session stays open for you to finish it there.`);
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint: cp, help: help("verification", `I tried to finish a ${cp} on ${site}, but couldn't get through it. I need you to finish it — your progress is saved.`, [], "Complete check"), ...routing() };
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, sessionProbe, resumedSession, checkpoint: cp, help: help("verification", `I tried to finish a ${cp} on ${site}, but couldn't get through it. I need you to finish it — your progress is saved.`, [], "Complete check", null, { staticText: true }), ...routing() };
     };
     if (checkpoint) {
       if (activeCheckpoint !== checkpoint) {
@@ -603,7 +603,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     if (decision.action === "done") {
       if (task.drafted_payload?.setupMode === "connect" && probeAuthenticated(snapshot) !== "authenticated") {
         return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID,
-          help: help("credentials", "I couldn't verify your sign-in. Check your saved login so I can try again.", [], "Update login"), ...routing() };
+          help: help("credentials", "I couldn't verify your sign-in. Check your saved login so I can try again.", [], "Update login", null, { staticText: true }), ...routing() };
       }
       trace.push({ action: "done", target: "", urlString: snapshot.currentURLString,
                    summary: decision.reason || "Mission complete", succeeded: true, ...stamp });
@@ -625,12 +625,20 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     if (decision.action === "needsHuman") {
       trace.push({ action: "needsHuman", target: decision.target ?? "", urlString: snapshot.currentURLString,
                    summary: decision.reason || "Human checkpoint", succeeded: false, ...stamp });
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, help: help("verification", typeof decision.userMessage === "string" && decision.userMessage.trim() ? decision.userMessage.trim().slice(0, 400) : "This site has a check I couldn't finish. Open the browser to complete it, or stop here.", [], "Complete check", typeof decision.deadline === "string" ? decision.deadline : null), sessionProbe, resumedSession, ...routing() };
+      // The model's own userMessage is model-composed and relays
+      // verbatim; only the literal fallback is static-marked, so
+      // the mirror composes it from the facts instead.
+      const userMessage = typeof decision.userMessage === "string" && decision.userMessage.trim()
+        ? decision.userMessage.trim().slice(0, 400) : null;
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, help: help("verification", userMessage ?? "This site has a check I couldn't finish. Open the browser to complete it, or stop here.", [], "Complete check", typeof decision.deadline === "string" ? decision.deadline : null, userMessage ? {} : { staticText: true }), sessionProbe, resumedSession, ...routing() };
     }
 
     if ((task.workspace_requires_fresh_approval || needsActionApproval(task, decision)) && decision.consentGranted !== true) {
       await recordToolApproval("requested");
-      const request = help("approval", `${decision.preview || decision.reason || "This step changes something outside Hygge."}\nProposed action: ${decision.action} “${decision.targetLabel ?? decision.target}”${decision.value ? ` — ${decision.value}` : ""}`, [], "Approve and continue", typeof decision.deadline === "string" ? decision.deadline : null);
+      // Preview/reason are the model's own words and relay verbatim;
+      // only the literal fallback (neither supplied) is static-marked.
+      const approvalText = decision.preview || decision.reason || null;
+      const request = help("approval", `${approvalText ?? "This step changes something outside Hygge."}\nProposed action: ${decision.action} “${decision.targetLabel ?? decision.target}”${decision.value ? ` — ${decision.value}` : ""}`, [], "Approve and continue", typeof decision.deadline === "string" ? decision.deadline : null, approvalText ? {} : { staticText: true });
       return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID,
         help: request, pendingAction: { decision, fingerprint: actionFingerprint(decision, snapshot, task.drafted_payload) },
         sessionProbe, resumedSession, ...routing() };

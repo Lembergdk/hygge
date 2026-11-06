@@ -11,13 +11,18 @@
 ///   the message is the backing chat message for the mail push, with
 ///   the mail summary as context.
 ///
-/// Decision helps are NOT composed here: the help message itself is
-/// already model-composed in the mission loop from live page context,
-/// and the saveTask/projector mirror relays it verbatim
-/// (decisionHelpMessageText in task-help.ts) so the message and the
-/// feed card can never disagree. Composing a second paraphrase
-/// would add latency, cost, drift, and a failure mode for zero new
-/// information.
+/// Decision helps are composed here ONLY when the help's own text
+/// is a hardcoded literal ("help" surface): the saveTask mirror
+/// first writes the literal relay so the message row exists, then
+/// upgrades the row's text to the composed version. A help whose
+/// text the mission model already composed from live page context
+/// relays verbatim (decisionHelpMessageText in task-help.ts) so
+/// the message and the feed card can never disagree — composing a
+/// second paraphrase of model text would add latency, cost, drift,
+/// and a failure mode for zero new information. Drafts ("draft"
+/// surface) have no pre-existing text at all and are composed here.
+/// - expiry ("expiry"): a decision card's expiry time passed; the
+///   message is the once-per-card lifecycle notice about it.
 ///
 /// Composition uses llm.ts with the drafting tier (wonder-1.0 per
 /// the repo tier rules: selectTier with drafting: true). The prompt
@@ -35,6 +40,11 @@
 ///   that surface: a push only ever comes from a chat message, and
 ///   a failed composition must not invent one. The feed card stays
 ///   the durable surface; the failure is logged server-side.
+///   Exception: a decision help marked `staticText` already has its
+///   literal relay written as the message row, so on composition
+///   failure the row keeps the literal text (logged fallback) and
+///   its push goes out with that text — the literal is the only
+///   content the card has.
 /// - For the scan offer, the tick tries the next surfaced listing
 ///   instead when the write itself fails (a deleted message's
 ///   tombstone), but a composition failure stops the tick's message
@@ -42,7 +52,7 @@
 ///   same way, so retrying per listing only spends calls.
 import { selectTier, type LLMClient } from "./llm.ts";
 
-export type CardMessageSurface = "offer" | "mail-question" | "mail";
+export type CardMessageSurface = "offer" | "mail-question" | "mail" | "help" | "draft" | "expiry";
 
 export interface CardMessageInput {
   surface: CardMessageSurface;
@@ -69,7 +79,13 @@ export function composePrompt(input: CardMessageInput): { system: string; user: 
     ? "A new job listing was just found. Tell the user about it: name the listing and where it is, with its pay as listed, and say how many more new listings there are when that count is given."
     : input.surface === "mail-question"
       ? "An email arrived that needs the user's decision and fits no feed card. Ask the one question that lets them decide, using only the facts listed."
-      : "An email arrived from a tracked job site that may mention a message from a client. Tell the user the mail arrived and what it is about, so they can open it from the card attached to this message.";
+      : input.surface === "mail"
+        ? "An email arrived from a tracked job site that may mention a message from a client. Tell the user the mail arrived and what it is about, so they can open it from the card attached to this message."
+        : input.surface === "help"
+          ? "A task needs the user's help to continue. Tell the user what is needed and what they can do about it, using only the facts listed: name the site and the ask, and include the question when one is listed."
+          : input.surface === "draft"
+            ? "A task draft is ready for the user's review. Tell the user the draft is ready to review: name the task and the site, and say it is waiting for their approval."
+            : "A decision card's expiry time has passed. Tell the user the item expired: name the site and the item, say its expiry time has passed, and that it is still in their feed to review or dismiss — using only the facts listed. This is a lifecycle notice, not urgency: do not press the user to act.";
   const facts = Object.entries(input.facts)
     .filter(([, v]) => typeof v === "string" && v.trim().length > 0)
     .map(([k, v]) => `${k}: ${v.trim().slice(0, 400)}`)
@@ -111,6 +127,20 @@ export function validateComposedText(text: unknown): string | null {
 
 export type CardMessageComposer = (input: CardMessageInput) => Promise<string | null>;
 
+/// Total wall-clock budget for one composition, both attempts
+/// included (named constant, test-overridable via the `timeoutMs`
+/// option): the underlying `client.complete` allows 2 attempts x
+/// 120s = 240s, awaited inline in `runScheduledTick` inside the
+/// serialized sandbox exclusive — and in the mail-delivery handler
+/// — so a stalled model would block all sandbox work for four
+/// minutes. 30s is far below that and far above a normal short
+/// draft. The race only releases the caller: an abandoned
+/// in-flight attempt is still bounded by the client's own 120s
+/// abort, and the caller treats the timeout exactly like any other
+/// composition failure (no message, no push — or, for a static
+/// help, the logged static fallback).
+export const CHAT_COMPOSER_TIMEOUT_MS = 30_000;
+
 /// Build the composer for a client, or null when the model is not
 /// configured (no API key): without a model there is no composed
 /// message, and the caller must skip the message rather than fall
@@ -118,22 +148,43 @@ export type CardMessageComposer = (input: CardMessageInput) => Promise<string | 
 /// substitute a fake with just cfg + complete.
 export function createCardMessageComposer(
   client: Pick<LLMClient, "cfg" | "complete"> | null,
+  opts: { timeoutMs?: number } = {},
 ): CardMessageComposer | null {
   if (!client || !client.cfg.apiKey) return null;
   const cfg = client.cfg;
+  const timeoutMs = opts.timeoutMs ?? CHAT_COMPOSER_TIMEOUT_MS;
   return async (input) => {
     const { model } = selectTier(cfg, { drafting: true });
     const { system, user } = composePrompt(input);
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const text = await client.complete({ model, system, user });
-        const valid = validateComposedText(text);
-        if (valid) return valid;
-        console.warn(`composeCardMessage: ${input.surface} attempt ${attempt} produced unusable text; ${attempt === 2 ? "giving up" : "retrying"}`);
-      } catch (error) {
-        console.warn(`composeCardMessage: ${input.surface} attempt ${attempt} failed (${error instanceof Error ? error.message : "unknown"}); ${attempt === 2 ? "giving up" : "retrying"}`);
+    const attemptLoop = (async (): Promise<string | null> => {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const text = await client.complete({ model, system, user });
+          const valid = validateComposedText(text);
+          if (valid) return valid;
+          console.warn(`composeCardMessage: ${input.surface} attempt ${attempt} produced unusable text; ${attempt === 2 ? "giving up" : "retrying"}`);
+        } catch (error) {
+          console.warn(`composeCardMessage: ${input.surface} attempt ${attempt} failed (${error instanceof Error ? error.message : "unknown"}); ${attempt === 2 ? "giving up" : "retrying"}`);
+        }
       }
+      return null;
+    })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        console.warn(`composeCardMessage: ${input.surface} timed out after ${timeoutMs}ms; giving up`);
+        resolve(null);
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([attemptLoop, timeout]);
+    } finally {
+      // A settled race must not leave its timer behind: without
+      // this, every composition — even one that finished in
+      // milliseconds — logs a spurious "timed out" warning 30s
+      // later and holds the isolate open until then. Clearing a
+      // timer that already fired is a no-op.
+      if (timer !== undefined) clearTimeout(timer);
     }
-    return null;
   };
 }

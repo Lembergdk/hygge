@@ -142,7 +142,7 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingTaskOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingTaskOpenID = nil
             guard let task = store.tasks.first(where: { $0.id == id }) else {
-                store.lastMessage = "That one is already sorted. Everything waiting for you is below."
+                store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
                 return
             }
             // The conversation opens as a sheet: dismiss whatever is
@@ -152,7 +152,7 @@ struct HomeFeedView: View {
             // would let closeFocus reopen the sheet synchronously.
             store.conversationTaskID = nil
             dismissPresented()
-            store.surfaceTaskHelp(taskID: task.id)
+            store.surfaceTaskHelp(taskID: task.id, userInitiated: true)
             Task { @MainActor in
                 store.conversationTaskID = task.id
                 showConversation = true
@@ -163,7 +163,7 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingOpportunityOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingOpportunityOpenID = nil
             guard let opportunity = store.opportunities.first(where: { $0.id == id }) else {
-                store.lastMessage = "Fresh work is waiting in your feed below."
+                store.setRoutingNote("Fresh work is waiting in your feed below.")
                 return
             }
             dismissPresented()
@@ -173,7 +173,7 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingEmailOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingEmailOpenID = nil
             guard let mail = store.filedEmailSummaries.first(where: { $0.id.lowercased() == id.uuidString.lowercased() }) else {
-                store.lastMessage = "That mail is filed under Hygge email in your profile."
+                store.setRoutingNote("That mail is filed under Hygge email in your profile.")
                 return
             }
             dismissPresented()
@@ -182,7 +182,7 @@ struct HomeFeedView: View {
             // re-checking the mail is still there.
             Task { @MainActor in
                 guard store.filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() }) else {
-                    store.lastMessage = "That mail is filed under Hygge email in your profile."
+                    store.setRoutingNote("That mail is filed under Hygge email in your profile.")
                     return
                 }
                 emailOpenItem = mail
@@ -193,7 +193,7 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingTaskFocusOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingTaskFocusOpenID = nil
             guard let task = store.tasks.first(where: { $0.id == id }) else {
-                store.lastMessage = "That one is already sorted. Everything waiting for you is below."
+                store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
                 return
             }
             dismissPresented()
@@ -205,7 +205,7 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingProposalOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingProposalOpenID = nil
             guard let proposal = store.proposals.first(where: { $0.id == id }) else {
-                store.lastMessage = "That one is already sorted. Everything waiting for you is below."
+                store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
                 return
             }
             dismissPresented()
@@ -215,7 +215,7 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingEventOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingEventOpenID = nil
             guard let event = store.activityEvents.first(where: { $0.id == id }) else {
-                store.lastMessage = "That one is already sorted. Everything waiting for you is below."
+                store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
                 return
             }
             dismissPresented()
@@ -233,6 +233,22 @@ struct HomeFeedView: View {
             store.conversationTaskID = nil
             dismissPresented()
             Task { @MainActor in showConversation = true }
+        }
+        // A chat card about the notifications primer: whatever is
+        // presented closes first, then the notifications surface
+        // opens on the next tick (same sheet handover as mail).
+        .onChange(of: store.pendingNotificationsOpen, initial: true) { _, open in
+            guard open else { return }; store.pendingNotificationsOpen = false
+            dismissPresented()
+            Task { @MainActor in showNotifications = true }
+        }
+        // A routing fallback says so in one line on Home: bring it
+        // into view — close the chat bubble first (it would cover
+        // the note), then scroll the feed to the top where the
+        // note lives.
+        .onChange(of: store.routingNoteRevision) { _, _ in
+            if showBubbleChat { closeBubble() }
+            scrollAnchor = "feed-top"
         }
         .onChange(of: store.conversationTaskID) { _, id in
             guard id != nil else { return }
@@ -698,12 +714,18 @@ struct HomeFeedView: View {
     private func taskCard(_ task: AgentTask) -> some View {
         let chat = task.needsChatHelp
         let approval = task.help?.kind == .approval
+        // Display-only expiry: a lapsed deadline marks the card
+        // expired — still viewable and dismissable, but chatting
+        // about it is gone. Tapping still opens the detail, where
+        // every action renders disabled.
+        let expired = task.help?.isExpired == true
         return card(id: taskKey(task), title: taskTitle(task),
-                    subtitle: store.siteName(id: task.siteID), icon: taskIcon(task), usesProfilePhoto: task.kind == .buildProfile, style: chat && !approval ? .question : .review,
+                    subtitle: expired ? "Expired · \(store.siteName(id: task.siteID))" : store.siteName(id: task.siteID), icon: taskIcon(task), usesProfilePhoto: task.kind == .buildProfile, style: chat && !approval ? .question : .review,
                     siteDomain: chat && !approval ? nil : store.siteDomain(id: task.siteID), siteName: store.siteName(id: task.siteID),
                     chatContext: taskChatContext(task),
                     open: { if chat { openChat(task) } else { openFocus(.task(task)) } },
-                    chatOverride: chat ? { store.markTaskDiscussedInChat(taskID: task.id); openChat(task) } : nil)
+                    chatOverride: chat ? { store.markTaskDiscussedInChat(taskID: task.id); openChat(task) } : nil,
+                    allowsChat: !expired)
     }
     private func taskIcon(_ task: AgentTask) -> String {
         if task.needsChatHelp {
@@ -827,11 +849,11 @@ struct HomeFeedView: View {
     private func card(id: String, title: String, subtitle: String, icon: String, asset: String? = nil, usesProfilePhoto: Bool = false, style: FeedCardStyle = .update,
                       siteDomain: String? = nil, siteName: String? = nil,
                       chatContext: ChatContextRef, open: @escaping () -> Void,
-                      chatOverride: (() -> Void)? = nil, dismiss: (() -> Void)? = nil, allowsDismissal: Bool = true) -> some View {
+                      chatOverride: (() -> Void)? = nil, dismiss: (() -> Void)? = nil, allowsDismissal: Bool = true, allowsChat: Bool = true) -> some View {
         SwipeFeedCard(id: id, openCardID: $openCardID,
                       open: { openCardID = nil; open() },
                       chat: { openCardID = nil; if let chatOverride { chatOverride() } else { chatAbout(chatContext) } },
-                      dismiss: dismiss ?? { archive(id) }, allowsDismissal: allowsDismissal) {
+                      dismiss: dismiss ?? { archive(id) }, allowsDismissal: allowsDismissal, allowsChat: allowsChat) {
             FeedVisualCard(style: style, title: title, subtitle: subtitle, icon: icon, asset: asset, usesProfilePhoto: usesProfilePhoto,
                            siteDomain: siteDomain, siteName: siteName)
         }
@@ -888,7 +910,7 @@ struct HomeFeedView: View {
         if task.needsChatHelp { openChat(task) } else { chatAbout(taskChatContext(task)) }
     }
     private func openChat(_ task: AgentTask?) {
-        if let task { store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id }
+        if let task { store.surfaceTaskHelp(taskID: task.id, userInitiated: true); store.conversationTaskID = task.id }
         showConversation = true
     }
     private func openFocus(_ value: FeedFocus) {

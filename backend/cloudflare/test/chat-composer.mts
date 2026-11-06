@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   composePrompt, createCardMessageComposer, recentChatContext, validateComposedText,
+  CHAT_COMPOSER_TIMEOUT_MS,
   type CardMessageInput,
 } from "../src/chat-composer.ts";
 
@@ -60,6 +61,48 @@ test("the prompt differs per surface but keeps the same guardrails", () => {
   const question = composePrompt({ surface: "mail-question", facts: { sender: "rover.com", subject: "Two roles" } });
   assert.match(question.user, /needs the user's decision/);
   for (const { system } of [mail, question]) assert.match(system, /never invent/);
+});
+
+test("help, draft, and expiry surfaces name only their facts", () => {
+  const help = composePrompt({ surface: "help", facts: { site: "Rover", kind: "recovery", ask: "The session ended.", question: "Open a new session?" } });
+  assert.match(help.user, /needs the user's help/);
+  for (const fact of ["Rover", "The session ended.", "Open a new session?"]) assert.ok(help.user.includes(fact));
+  const draft = composePrompt({ surface: "draft", facts: { site: "Rover", task: "Join Rover" } });
+  assert.match(draft.user, /ready for the user's review/);
+  assert.ok(draft.user.includes("Join Rover"));
+  const expiry = composePrompt({ surface: "expiry", facts: { site: "Rover", item: "Join Rover", expiredAt: "2026-11-06T12:00:00.000Z" } });
+  assert.match(expiry.user, /expiry time has passed/);
+  assert.match(expiry.user, /lifecycle notice, not urgency/);
+  for (const { system } of [help, draft, expiry]) assert.match(system, /never invent/);
+});
+
+test("composer timeout: 30s total budget, and a stalled model resolves null fast with an override", async () => {
+  assert.equal(CHAT_COMPOSER_TIMEOUT_MS, 30_000, "well below the 240s the raw client allows, far above a normal draft");
+  const hanging = fakeClient({ replies: [] });
+  (hanging.client as any).complete = async () => new Promise<string>(() => {});
+  const started = Date.now();
+  assert.equal(await createCardMessageComposer(hanging.client, { timeoutMs: 50 })!({ surface: "offer", facts: {} }), null);
+  assert.ok(Date.now() - started < 5000, "the timeout releases the caller instead of awaiting the model");
+  const slowButOk = fakeClient({ replies: ["Slow but fine."] });
+  (slowButOk.client as any).complete = async () => {
+    await new Promise((r) => setTimeout(r, 80));
+    return "Slow but fine.";
+  };
+  assert.equal(await createCardMessageComposer(slowButOk.client, { timeoutMs: 50 })!({ surface: "offer", facts: {} }), null, "a reply slower than the budget still times out");
+});
+
+test("composer timeout: a fast success leaves no timer behind — no spurious timeout warning later", async () => {
+  const { client } = fakeClient({ replies: ["Composed message."] });
+  const warnings: unknown[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+  try {
+    assert.equal(await createCardMessageComposer(client, { timeoutMs: 50 })!({ surface: "offer", facts: {} }), "Composed message.");
+    await new Promise((r) => setTimeout(r, 120));
+    assert.ok(!warnings.some((w) => String(w).includes("timed out")), "the settled race's timer is cleared, so nothing logs 'timed out' after success");
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 test("composition uses the drafting tier (wonder) and returns the model text", async () => {

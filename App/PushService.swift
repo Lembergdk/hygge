@@ -11,6 +11,11 @@ import UserNotifications
 enum PushInbox {
     static var pendingTokenHex: String?
     static var pendingRoute: String?
+    /// A push that arrived while the app was open. There is no tap
+    /// and no banner (willPresent returns []), so without this the
+    /// new message would sit unseen until the next pull — the 3s
+    /// poll refreshes tasks only, never the transcript.
+    static var pendingForegroundDelivery = false
     /// Token of the most recent delivery. Duplicate deliveries of the
     /// same token must not re-trigger a refresh (see receive).
     static var lastDeliveredTokenHex: String?
@@ -42,6 +47,15 @@ enum PushInbox {
     @MainActor
     static func receive(route: String?) {
         pendingRoute = route ?? "home"
+        onArrival?()
+    }
+
+    /// A push delivered while the app is open (willPresent): no tap
+    /// follows, so this is the only signal that a new message
+    /// exists. Drain it in refreshPushState with a pull.
+    @MainActor
+    static func receiveForegroundDelivery() {
+        pendingForegroundDelivery = true
         onArrival?()
     }
 }
@@ -88,10 +102,13 @@ final class HyggeAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     /// comes from a chat message, and the user is already looking at
     /// the app — the conversation itself is the notice. (iOS
     /// suppresses foreground pushes by default; presenting a banner
-    /// here would override that.)
+    /// here would override that.) The arrival still pulls the new
+    /// message in now, so it is visible (flame badge + transcript)
+    /// instead of waiting for the next pull or pull-to-refresh.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        Task { @MainActor in PushInbox.receiveForegroundDelivery() }
         completionHandler([])
     }
 }

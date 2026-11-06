@@ -1,32 +1,23 @@
 // Conversation-first handoffs, grounded suggestions, and exact-action consent.
 // Kept pure so the same policy is tested independently of storage and UI.
 //
-/// "Short" for a deadline (policy settled Nov 5, 2026, Mikael's call
-/// to change): a deadline inside this many hours of now is short —
-/// it drives the card's short-deadline urgency treatment. A deadline
-/// further out is still a real expiration date on the card; it is
-/// simply not short. Garbage, past, and unparseable dates are no
-/// deadline at all (see parseHelpDeadline).
-export const DEADLINE_WINDOW_HOURS = 24;
-
-/// A help's deadline, validated: a real ISO date in the future, or
-/// null. Garbage, past, and unparseable values are not deadlines —
-/// they are logged by the caller and never treated as one, so a
-/// malformed model value can never escalate anything.
+/// A help's deadline is an OPTIONAL EXPIRY TIME, FOR DISPLAY
+/// ONLY (policy settled Nov 5, 2026, simplified Nov 5, 22:08 CST):
+/// it never drives routing, escalation, or enforcement — every
+/// decision card goes to chat anyway, so an expiry cannot gate
+/// anything. The agent sets it where applicable (session-related
+/// cards, client/job-site deadlines); never-deadline cases (e.g.
+/// onboarding questions) never get one. There is no "short"
+/// concept and no window: a deadline is a real expiration date on
+/// the card, full stop. Garbage, past, and unparseable dates are
+/// no deadline at all (see parseHelpDeadline). A deadline that
+/// lapses after it was set renders as a past "Expires" date on a
+/// still-live card — accepted as a display detail for now.
 export function parseHelpDeadline(value: unknown, now: Date = new Date()): Date | null {
   if (typeof value !== "string" || !value.trim()) return null;
   const parsed = new Date(value.trim());
   if (Number.isNaN(parsed.getTime())) return null;
   return parsed.getTime() > now.getTime() ? parsed : null;
-}
-
-/// True when the deadline is a real future date inside the short
-/// window (DEADLINE_WINDOW_HOURS). Garbage, past, and far-future
-/// dates are not short: they must not escalate.
-export function isShortDeadline(value: unknown, now: Date = new Date()): boolean {
-  const parsed = parseHelpDeadline(value, now);
-  if (!parsed) return false;
-  return parsed.getTime() - now.getTime() <= DEADLINE_WINDOW_HOURS * 60 * 60 * 1000;
 }
 
 /// Deadline producers (the agent is the deadline producer — it
@@ -47,19 +38,28 @@ export function isShortDeadline(value: unknown, now: Date = new Date()): boolean
 ///   the card shows no expiration date for it.
 
 export function help(kind: string, message: string, questions: any[] = [], actionLabel = "Continue",
-                     deadline: string | null = null) {
+                     deadline: string | null = null, opts: { staticText?: boolean } = {}) {
   // The deadline is agent-set from page/client content (an offer
   // expiry, an application closing date, a code expiry) — never
   // invented. Validate it at construction: garbage or past dates
   // are dropped (and logged) rather than stored, so a malformed
   // model value can never reach the card as an expiration date.
+  // `staticText` marks a help whose message is a hardcoded literal
+  // rather than model-composed text (recovery/verification/
+  // credentials fallbacks, checkpoint and takeover wording). The
+  // mirror (saveTask) composes the chat message for a static help
+  // from its facts via chat-composer.ts instead of relaying the
+  // literal verbatim; the literal stays only as the logged
+  // fallback when composition fails. Model-composed helps carry no
+  // marker and relay verbatim.
   let validDeadline: string | null = null;
   if (deadline !== null && deadline !== undefined) {
     const parsed = parseHelpDeadline(deadline);
     if (parsed) validDeadline = parsed.toISOString();
     else console.warn(`help: dropping invalid deadline ${JSON.stringify(String(deadline).slice(0, 80))} for kind ${kind}`);
   }
-  return { id: crypto.randomUUID(), kind, message, questions, actionLabel, deadline: validDeadline };
+  return { id: crypto.randomUUID(), kind, message, questions, actionLabel, deadline: validDeadline,
+    ...(opts.staticText ? { staticText: true } : {}) };
 }
 
 /// Feed/chat routing for a task help (policy settled Nov 5, 2026,
@@ -68,8 +68,9 @@ export function help(kind: string, message: string, questions: any[] = [], actio
 /// generates a push. So every well-formed decision kind —
 /// information, approval, verification, credentials, recovery —
 /// routes to chat. The deadline no longer gates whether a decision
-/// card gets a message (all do); it drives the card's expiration
-/// date and the short-deadline urgency treatment (isShortDeadline).
+/// card gets a message (all do); the deadline is the card's
+/// expiration date, display only — it never escalates or enforces
+/// anything.
 ///
 /// A help object with an unknown or missing kind is still a
 /// decision card by construction — it is routed to chat and flagged
@@ -89,16 +90,21 @@ export function helpRoutesToChat(help: any): boolean {
 }
 
 /// The chat message relaying a decision help: the help's own
-/// model-composed words, verbatim — the help message plus its first
-/// question, both written by the mission model from live page
-/// context (agent.ts). The mirror relays; it does not rephrase, so
-/// the message and the feed card can never disagree, and no static
-/// text remains in the message: the old `${title}: ` prefix is gone
-/// (the card carries the title). This is the single text shape for
-/// the mirror — saveTask (user-sandbox.ts) and the workspace
-/// projector (workspace-task-projection.ts) both use it, so the two
-/// mirror paths cannot silently diverge. Null when there is no
-/// model-composed message to relay.
+/// words, verbatim — the help message plus its first question. For
+/// a model-composed help both were written by the mission model
+/// from live page context (agent.ts), so the mirror relays; it
+/// does not rephrase, so the message and the feed card can never
+/// disagree. For a help marked `staticText` (a hardcoded literal,
+/// see help()), this relay is only the immediately-written text:
+/// saveTask composes the message from the help's facts via
+/// chat-composer.ts and replaces this row's text with the composed
+/// version, falling back to this relay (logged) when composition
+/// fails. The old `${title}: ` prefix is gone from the server
+/// mirror (the card carries the title). This is the single text
+/// shape for the mirror — saveTask (user-sandbox.ts) and the
+/// workspace projector (workspace-task-projection.ts) both use it,
+/// so the two mirror paths cannot silently diverge. Null when
+/// there is no message to relay.
 export function decisionHelpMessageText(task: any): string | null {
   const help = task?.help;
   if (!help || typeof help.message !== "string" || !help.message.trim()) return null;
@@ -123,10 +129,17 @@ export function informationHelp(decision: any, draft: Record<string, string>) {
     return { text, suggestions: [...new Set(suggestions)] };
   }).filter((q: any) => q.text);
   if (questions.some((q: any) => /password|secret|passcode|one.time code|verification code/i.test(q.text))) {
-    return help("verification", "This sign-in step needs you. Enter the requested secret only on the site, never in chat.", [], "Complete check", deadline);
+    return help("verification", "This sign-in step needs you. Enter the requested secret only on the site, never in chat.", [], "Complete check", deadline, { staticText: true });
   }
-  if (!questions.length) questions.push({ text: "What should I use for this step?", suggestions: [] });
-  return help("information", String(decision.reason || "I need a detail to continue."), questions, "Continue", deadline);
+  const usedFallbackQuestion = !questions.length;
+  if (usedFallbackQuestion) questions.push({ text: "What should I use for this step?", suggestions: [] });
+  // Static when the message is the literal fallback (no model
+  // reason) or the question is the literal fallback (the model
+  // asked nothing): the mirror composes from these facts instead
+  // of relaying the literal. A model reason with model questions
+  // relays verbatim.
+  const staticText = !decision.reason || usedFallbackQuestion;
+  return help("information", String(decision.reason || "I need a detail to continue."), questions, "Continue", deadline, staticText ? { staticText: true } : {});
 }
 
 export function actionFingerprint(decision: any, snapshot: any, draft: any): string {
@@ -173,7 +186,7 @@ export function applyHelpReply(task: any, body: any): string | null {
     const remaining = pending.questions.filter((q: any) => !provided.includes(q));
     if (remaining.length) {
       task.help = help("information", "Thanks. One more detail before I continue.", remaining,
-        "Continue", pending.deadline ?? null);
+        "Continue", pending.deadline ?? null, { staticText: true });
       task.information_requests = remaining.map((q: any) => q.text);
       return null;
     }
@@ -291,7 +304,7 @@ export function reconcileEndedSession(task: any, sessionAvailable: boolean, acti
   task.checkpoint = null;
   task.information_requests = [];
   task.failure = { code: "session_ended" };
-  task.help = help("recovery", "This browser session ended before we finished. I can open a new session and check where we left off, or you can stop here.", [], "Open new session");
+  task.help = help("recovery", "This browser session ended before we finished. I can open a new session and check where we left off, or you can stop here.", [], "Open new session", null, { staticText: true });
   return true;
 }
 
