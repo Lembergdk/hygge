@@ -1209,7 +1209,6 @@ final class AppStore {
     func chooseHyggeEmailAddress() async {
         if let address = try? await backend.allocateHyggeEmailAddress() {
             hyggeEmailAddress = address
-            lastMessage = "Your Hygge email address is ready. Hygge can now handle signup mail for you."
             save()
         }
     }
