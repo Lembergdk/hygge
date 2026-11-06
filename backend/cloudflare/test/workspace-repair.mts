@@ -318,14 +318,16 @@ test('a rebind whose start failed transiently resumes its start and moves to the
 });
 
 
-test('no unresolved effect blocks a new mission or an upgrade', async () => {
+test('no unresolved effect blocks a new mission', async () => {
   // The Nov 5 Apple state, generalized: a task left an uncertain
-  // effect when its container was reclaimed. There is no effect gate:
-  // a new mission must start, and diagnostics must say so, even with
-  // that effect still unresolved. The duplicate risk is handled where
-  // it belongs — the agent verifies the live page before retrying a
-  // mutation, and a task pauses itself when its OWN action is
-  // uncertain — not by refusing unrelated work.
+  // effect when its container was reclaimed. There is no mission
+  // effect gate: a new mission must start, and diagnostics must say
+  // so, even with that effect still unresolved. The duplicate risk is
+  // handled where it belongs — the agent verifies the live page
+  // before retrying a mutation, and a task pauses itself when its OWN
+  // action is uncertain — not by refusing unrelated work.
+  // (Image migration keeps its own idle check: it destroys the
+  // container, so it still refuses while an effect is unresolved.)
   const f = fixture();
   const w = f.make();
   await w.ensure();
