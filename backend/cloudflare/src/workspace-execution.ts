@@ -16,6 +16,15 @@ import { assertWorkspaceActionConsent, reviewedCompletionRules, verifyObservedMi
 import { outcomeForTaskKind } from './skills.ts';
 import { digest } from './workspace-persistence.ts';
 
+/** Exact-prefix scan over workspace_registry. substr() keeps this off the
+ *  LIKE/GLOB path: production DO SQLite rejects the rebind's receipt scan
+ *  with LIKE or GLOB pattern too complex, and LIKE would over-match owner
+ *  ids containing `_` or `%`, which encodeURIComponent leaves unescaped.
+ *  Same shape as chat-store's prefix list. */
+export function scanRegistryPrefix(storage: WorkspaceSqlStorage, prefix: string): {key:string;value:unknown}[] {
+  return [...storage.sql.exec('SELECT key,value FROM workspace_registry WHERE substr(key,1,?)=? ORDER BY key',prefix.length,prefix)] as {key:string;value:unknown}[];
+}
+
 export interface WorkspaceExecutionOptions {
   owner: WorkspaceIdentity;
   env: Env;
@@ -60,7 +69,7 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   // own idle check.)
   async function receiptForCheckpoint(checkpointId:string){
     const prefix=`receipt/${ownerKey(owner)}/`;
-    const rows=[...storage.sql.exec('SELECT value FROM workspace_registry WHERE key LIKE ?',prefix+'%')] as {value:unknown}[];
+    const rows=scanRegistryPrefix(storage,prefix);
     for(const row of rows){const stored=JSON.parse(String(row.value)) as import('./workspace-runtime.ts').StoredWorkspaceReceipt;if(stored.receipt?.recoveryPoint?.checkpointId===checkpointId)return stored.receipt;}
     return null;
   }
