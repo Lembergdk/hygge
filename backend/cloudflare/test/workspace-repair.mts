@@ -314,3 +314,38 @@ test('a rebind whose start failed transiently resumes its start and moves to the
   assert.equal(diag.container.recoveredCheckpointId,before.recoveryPoint!.checkpointId);
 });
 
+
+test('a web-probe uncertain effect does not block a new mission; a real task\u2019s does', async () => {
+  // The Apple Nov 5 state: a Rover web-accessibility probe (read-only,
+  // invisible to the app by design) was left with an uncertain effect
+  // when its container was reclaimed, and that effect refused every
+  // new mission because the gate treated all unresolved effects alike.
+  // A probe has no review surface and no external consequence, so its
+  // effect must not gate user work; a real task's still must.
+  const f = fixture();
+  const w = f.make();
+  await w.ensure();
+  const probe: any = { id: 'probe-rover', kind: 'discover', target_url: 'https://www.rover.com', goal: 'Web check for Rover', status: 'needsHuman', drafted_payload: {}, interaction_version: 1, log: [], session_id: null, web_probe: true, help: { kind: 'recovery' } };
+  f.projectTask(probe);
+  const db = w.foundation.persistence;
+  const base = { ...db.owner, intentHash: 'h', approvalId: null, approvalScopeHash: null, incarnation: '', generation: 0 };
+  db.put('effect', 'eff-probe', 0, { ...base, effectId: 'eff-probe', taskId: 'probe-rover', runId: 'run-probe', status: 'uncertain', revision: 1 });
+  const mission = async () => ({ status: 'succeeded' });
+  const next = { id: 'next-task', kind: 'discover', status: 'approved', interaction_version: 1, target_url: 'https://www.fiverr.com', drafted_payload: {}, log: [], mobile_task: { id: 'next-task', title: 'Fiverr', siteID: 'fiverr' } };
+  // The probe's effect must not refuse the mission.
+  const ran: any = await w.runner.run({ task: next, mission });
+  assert.ok(ran && typeof ran.status === 'string');
+  // A real task's uncertain effect still refuses a new mission.
+  const real: any = { id: 'real-task', kind: 'discover', target_url: 'https://www.fiverr.com', goal: 'Sign up', status: 'needsHuman', drafted_payload: {}, interaction_version: 1, log: [], session_id: null, help: { kind: 'recovery' } };
+  f.projectTask(real);
+  db.put('effect', 'eff-real', 0, { ...base, effectId: 'eff-real', taskId: 'real-task', runId: 'run-real', status: 'uncertain', revision: 1 });
+  await assert.rejects(w.runner.run({ task: { ...next, id: 'next-task-2' }, mission }), /WORKSPACE_HAS_UNRESOLVED_ACTION/);
+  // And the diagnostics agrees: the probe effect is flagged and does
+  // not block, the real one does.
+  const diag: any = await w.diagnostics();
+  assert.equal(diag.effects.unresolved.find((e: any) => e.effectId === 'eff-probe').webProbe, true);
+  assert.equal(diag.effects.unresolved.find((e: any) => e.effectId === 'eff-real').webProbe, false);
+  assert.match(diag.blockReasons.join(' '), /eff-real/);
+  assert.doesNotMatch(diag.blockReasons.join(' '), /eff-probe/);
+  assert.equal(diag.wouldBlockNewMission, true);
+});
