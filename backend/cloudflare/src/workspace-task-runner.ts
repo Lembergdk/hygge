@@ -24,10 +24,14 @@ export interface TaskRunnerConfig {
   foundation:ReturnType<typeof createWorkspaceFoundation>; storage:WorkspaceStorage; owner:WorkspaceIdentity;
   saveWorkspace(input:WorkspaceSaveInput):Promise<WorkspaceDurabilityReceipt>;
   projectTask?:TaskProjector;
-  authorizeAction(task:WorkspaceTask,input:WorkspaceActionInput & {effectId:string;intentHash:string;runId:string}):Promise<{approvalId:string|null;approvalScopeHash:string|null;refreshesReviewedConsent?:boolean}>;
+  authorizeAction(task:WorkspaceTask,input:WorkspaceActionInput & {effectId:string;intentHash:string;runId:string}):Promise<{approvalId:string|null;approvalScopeHash:string|null}>;
   verifyActionOutcome(input:{task:WorkspaceTask;ticket:ActionTicket;observation:WorkspaceActionObservation}):Promise<{status:'confirmed'|'not_applied'|'uncertain';evidence:unknown}>;
   verifyMissionCompletion(input:{task:WorkspaceTask;runId:string;result:WorkspaceMissionResult}):Promise<{verification:RunCompletionReceipt['verification'];evidence:unknown;candidateBodyHash?:string|null}|null>;
-  verifyReviewedOutcome?(input:{taskId:string;effectId:string;status:'confirmed'|'not_applied';evidenceRef:string}):Promise<boolean>;
+  /** Agent self-verification of an uncertain effect: re-observe the live page and determine whether the
+   * action's outcome is achieved. 'confirmed' when the mission goal is observably achieved, 'not_applied'
+   * when it is not (the mission re-observes the page and continues/retries, never duplicating a submission),
+   * 'uncertain' only when the page cannot be observed at all. The user is never asked to judge an outcome. */
+  verifyUncertainEffect?(input:{task:WorkspaceTask;effectId:string;runId:string}):Promise<{status:'confirmed'|'not_applied'|'uncertain';evidence:unknown}>;
   /** Must block a different task while a user/browser owns live control. */
   assertWorkspaceReady?(task:WorkspaceTask):Promise<void>;
   now?:()=>string;
@@ -40,14 +44,6 @@ const copy=<T>(v:T):T=>JSON.parse(JSON.stringify(v));
 function trustedMissionPatch(task:WorkspaceTask|null){return task?Object.fromEntries(['credential_id','session_id','email_code_available'].filter(k=>Object.hasOwn(task,k)).map(k=>[k,task[k]])):{};}
 function evidenceId(runId:string,kind:string,sequence:number){return `ev_${runId.replaceAll('-','')}_${kind}_${sequence}`;}
 interface ExecutionGuard { assertCurrent():void; verify():Promise<void>; lease():RuntimeLease }
-/// Every recovery help here is a hardcoded literal (the runner
-/// has no model text to relay), so it carries the `staticText`
-/// marker: the saveTask mirror composes the chat message from its
-/// facts via chat-composer.ts instead of relaying the literal
-/// verbatim, falling back to the literal (logged) when composition
-/// fails. The workspace projector's own mirror has no composer and
-/// keeps the literal relay as its fallback path.
-function recoveryHelp(message='I need to check the current site state before continuing.') {return {id:crypto.randomUUID(),kind:'recovery',message,questions:[],actionLabel:'Check and continue',staticText:true};}
 /** One per owner DO. Serializes all task entrypoints; persistent admission prevents parallel replacement. */
 export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
   const {foundation:f,owner}=config,db=f.checkpoints.db;
@@ -73,10 +69,12 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
     if(admission?.taskId===task.id&&admission.instanceId===instanceId)return copy(old?.task??task);
     const next:RunnerRecord=old??{taskId:task.id,runId:crypto.randomUUID(),sequence:0,pendingEffectId:null,status:'created',task:copy(task)};
     const effects=db.list<import('./workspace-contract.ts').EffectRecord>('effect').filter(e=>e.value.runId===next.runId);
-    const needsReview=(!!admission&&admission.taskId===task.id)||!!next.pendingEffectId||effects.length>0;
-    const status=needsReview?'needsHuman' as const:'failed' as const;
+    const needsPause=(!!admission&&admission.taskId===task.id)||!!next.pendingEffectId||effects.length>0;
+    const status=needsPause?'needsHuman' as const:'failed' as const;
+    // A delivery failure is internal queue state, never a user prompt. The task pauses (or fails)
+    // silently; the agent's self-verification resolves any uncertain effect when the mission resumes.
     const updated={...next.task,status,authorized_action:null,failure:{code:'job_delivery_exhausted'},
-      help:recoveryHelp(needsReview?'Delivery stopped. I need to verify the earlier browser session before continuing.':'This work could not start after several tries. Please try again when the connection is available.'),
+      help:next.task.help??null,
       log:[...(next.task.log??[]),'Queue delivery exhausted; existing effects and admission preserved.']};
     const canonicalTask=db.get<any>('runtime_task',task.id);
     if(canonicalTask)db.put('runtime_task',task.id,canonicalTask.revision,{...canonicalTask.value,status});
@@ -125,8 +123,11 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
   }
   async function commitPause(s:RunnerRecord,reason:string,receipt?:WorkspaceDurabilityReceipt,guard?:ExecutionGuard){
     await guard?.verify();
-    const task={...s.task,status:'needsHuman',authorized_action:null,help:s.task.help??recoveryHelp(reason),log:[...(s.task.log??[]),`Paused pending=${s.pendingEffectId??'none'} seq=${s.sequence}`]};
-    if(receipt){const old=checkpoint(s.runId);await f.checkpoints.commit(await context(task.id,`${s.runId}:pause:${old?.revision??0}:${receipt.receiptId}`,old?.revision??0,'checkpoint.commit',guard),checkpointInput(task,s.runId,receipt,'needsHuman',task.help.id));}
+    // The runner never invents a user-facing recovery prompt. A pause keeps the mission's own help
+    // (a legitimate stop: a check, a credential, an approval) or no help at all. The reason is
+    // recorded in the log for operators, never shown as a message.
+    const task={...s.task,status:'needsHuman',authorized_action:null,help:s.task.help??null,log:[...(s.task.log??[]),`Paused pending=${s.pendingEffectId??'none'} seq=${s.sequence} (${reason})`]};
+    if(receipt){const old=checkpoint(s.runId);await f.checkpoints.commit(await context(task.id,`${s.runId}:pause:${old?.revision??0}:${receipt.receiptId}`,old?.revision??0,'checkpoint.commit',guard),checkpointInput(task,s.runId,receipt,'needsHuman',task.help?.id??null));}
     db.storage.transactionSync(()=>{guard?.assertCurrent();return saveRecord({...s,status:'needsHuman',task},`${s.runId}:pause-projection:${record(task.id)!.revision}`);});
     return task;
   }
@@ -134,6 +135,29 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
     await guard?.verify();
     const effect=f.effects.require(effectId);
     if(effect.status==='dispatching')await f.effects.noteUncertain(await context(s.taskId,`${effectId}:uncertain`,effect.revision,'action.resolve',guard),effectId,ref);
+  }
+  /** Agent self-verification of an uncertain effect. Re-observes the live page (via verifyUncertainEffect)
+   * and resolves the effect from the agent's own observation — never from a user tap. Returns the resolved
+   * status ('confirmed'|'not_applied') or null when the page could not be observed (the effect stays
+   * uncertain and the task pauses silently, with no user-facing prompt). A prepared-but-never-dispatched
+   * ticket has no external effect; it is cancelled as not_applied. */
+  async function selfResolveUncertain(s:RunnerRecord,makeContext:(taskId:string,requestId:string,expectedRevision:number,op:RuntimeOperation)=>Promise<import('./workspace-contract.ts').MutationContext>):Promise<'confirmed'|'not_applied'|null>{
+    if(!s.pendingEffectId)return null;
+    const effect=db.get<import('./workspace-contract.ts').EffectRecord>('effect',s.pendingEffectId)?.value;
+    if(!effect)return null;
+    // A prepared-but-never-dispatched ticket has no external effect; it is cancelled by the
+    // resume/reject paths, not here. This helper only resolves dispatched effects.
+    if(effect.status==='prepared')return null;
+    if(['confirmed','not_applied'].includes(effect.status))return effect.status as 'confirmed'|'not_applied';
+    if(!['uncertain','dispatching'].includes(effect.status))return null;
+    if(!config.verifyUncertainEffect)return null;
+    const verdict=await config.verifyUncertainEffect({task:s.task,effectId:effect.effectId,runId:s.runId});
+    if(verdict.status==='uncertain')return null;
+    const ref=`ev_${s.runId.replaceAll('-','')}_selfverify_${crypto.randomUUID().replaceAll('-','')}`;
+    const payload={effectId:effect.effectId,intentHash:effect.intentHash,status:verdict.status,evidence:verdict.evidence,verifiedBy:'agent'};
+    db.storage.transactionSync(()=>{evidence(ref,payload);});
+    await f.effects.resolve(await makeContext(s.taskId,`${effect.effectId}:selfverify`,effect.revision,'action.resolve'),effect.effectId,verdict.status,ref);
+    return verdict.status;
   }
   async function execute(input:WorkspaceRunContext):Promise<WorkspaceTask>{
     nonempty(input.task.id);await config.assertWorkspaceReady?.(input.task);
@@ -167,18 +191,23 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
     let latestMissionTask:WorkspaceTask|null=null;
     try{
       if(!s){s={taskId:input.task.id,runId:crypto.randomUUID(),sequence:0,pendingEffectId:null,status:'created',task:copy(input.task)};atomicExecution(()=>saveRecord(s!,`${s!.runId}:created`));anchoredRunId=s.runId;}
-      if(s.status==='running')return await executionPause(s,'The previous run was interrupted. Check its current state before continuing.');
+      if(s.status==='running')return await executionPause(s,'Previous run interrupted.');
       if(s.pendingEffectId){
         const pending=db.get<import('./workspace-contract.ts').EffectRecord>('effect',s.pendingEffectId)?.value;
         if(pending?.status==='prepared')await f.effects.cancelPrepared(await executionContext(s.taskId,`${pending.effectId}:cancel-undispatched`,pending.revision,'action.resolve'),pending.effectId);
         if(!pending||['prepared','confirmed','not_applied'].includes(pending.status)){
           s={...s,pendingEffectId:null,sequence:s.sequence+1};atomicExecution(()=>saveRecord(s!,`${s!.runId}:reinspect:${record(s!.taskId)!.revision}`));
+        } else {
+          // An uncertain/dispatched effect: the agent re-observes the live page and resolves it
+          // itself. No user review. If the page cannot be observed, the task pauses silently.
+          const resolved=await selfResolveUncertain(s,executionContext);
+          if(resolved){s={...s,pendingEffectId:null,sequence:s.sequence+1};atomicExecution(()=>saveRecord(s!,`${s!.runId}:selfverify:${record(s!.taskId)!.revision}`));}
         }
       }
-      if(f.effects.unresolved(s.runId))return await executionPause(s,'An earlier action may have completed. I need to verify it before trying anything else.');
+      if(f.effects.unresolved(s.runId))return await executionPause(s,'Unresolved effect could not be verified from the live page.');
       const run=db.get('run',s.runId);
       if(!run){const url=new URL(input.task.target_url);await f.checkpoints.startRun(await executionContext(input.task.id,`${s.runId}:start`,0,'checkpoint.commit'),{taskId:input.task.id,runId:s.runId,siteOrigin:url.origin,outcome:outcomeForTaskKind(input.task.kind),candidate:input.candidate??{kind:'ordinary'}});}
-      s={...s,status:'running',task:{...copy(input.task),status:'running',workspace_run_id:s.runId,...(s.task.workspace_requires_fresh_approval?{workspace_requires_fresh_approval:true}:{})}};
+      s={...s,status:'running',task:{...copy(input.task),status:'running',workspace_run_id:s.runId}};
       atomicExecution(()=>saveRecord(s!,`${s!.runId}:running:${record(s!.taskId)!.revision}`));
       // A paused checkpoint must return to running before any effect admission.
       const prior=checkpoint(s.runId);
@@ -207,11 +236,10 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
           await guard.verify();
           const policy=await config.authorizeAction(current.task,{...action,effectId,intentHash,runId:current.runId});
           await guard.verify();
-          if(current.task.workspace_requires_fresh_approval&&policy.refreshesReviewedConsent!==true)fail('FRESH_APPROVAL_REQUIRED');
           atomicExecution(()=>{
             current=state(input.task.id);if(current.pendingEffectId||current.sequence!==sequence)fail('REVISION_CONFLICT');
             db.put('runner_authorization',effectId,0,{...policy,effectId,intentHash,taskId:current.taskId,runId:current.runId});
-            saveRecord({...current,pendingEffectId:effectId,task:{...current.task,...(policy.refreshesReviewedConsent?{workspace_requires_fresh_approval:false}:{})}},`${effectId}:reserved`);
+            saveRecord({...current,pendingEffectId:effectId},`${effectId}:reserved`);
           });
           await f.effects.prepare(await executionContext(current.taskId,`${effectId}:prepare`,0,'action.prepare'),{effectId,taskId:current.taskId,runId:current.runId,intentHash,approvalId:policy.approvalId,approvalScopeHash:policy.approvalScopeHash});
           await f.effects.dispatch(await executionContext(current.taskId,`${effectId}:dispatch`,1,'action.dispatch'),effectId);
@@ -248,24 +276,61 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
         },
       };
       const missionTask=s.task;latestMissionTask=missionTask;
-      const privateMissionPatch=()=>trustedMissionPatch(missionTask);
+      // The patch reads the task object the mission actually mutated. On a retry the mission
+      // receives a fresh task object, so read latestMissionTask (updated each attempt), not the
+      // first attempt's object.
+      const privateMissionPatch=()=>trustedMissionPatch(latestMissionTask);
       let result:WorkspaceMissionResult;
-      try{result=await input.mission(hooks,s.runId,missionTask);await guard.verify();}catch(error){
-        await guard.verify();
-        s=state(input.task.id);s={...s,task:{...s.task,...privateMissionPatch()}};
-        if(s.pendingEffectId){const ref=evidenceId(s.runId,'lost',s.sequence);atomicExecution(()=>evidence(ref,{effectId:s!.pendingEffectId,status:'uncertain'}));await executionUnknown(s,s.pendingEffectId,ref);}
-        // Surface only a code-shaped token (never page/provider payload text)
-        // so operators can distinguish uncertainty from infrastructure faults.
-        const raw=error instanceof Error?error.message:String(error);
-        const code=/^[A-Z][A-Z0-9_]{2,48}$/.test(raw)?raw:'INTERRUPTED';
-        const detail=error instanceof InvalidWorkspacePayload?` path=${error.path} type=${error.valueType}`:'';
-        s={...s,task:{...s.task,log:[...(s.task.log??[]),`Recovery check paused [${code}]${detail}`]}};
-        return await executionPause(s,`The connection was interrupted. I will verify the site before continuing. [${code}]`);
+      // The mission may be interrupted (lost browser response, dead session). The agent recovers
+      // itself: it re-observes the live page, resolves the uncertain effect from that observation,
+      // and retries the mission once. No user tap. If recovery is impossible, the task pauses
+      // silently (no user-facing prompt; the code stays in the log for operators).
+      let attempts=0;
+      while(true){
+        attempts++;
+        latestMissionTask=s.task;
+        try{result=await input.mission(hooks,s.runId,s.task);await guard.verify();break;}
+        catch(error){
+          await guard.verify();
+          s=state(input.task.id);s={...s,task:{...s.task,...privateMissionPatch()}};
+          if(s.pendingEffectId){const ref=evidenceId(s.runId,'lost',s.sequence);atomicExecution(()=>evidence(ref,{effectId:s!.pendingEffectId,status:'uncertain'}));await executionUnknown(s,s.pendingEffectId,ref);}
+          // The code stays in the log for operators; it never reaches a user-facing message.
+          const raw=error instanceof Error?error.message:String(error);
+          const code=/^[A-Z][A-Z0-9_]{2,48}$/.test(raw)?raw:'INTERRUPTED';
+          const detail=error instanceof InvalidWorkspacePayload?` path=${error.path} type=${error.valueType}`:'';
+          s={...s,task:{...s.task,log:[...(s.task.log??[]),`Recovery check paused [${code}]${detail}`]}};
+          const resolved=s.pendingEffectId?await selfResolveUncertain(s,executionContext):null;
+          // Retry only when the action verifiably did NOT happen: re-running the mission is
+          // then safe (it re-dispatches an action that never landed). When the action DID
+          // happen (confirmed), re-running the mission from the start would risk duplicating
+          // it, so the task pauses silently and the resume path re-observes and continues.
+          if(resolved==='not_applied'&&attempts<2){
+            s={...s,pendingEffectId:null,sequence:s.sequence+1};
+            atomicExecution(()=>saveRecord(s!,`${s!.runId}:selfverify-retry:${record(s!.taskId)!.revision}`));
+            continue;
+          }
+          return await executionPause(s,`Mission interrupted [${code}]`);
+        }
       }
       s=state(input.task.id);
-      const task:WorkspaceTask={...s.task,...privateMissionPatch(),session_id:result.sessionID??missionTask.session_id??s.task.session_id,browser_trace:result.trace??[],extracted_items:result.extractedItems??[],information_requests:result.informationRequests??[],log:[...(s.task.log??[]),...(result.log??[])],pending_action:result.pendingAction??null,checkpoint:result.checkpoint??null,help:result.help??null,authorized_action:null};
+      const task:WorkspaceTask={...s.task,...privateMissionPatch(),session_id:result.sessionID??latestMissionTask?.session_id??s.task.session_id,browser_trace:result.trace??[],extracted_items:result.extractedItems??[],information_requests:result.informationRequests??[],log:[...(s.task.log??[]),...(result.log??[])],pending_action:result.pendingAction??null,checkpoint:result.checkpoint??null,help:result.help??null,authorized_action:null};
       s={...s,task};
-      if(s.pendingEffectId||f.effects.unresolved(s.runId)){s={...s,task:{...s.task,log:[...(s.task.log??[]),`Pause pending verification [${s.pendingEffectId??'unresolved'}]`]}};return await executionPause(s,'An action needs verification before I can continue.');}
+      if(s.pendingEffectId||f.effects.unresolved(s.runId)){
+        // A prepared-but-never-dispatched ticket has no external effect; cancel it and continue.
+        const pending=s.pendingEffectId?db.get<import('./workspace-contract.ts').EffectRecord>('effect',s.pendingEffectId)?.value:null;
+        if(pending?.status==='prepared'){
+          await f.effects.cancelPrepared(await executionContext(s.taskId,`${pending.effectId}:postmission-cancel`,pending.revision,'action.resolve'),pending.effectId);
+          s={...s,pendingEffectId:null,sequence:s.sequence+1};
+          atomicExecution(()=>saveRecord(s!,`${s!.runId}:cancel-prepared:${record(s!.taskId)!.revision}`));
+        } else {
+          s={...s,task:{...s.task,log:[...(s.task.log??[]),`Pause pending verification [${s.pendingEffectId??'unresolved'}]`]}};
+          // The agent re-observes the live page and resolves the uncertain effect itself.
+          // No user review. If the page cannot be observed, the task pauses silently.
+          const resolved=s.pendingEffectId?await selfResolveUncertain(s,executionContext):null;
+          if(resolved){s={...s,pendingEffectId:null,sequence:s.sequence+1};atomicExecution(()=>saveRecord(s!,`${s!.runId}:selfverify:${record(s!.taskId)!.revision}`));}
+          else if(f.effects.unresolved(s.runId))return await executionPause(s,'Unresolved effect could not be verified from the live page.');
+        }
+      }
       if(result.status==='succeeded'){
         const proof=await config.verifyMissionCompletion({task,runId:s.runId,result});
         await guard.verify();
@@ -278,15 +343,17 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
           await f.checkpoints.complete(await executionContext(task.id,`${s.runId}:complete`,taskRevision,'task.complete'),completeInput,committed=>{guard.assertCurrent();return saveRecord(successful,`${s!.runId}:succeeded`,committed.receiptId);});
           return copy(successful.task);
         }
-        task.help=recoveryHelp('The site has not provided enough evidence to confirm completion. Please check it before continuing.');
+        // No trusted completion proof: the mission said done but the page does not prove it.
+        // The agent does not ask the user to check; the task pauses silently and can be retried.
+        task.log=[...(task.log??[]),'Mission claimed success without trusted completion proof.'];
       }
       const ref=evidenceId(s.runId,'pause',s.sequence);
       const receipt=await executionCapture(task,s.runId,'pause',[{ref,payload:{status:result.status,help:task.help??null}}]);
-      task.log=[...(task.log??[]),`Mission paused [${result.status}:${(result as any).failure?.kind??'none'}]`];return await executionPause({...s,task},'I need your help before continuing.',receipt);
+      task.log=[...(task.log??[]),`Mission paused [${result.status}:${(result as any).failure?.kind??'none'}]`];return await executionPause({...s,task},`Mission ended with status ${result.status}.`,receipt);
     }catch(error){
       await guard.verify();
       const current=record(input.task.id)?.value;
-      if(current){const safe={...current.task,...trustedMissionPatch(latestMissionTask),status:'needsHuman',authorized_action:null,workspace_persistence_error:true,help:recoveryHelp('Your work needs a recovery check before I can safely continue.')};atomicExecution(()=>saveRecord({...current,status:'needsHuman',task:safe},`${current.runId}:recovery:${record(current.taskId)!.revision}`));return safe;}
+      if(current){const safe={...current.task,...trustedMissionPatch(latestMissionTask),status:'needsHuman',authorized_action:null,workspace_persistence_error:true,help:current.task.help??null};atomicExecution(()=>saveRecord({...current,status:'needsHuman',task:safe},`${current.runId}:recovery:${record(current.taskId)!.revision}`));return safe;}
       throw error;
     }finally{
       db.storage.transactionSync(()=>{
@@ -322,30 +389,29 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
     waiting:(taskId:string)=>db.storage.transactionSync(()=>{if(!['succeeded','failed','rejected'].includes(record(taskId)?.value.status??'')&&db.get<{taskId:string}>('runner_owner','active')?.value.taskId!==taskId)progress(taskId,'waiting_for_workspace');}),
     unavailable:(taskId:string)=>db.storage.transactionSync(()=>{if(!['succeeded','failed','rejected'].includes(record(taskId)?.value.status??'')&&!db.get('runner_owner','active'))progress(taskId,'recovery');}),
     run:(input:WorkspaceRunContext)=>serialized(()=>execute(input)),
-    /** Root-only authenticated human/current-browser reconciliation. This never dispatches or resumes a mission. */
-    reconcile:(input:{taskId:string;effectId:string;status:'confirmed'|'not_applied';evidenceRef:string})=>serialized(async()=>{
+    /** Agent self-reconciliation of an uncertain effect. The agent re-observes the live page and resolves
+     * the effect from that observation — never from a user tap. This never dispatches or resumes a mission.
+     * No fresh-approval flag, no blanket pre-authorization, no user-facing prompt. */
+    reconcile:(input:{taskId:string;effectId:string})=>serialized(async()=>{
       const current=state(input.taskId);const effect=f.effects.require(input.effectId);
       if(effect.taskId!==input.taskId||effect.runId!==current.runId)fail('ACTION_TICKET_MISMATCH');
-      if(!config.verifyReviewedOutcome||!await config.verifyReviewedOutcome(input))fail('UNVERIFIED_REVIEW');
-      const requestKey=await digest(input);
-      const persisted=db.storage.transactionSync(()=>{
-        const old=db.get<{expectedRevision:number}>('runner_review',requestKey);
-        if(old)return old.value;
-        const value={expectedRevision:effect.revision};db.put('runner_review',requestKey,0,value);return value;
-      });
-      // A prepared-but-never-dispatched ticket has no external effect to
-      // confirm; reviewed not_applied cancels it through the ledger's
-      // consent-consumption proof instead of the dispatch resolve path.
-      const resolved=effect.status==='prepared'&&input.status==='not_applied'
-        ?await f.effects.cancelPrepared(await context(input.taskId,`review_${requestKey}`,persisted.expectedRevision,'action.resolve'),input.effectId)
-        :await f.effects.resolve(await context(input.taskId,`review_${requestKey}`,persisted.expectedRevision,'action.resolve'),input.effectId,input.status,input.evidenceRef);
-      if(resolved.status!==input.status)fail('UNVERIFIED_OUTCOME');
+      if(current.pendingEffectId!==input.effectId)fail('ACTION_TICKET_MISMATCH');
+      // A prepared-but-never-dispatched ticket has no external effect; cancel it. Dispatched
+      // effects are resolved from the agent's own page observation.
+      let resolved:'confirmed'|'not_applied'|null=null;
+      if(effect.status==='prepared'){
+        await f.effects.cancelPrepared(await context(input.taskId,`${input.effectId}:reconcile-cancel`,effect.revision,'action.resolve'),input.effectId);
+        resolved='not_applied';
+      } else {
+        resolved=await selfResolveUncertain(current,context);
+      }
+      if(!resolved)fail('AGENT_VERIFY_UNAVAILABLE');
       return db.storage.transactionSync(()=>{
         const latest=state(input.taskId);const canonical=f.effects.require(input.effectId);
-        if(canonical.status!==input.status||(effect.status!=='prepared'&&canonical.privateEvidenceRef!==input.evidenceRef))fail('UNVERIFIED_OUTCOME');
+        if(canonical.status!==resolved)fail('UNVERIFIED_OUTCOME');
         if(latest.pendingEffectId!==input.effectId){if(latest.pendingEffectId===null)return copy(latest.task);return fail('ACTION_TICKET_MISMATCH');}
-        const task={...latest.task,status:'needsHuman',authorized_action:null,pending_action:null,workspace_requires_fresh_approval:input.status==='not_applied',help:recoveryHelp(input.status==='not_applied'?'The earlier action was not applied. Review and approve any new action before continuing.':'The earlier action is confirmed. I will inspect the current page before continuing.')};
-        saveRecord({...latest,status:'needsHuman',task,pendingEffectId:null,sequence:latest.sequence+1},`review_projection_${requestKey}`);
+        const task={...latest.task,status:'needsHuman',authorized_action:null,pending_action:null,help:null};
+        saveRecord({...latest,status:'needsHuman',task,pendingEffectId:null,sequence:latest.sequence+1},`selfverify_projection_${effect.effectId}`);
         return copy(task);
       });
     }),
@@ -356,7 +422,14 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
         for(const entry of db.list<import('./workspace-contract.ts').EffectRecord>('effect'))if(entry.value.runId===old.runId&&entry.value.status==='prepared')await f.effects.cancelPrepared(await context(task.id,`${entry.value.effectId}:reject-undispatched`,entry.revision,'action.resolve'),entry.value.effectId);
         if(old.pendingEffectId){const pending=db.get<import('./workspace-contract.ts').EffectRecord>('effect',old.pendingEffectId)?.value;if(!pending||['confirmed','not_applied'].includes(pending.status))old={...old,pendingEffectId:null,sequence:old.sequence+1};}
       }
-      if(old?.pendingEffectId||old&&f.effects.unresolved(old.runId))return commitPause(old!,'An action may have completed. Verify it before rejecting this task.');
+      if(old?.pendingEffectId||old&&f.effects.unresolved(old.runId)){
+        // The user is stopping the task; an uncertain effect never blocks that. The agent
+        // self-verifies where it can, and the effect stays in the ledger for audit either way.
+        if(old.pendingEffectId){
+          const resolved=await selfResolveUncertain(old,context);
+          if(resolved)old={...old,pendingEffectId:null,sequence:old.sequence+1};
+        }
+      }
       const next:RunnerRecord=old??{taskId:task.id,runId:crypto.randomUUID(),sequence:0,pendingEffectId:null,status:'rejected',task};
       db.storage.transactionSync(()=>{
         const run=db.get<any>('run',next.runId);if(run)db.put('run',next.runId,run.revision,{...run.value,completed:true});

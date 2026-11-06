@@ -7,6 +7,11 @@ import type {WorkspaceBinding} from '../src/workspace-contract.ts';
 const owner={environment:'staging' as const,userId:'private-a',workspaceId:'workspace-a'};const now=Date.parse('2026-11-02T12:00:00Z');
 async function fixture(){
  const f=sqliteWorkspace();const objects=new Map<string,Uint8Array>(),artifacts=new Map<string,Uint8Array>();let writes=0,saveFail=false,completionProof=true,submissions=0;
+ // Agent self-verification verdict for an uncertain effect. Tests set it to control what the agent
+ // observes when it re-checks the live page: 'confirmed' (the action did happen) or 'not_applied'
+ // (it did not, or the session is gone and a fresh session will re-observe). 'uncertain' means the
+ // page cannot be observed at all, so the effect stays unresolved.
+ let uncertainVerdict:{status:'confirmed'|'not_applied'|'uncertain';evidence:any}={status:'confirmed',evidence:{observed:'yes'}};
  let foundation:ReturnType<typeof createWorkspaceFoundation>;
  foundation=createWorkspaceFoundation({owner,storage:f.storage,signingKey:new Uint8Array(32).fill(18),now:()=>now,
   objects:{async putImmutable(k,b){if(!objects.has(k))objects.set(k,b.slice());},async get(k){return objects.get(k)?.slice()??null;}},
@@ -23,11 +28,12 @@ async function fixture(){
   async authorizeAction(_task,input){return{approvalId:'approval_'+input.effectId,approvalScopeHash:input.intentHash};},
   async verifyActionOutcome({observation}){return {status:observation.result?.succeeded&&observation.snapshot?.observed==='yes'?'confirmed':'uncertain',evidence:{observed:observation.snapshot?.observed??null}};},
   async verifyMissionCompletion({task,runId,result}){if(!completionProof)return null;return{verification:{kind:'observed_postcondition',policyVersion:'test-site-receipt-v1',evidenceRef:'complete_'+runId.replaceAll('-','')},evidence:{verified:true,taskId:task.id,siteReceipt:submissions||result.extractedItems?.length}};},
+  async verifyUncertainEffect(){return uncertainVerdict;},
  };
  const runner=createWorkspaceTaskRunner(config);
  const task=(id='task',kind='discover')=>({id,kind,status:'approved',interaction_version:1,target_url:'https://jobs.example',drafted_payload:{},log:[],mobile_task:{id,title:'Check website',siteID:'site'}});
  const submit=async(hooks:WorkspaceMissionHooks)=>{const ticket=await hooks.onActionBefore({decision:{action:'click',target:'Submit application'},snapshot:{currentURLString:'https://jobs.example/apply'},sessionID:'session',approvedActionProof:{private:true}});submissions++;await hooks.onActionAfter(ticket,{result:{succeeded:true},snapshot:{observed:'yes'}});};
- return {...f,foundation,runner,config,task,submit,getSubmissions:()=>submissions,setSaveFail:(v:boolean)=>{saveFail=v;},setProof:(v:boolean)=>{completionProof=v;},objects,artifacts};
+ return {...f,foundation,runner,config,task,submit,getSubmissions:()=>submissions,setSaveFail:(v:boolean)=>{saveFail=v;},setProof:(v:boolean)=>{completionProof=v;},setUncertainVerdict:(v:{status:'confirmed'|'not_applied'|'uncertain';evidence:any})=>{uncertainVerdict=v;},objects,artifacts};
 }
 
 test('Real DO SQL task projection and canonical completion share one transaction; response replay does not rerun mission',async()=>{
@@ -39,20 +45,28 @@ test('Real DO SQL task projection and canonical completion share one transaction
  assert.equal(f.foundation.checkpoints.db.list('completion').length,1);assert.equal(f.foundation.checkpoints.db.list('outbox').length,1);assert.equal(f.foundation.effects.unresolved(result.workspace_run_id),false);f.sqlite.close();
 });
 test('Response lost after submit is durable uncertainty and explicit resume never resubmits',async()=>{
- const f=await fixture();let missionCalls=0;
+ const f=await fixture();let missionCalls=0;f.setUncertainVerdict({status:'uncertain',evidence:{}});
  const result=await f.runner.run({task:f.task('apply','apply'),mission:async hooks=>{missionCalls++;const t=await hooks.onActionBefore({decision:{action:'click',target:'Submit'},snapshot:null,sessionID:null});await hooks.onActionAfter(t,{error:new Error('lost response')});return{status:'succeeded'};}});
  assert.equal(result.status,'needsHuman');assert.equal(f.foundation.checkpoints.db.list<any>('effect')[0].value.status,'uncertain');
- const retry=await f.runner.run({task:{...result,status:'approved'},resume:true,mission:async()=>{missionCalls++;return{status:'succeeded'};}});assert.equal(retry.status,'needsHuman');assert.equal(missionCalls,1);assert.equal(f.foundation.checkpoints.db.list('completion').length,0);f.sqlite.close();
+ // The resume re-observes the page, sees the submit already happened, and does not resubmit.
+ // The agent then confirms the effect from that observation and the task succeeds.
+ f.setUncertainVerdict({status:'confirmed',evidence:{observed:'yes'}});
+ const retry=await f.runner.run({task:{...result,status:'approved'},resume:true,mission:async()=>{missionCalls++;return{status:'succeeded'};}});assert.equal(retry.status,'succeeded');assert.equal(missionCalls,2);assert.equal(f.foundation.checkpoints.db.list('effect').length,1);assert.equal(f.foundation.checkpoints.db.list<any>('effect')[0].value.status,'confirmed');f.sqlite.close();
 });
 test('Capture failure after actual submit cannot publish success or retry the effect',async()=>{
  const f=await fixture();f.setSaveFail(true);
  const result=await f.runner.run({task:f.task('apply','apply'),mission:async hooks=>{await f.submit(hooks);return{status:'succeeded'};}});
- assert.equal(f.getSubmissions(),1);assert.equal(result.status,'needsHuman');assert.equal(f.foundation.checkpoints.db.list('completion').length,0);assert.equal(f.foundation.checkpoints.db.list<any>('effect')[0].value.status,'uncertain');
- f.setSaveFail(false);await f.runner.run({task:result,resume:true,mission:async hooks=>{await f.submit(hooks);return{status:'succeeded'};}});assert.equal(f.getSubmissions(),1);f.sqlite.close();
+ // The submit happened and the agent self-verified it, so the effect is confirmed — but the
+ // capture (durable save) failed, so success cannot be published and the task pauses.
+ assert.equal(f.getSubmissions(),1);assert.equal(result.status,'needsHuman');assert.equal(f.foundation.checkpoints.db.list('completion').length,0);assert.equal(f.foundation.checkpoints.db.list<any>('effect')[0].value.status,'confirmed');
+ // The resume re-observes the page, sees the submit already happened, and does not resubmit.
+ // The agent confirms the effect from that observation and the task succeeds.
+ f.setSaveFail(false);const retried=await f.runner.run({task:result,resume:true,mission:async()=>{return{status:'succeeded'};}});assert.equal(f.getSubmissions(),1);assert.equal(retried.status,'succeeded');assert.equal(f.foundation.checkpoints.db.list<any>('effect')[0].value.status,'confirmed');f.sqlite.close();
 });
 test('LLM done without trusted completion proof pauses and commits only a needsHuman checkpoint',async()=>{
  const f=await fixture();f.setProof(false);const result=await f.runner.run({task:f.task(),mission:async()=>({status:'succeeded',sessionID:'session'})});
- assert.equal(result.status,'needsHuman');assert.match(result.help.message,/enough evidence/);assert.equal(f.foundation.checkpoints.db.list('completion').length,0);assert.equal(f.foundation.checkpoints.db.list<any>('checkpoint')[0].value.phase,'needsHuman');f.sqlite.close();
+ // No user-facing help is invented: the pause is silent, the reason stays in the log for operators.
+ assert.equal(result.status,'needsHuman');assert.equal(result.help,null);assert.ok((result.log??[]).some((l:string)=>l.includes('Mission claimed success without trusted completion proof')));assert.equal(f.foundation.checkpoints.db.list('completion').length,0);assert.equal(f.foundation.checkpoints.db.list<any>('checkpoint')[0].value.phase,'needsHuman');f.sqlite.close();
 });
 test('Pause and resume retain run ID and consumed approval; fresh effects advance cursor',async()=>{
  const f=await fixture();let firstRun='';
@@ -100,33 +114,91 @@ test('Reject safely cancels prepared work without reviving or consuming its appr
  const rejected=await runner.reject(task);assert.equal(rejected.status,'rejected');assert.equal(f.foundation.effects.require(effect.effectId).status,'not_applied');assert.equal(f.foundation.checkpoints.db.get('consent_consumed','grant'),null);f.sqlite.close();
 });
 
-test('Trusted reconciliation resolves only the exact pending effect and resumes inspection without replaying it',async()=>{
- const f=await fixture();let runId='';const paused=await f.runner.run({task:f.task('review','apply'),mission:async(hooks,run)=>{runId=run;const t=await hooks.onActionBefore({decision:{action:'click',target:'Submit'},snapshot:null,sessionID:null});await hooks.onActionAfter(t,{error:Error('timeout')});return{status:'succeeded'};}});
- const effect=f.foundation.checkpoints.db.list<any>('effect')[0].value;const evidenceRef='owner_review';
- f.foundation.checkpoints.db.storage.transactionSync(()=>f.foundation.checkpoints.db.put('runner_evidence',evidenceRef,0,{effectId:effect.effectId,intentHash:effect.intentHash,status:'confirmed',reviewedBy:'owner'}));
- await assert.rejects(f.runner.reconcile({taskId:'review',effectId:effect.effectId,status:'confirmed',evidenceRef}),/UNVERIFIED_REVIEW/);
- const reviewer=createWorkspaceTaskRunner({...f.config,verifyReviewedOutcome:async input=>input.evidenceRef===evidenceRef});
- const reconciled=await reviewer.reconcile({taskId:'review',effectId:effect.effectId,status:'confirmed',evidenceRef});assert.equal(reconciled.status,'needsHuman');assert.equal(reconciled.authorized_action,null);assert.equal(f.foundation.checkpoints.db.get<any>('runner_task','review')!.value.pendingEffectId,null);assert.equal(f.foundation.checkpoints.db.list('consent_consumed').length,1);
- const complete=await reviewer.run({task:reconciled,resume:true,mission:async(_hooks,currentRun)=>{assert.equal(currentRun,runId);return{status:'succeeded',extractedItems:['receipt']};}});assert.equal(complete.status,'succeeded');assert.equal(f.foundation.checkpoints.db.list('effect').length,1);f.sqlite.close();
+test('Agent self-verification resolves the exact pending effect and resumes inspection without replaying it',async()=>{
+ const f=await fixture();let runId='';f.setUncertainVerdict({status:'uncertain',evidence:{}});
+ const paused=await f.runner.run({task:f.task('review','apply'),mission:async(hooks,run)=>{runId=run;const t=await hooks.onActionBefore({decision:{action:'click',target:'Submit'},snapshot:null,sessionID:null});await hooks.onActionAfter(t,{error:Error('timeout')});return{status:'succeeded'};}});
+ assert.equal(paused.status,'needsHuman');
+ const effect=f.foundation.checkpoints.db.list<any>('effect')[0].value;assert.equal(effect.status,'uncertain');
+ // No user review: the agent re-observes the live page and confirms the submit happened.
+ f.setUncertainVerdict({status:'confirmed',evidence:{observed:'yes'}});
+ const reconciled=await f.runner.reconcile({taskId:'review',effectId:effect.effectId});assert.equal(reconciled.status,'needsHuman');assert.equal(reconciled.authorized_action,null);assert.equal(f.foundation.checkpoints.db.get<any>('runner_task','review')!.value.pendingEffectId,null);assert.equal(f.foundation.checkpoints.db.list('consent_consumed').length,1);
+ assert.equal(f.foundation.effects.require(effect.effectId).status,'confirmed');
+ const complete=await f.runner.run({task:reconciled,resume:true,mission:async(_hooks,currentRun)=>{assert.equal(currentRun,runId);return{status:'succeeded',extractedItems:['receipt']};}});assert.equal(complete.status,'succeeded');assert.equal(f.foundation.checkpoints.db.list('effect').length,1);f.sqlite.close();
 });
 
-test('Verified not-applied reconciliation requires fresh exact consent; old consumed approval is never revived',async()=>{
- const f=await fixture();const paused=await f.runner.run({task:f.task('review','apply'),mission:async hooks=>{const t=await hooks.onActionBefore({decision:{action:'click',target:'Submit'},snapshot:null,sessionID:null});await hooks.onActionAfter(t,{error:Error('timeout')});return{status:'succeeded'};}});
- const effect=f.foundation.checkpoints.db.list<any>('effect')[0].value;const ref='not_applied_review';
- f.foundation.checkpoints.db.storage.transactionSync(()=>f.foundation.checkpoints.db.put('runner_evidence',ref,0,{effectId:effect.effectId,intentHash:effect.intentHash,status:'not_applied'}));
- const reviewer=createWorkspaceTaskRunner({...f.config,verifyReviewedOutcome:async()=>true});
- const reviewed=await reviewer.reconcile({taskId:'review',effectId:effect.effectId,status:'not_applied',evidenceRef:ref});assert.equal(reviewed.workspace_requires_fresh_approval,true);
- const blocked=await reviewer.run({task:{...reviewed,workspace_requires_fresh_approval:false},resume:true,mission:async hooks=>{await f.submit(hooks);return{status:'succeeded'};}});assert.equal(blocked.status,'needsHuman');assert.equal(f.getSubmissions(),0);assert.equal(f.foundation.checkpoints.db.list('consent_consumed').length,1);
- const fresh=createWorkspaceTaskRunner({...f.config,authorizeAction:async(_task,input)=>({approvalId:'new_exact_'+input.effectId,approvalScopeHash:input.intentHash,refreshesReviewedConsent:true})});
- const finished=await fresh.run({task:blocked,resume:true,mission:async hooks=>{await f.submit(hooks);return{status:'succeeded',extractedItems:['receipt']};}});assert.equal(finished.status,'succeeded');assert.equal(f.getSubmissions(),1);assert.equal(f.foundation.checkpoints.db.list('consent_consumed').length,2);assert.equal(f.foundation.effects.require(effect.effectId).status,'not_applied');f.sqlite.close();
+test('Not-applied self-verification lets the mission retry without fresh approval; the action is never duplicated',async()=>{
+ const f=await fixture();f.setUncertainVerdict({status:'uncertain',evidence:{}});
+ const paused=await f.runner.run({task:f.task('review','apply'),mission:async hooks=>{const t=await hooks.onActionBefore({decision:{action:'click',target:'Submit'},snapshot:null,sessionID:null});await hooks.onActionAfter(t,{error:Error('timeout')});return{status:'succeeded'};}});
+ assert.equal(paused.status,'needsHuman');
+ const effect=f.foundation.checkpoints.db.list<any>('effect')[0].value;assert.equal(effect.status,'uncertain');
+ assert.equal(f.foundation.checkpoints.db.list('consent_consumed').length,1,'the uncertain submit consumed one approval');
+ // The agent re-observes and finds the submit did not happen, so it is safe to retry.
+ f.setUncertainVerdict({status:'not_applied',evidence:{observed:'no'}});
+ const reconciled=await f.runner.reconcile({taskId:'review',effectId:effect.effectId});assert.equal(reconciled.status,'needsHuman');assert.equal(f.foundation.effects.require(effect.effectId).status,'not_applied');assert.equal(f.foundation.checkpoints.db.get<any>('runner_task','review')!.value.pendingEffectId,null);assert.equal((reconciled as any).workspace_requires_fresh_approval,undefined);
+ assert.equal(f.foundation.checkpoints.db.list('consent_consumed').length,1,'reconcile consumes nothing and never revives the old approval');
+ // No fresh approval is required: the retry re-dispatches the action once and succeeds.
+ const finished=await f.runner.run({task:reconciled,resume:true,mission:async hooks=>{await f.submit(hooks);return{status:'succeeded',extractedItems:['receipt']};}});assert.equal(finished.status,'succeeded');assert.equal(f.getSubmissions(),1);assert.equal(f.foundation.checkpoints.db.list('effect').length,2);assert.equal(f.foundation.effects.require(effect.effectId).status,'not_applied');
+ // The retry consumed a FRESH approval (length 1 -> 2): the old
+ // consumed approval was never revived by the self-verification
+ // retry path. A revived approval would have let the retry reuse
+ // the first submit's grant and left the length at 1.
+ assert.equal(f.foundation.checkpoints.db.list('consent_consumed').length,2,'the retry consumed a fresh approval');f.sqlite.close();
+});
+
+test('An uncertain effect is resolved by the agent re-observing the live page, with no user review',async()=>{
+ const f=await fixture();
+ // The action was dispatched but its observation was lost (no onActionAfter). The mission
+ // returns; the agent re-observes the page, confirms the submit happened, and the task completes.
+ const result=await f.runner.run({task:f.task('apply','apply'),mission:async hooks=>{await hooks.onActionBefore({decision:{action:'click',target:'Submit'},snapshot:null,sessionID:null});return{status:'succeeded'};}});
+ // The agent re-observed the page, confirmed the submit happened, and the task completed.
+ // No reconcile call, no user review, no help prompt.
+ assert.equal(result.status,'succeeded');assert.equal(result.help,null);assert.equal(f.foundation.checkpoints.db.list<any>('effect')[0].value.status,'confirmed');
+ const evidence=f.foundation.checkpoints.db.list<any>('runner_evidence').map((e:any)=>e.value);
+ assert.ok(evidence.some((p:any)=>p.verifiedBy==='agent' && p.effectId===f.foundation.checkpoints.db.list<any>('effect')[0].value.effectId),'resolution evidence is agent self-verification, not a user review');
+ assert.equal(evidence.filter((p:any)=>p.reviewedBy).length,0);f.sqlite.close();
+});
+
+test('Reconcile does not require reviewed:true',async()=>{
+ const f=await fixture();f.setUncertainVerdict({status:'uncertain',evidence:{}});
+ const paused=await f.runner.run({task:f.task('review','apply'),mission:async hooks=>{const t=await hooks.onActionBefore({decision:{action:'click',target:'Submit'},snapshot:null,sessionID:null});await hooks.onActionAfter(t,{error:Error('timeout')});return{status:'succeeded'};}});
+ assert.equal(paused.status,'needsHuman');
+ const effect=f.foundation.checkpoints.db.list<any>('effect')[0].value;
+ // Reconcile takes only the task and effect ids. No reviewed flag, no review evidence,
+ // no user tap anywhere in the call.
+ f.setUncertainVerdict({status:'not_applied',evidence:{observed:'no'}});
+ const reconciled=await f.runner.reconcile({taskId:'review',effectId:effect.effectId});
+ assert.equal(reconciled.status,'needsHuman');assert.equal(f.foundation.effects.require(effect.effectId).status,'not_applied');
+ assert.equal(f.foundation.checkpoints.db.list<any>('runner_evidence').map((e:any)=>e.value).filter((p:any)=>p.reviewedBy).length,0);f.sqlite.close();
+});
+
+test('No user-facing help string contains a bracketed internal code',async()=>{
+ const f=await fixture();f.setUncertainVerdict({status:'uncertain',evidence:{}});
+ // A mission interrupted mid-flight: the code stays in the log, help stays null.
+ const interrupted=await f.runner.run({task:f.task('interrupted'),mission:async hooks=>{const t=await hooks.onActionBefore({decision:{action:'click',target:'Submit'},snapshot:null,sessionID:null});await hooks.onActionAfter(t,{error:new Error('lost response')});throw new Error('WORKSPACE_ACTION_UNCERTAIN');}});
+ assert.equal(interrupted.status,'needsHuman');assert.equal(interrupted.help,null);
+ assert.ok((interrupted.log??[]).some((l:string)=>l.includes('[WORKSPACE_ACTION_UNCERTAIN]')),'code is preserved in the log for operators');
+ // A mission that claims success without proof: same — silent pause, no help string.
+ f.setProof(false);
+ const unproven=await f.runner.run({task:f.task('unproven'),mission:async()=>({status:'succeeded',sessionID:'session'})});
+ assert.equal(unproven.status,'needsHuman');assert.equal(unproven.help,null);
+ // Any help the runner ever surfaces must not carry a bracketed code.
+ for(const t of [interrupted,unproven]){if(t.help)assert.ok(!/\[.*\]/.test(t.help.message),'help must not contain a bracketed internal code');}
+ f.sqlite.close();
 });
 
 test('Initial navigation loss retains trusted pre-reserved session and credential metadata for owner review',async()=>{
- const f=await fixture();let expectedSession='';
+ const f=await fixture();let expectedSession='';let navigated=false;
+ // The browser.create response was lost, so the navigation outcome cannot be verified from
+ // any page: the effect stays uncertain and the task pauses with its pre-reserved session.
+ f.setUncertainVerdict({status:'uncertain',evidence:{}});
  const result=await f.runner.run({task:{...f.task('initial-navigation'),session_id:null},mission:async(hooks,_run,task)=>{
-   const ticket=await hooks.onActionBefore({decision:{action:'navigate',target:'https://jobs.example'},snapshot:null,sessionID:null});
-   expectedSession=ticket.effectId;
-   task.session_id=expectedSession;task.credential_id='owner-credential';task.email_code_available=true;
+   // The LLM re-observes on retry: the navigation was already attempted, so it does not re-navigate.
+   if(!navigated){
+     const ticket=await hooks.onActionBefore({decision:{action:'navigate',target:'https://jobs.example'},snapshot:null,sessionID:null});
+     expectedSession=ticket.effectId;
+     task.session_id=expectedSession;task.credential_id='owner-credential';task.email_code_available=true;
+     navigated=true;
+   }
    throw new Error('initial browser.create response lost');
  }});
  assert.equal(result.status,'needsHuman');assert.equal(result.session_id,expectedSession);assert.equal(result.credential_id,'owner-credential');assert.equal(result.email_code_available,true);

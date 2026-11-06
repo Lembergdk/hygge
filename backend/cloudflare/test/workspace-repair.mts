@@ -26,6 +26,7 @@ function fakeContainer(){
   const files=new Map<string,Buffer>();
   const artifacts:Record<string,string>={};
   const uploads=new Map<string,{ref:string,size:number,sha256:string,bytes:Buffer}>();
+  const snapshots=new Map<string,any>();
   let restore:any=null,capture:any=null;
   const ops:string[]=[];
   let destroys=0,starts=0,failStartOnce=false;
@@ -55,7 +56,7 @@ function fakeContainer(){
     if(op==='artifact.abort'){uploads.delete(a.uploadId);return{};}
     if(op==='artifact.write'){const r=await handle('artifact.begin',a);if(!r.committed){await handle('artifact.chunk',{uploadId:r.uploadId,offset:0,data:a.data});await handle('artifact.commit',{...a,uploadId:r.uploadId});}return{committed:true,size:a.size,sha256:a.sha256};}
     if(op==='artifact.deleteDocuments')return{removedThroughRevision:a.throughRevision};
-    if(op==='browser.snapshot')throw Error('SESSION_NOT_FOUND');
+    if(op==='browser.snapshot'){const snap=snapshots.get(String(a.id));if(!snap)throw Error('SESSION_NOT_FOUND');return snap;}
     throw Error('UNKNOWN_OP:'+op);
   }
   const container:any={
@@ -77,6 +78,11 @@ function fakeContainer(){
     kill(){running=false;hasContainer=false;},
     // A start that fails once, so a rebind can be left starting.
     failNextStart(){failStartOnce=true;},
+    // Plant a live-page snapshot for a session id, so the agent's
+    // self-verification (verifyUncertainEffect) can observe it. A
+    // session with no planted snapshot still throws
+    // SESSION_NOT_FOUND, exactly as a dead session does.
+    plantSnapshot(sessionId:string,snapshot:any){snapshots.set(sessionId,snapshot);},
     async plantOrphan(incarnation:string,generation:number){
       const ownerHash=(await digest(new TextEncoder().encode(ownerKey(owner)))).slice(0,32);
       running=true;hasContainer=true;image=oldImage;labels={owner:ownerHash,operation:'orphan',incarnation,generation:String(generation)};
@@ -196,12 +202,12 @@ test('keepalive warms a cold workspace and renews the lease while warm',async()=
   assert.ok(Date.parse(lease2.expiresAt)>=Date.parse(lease1.expiresAt));
 });
 
-test('a dead-session effect resolves through the task review',async()=>{
+test('a dead-session effect resolves through agent self-verification',async()=>{
   const {f,w,before}=await wedgedMain();
   const db=w.foundation.persistence;
   const task:any={id:'task-fiverr',kind:'discover',target_url:'https://fiverr.example',goal:'Scan',status:'needsHuman',drafted_payload:{},interaction_version:1,log:[],session_id:'fx_run1_0',help:{kind:'recovery'}};
   f.projectTask(task);
-  db.put('runner_task','task-fiverr',0,{taskId:'task-fiverr',runId:'run-1',sequence:1,pendingEffectId:null,status:'needsHuman',task});
+  db.put('runner_task','task-fiverr',0,{taskId:'task-fiverr',runId:'run-1',sequence:1,pendingEffectId:'fx_3',status:'needsHuman',task});
   const base={...db.owner,intentHash:'h',approvalId:null,approvalScopeHash:null,incarnation:before.incarnation,generation:1};
   db.put('effect','fx_3',0,{...base,effectId:'fx_3',taskId:'task-fiverr',runId:'run-1',status:'uncertain',revision:1});
   db.put('effect','fx_done',0,{...base,effectId:'fx_done',taskId:'task-fiverr',runId:'run-1',status:'confirmed',revision:1});
@@ -210,10 +216,9 @@ test('a dead-session effect resolves through the task review',async()=>{
   // there is no effect gate — so the verdict is already false.
   assert.deepEqual(diagBefore.effects.unresolved.map((e:any)=>e.effectId),['fx_3']);
   assert.equal(diagBefore.wouldBlockNewMission,false);
-  // The review itself rebinds (reconcile calls ensure) and then resolves
-  // with dead-session evidence: the session is gone and the effect belongs
-  // to the incarnation that no longer runs.
-  const reviewed=await w.reconcile('task-fiverr','fx_3','not_applied');
+  // Reconcile rebinds and the agent self-verifies: the session is gone, so the effect resolves
+  // as not-applied (a fresh session re-observes on the next mission). No user review.
+  const reviewed=await w.reconcile('task-fiverr','fx_3');
   assert.equal(reviewed.status,'needsHuman');
   const effect=db.get<any>('effect','fx_3')!.value;
   assert.equal(effect.status,'not_applied');
@@ -222,29 +227,31 @@ test('a dead-session effect resolves through the task review',async()=>{
   assert.equal(diagAfter.wouldBlockNewMission,false);
 });
 
-test('a task whose session id was already cleared still resolves through the review',async()=>{
+test('a task whose session id was already cleared still resolves through self-verification',async()=>{
   const {f,w,before}=await wedgedMain();
   const db=w.foundation.persistence;
   // The real Apple task: needsHuman, no help at all, and the session id
   // already cleared by the task poll after the in-memory session map was
-  // lost. The review must still resolve it from the session-gone evidence.
+  // lost. Self-verification still resolves it: no session means the outcome
+  // cannot be confirmed, so it resolves as not-applied and a fresh session
+  // re-observes on the next mission.
   const task:any={id:'task-apple',kind:'discover',target_url:'https://fiverr.example',goal:'Scan',status:'needsHuman',drafted_payload:{},interaction_version:1,log:[],session_id:null,help:null};
   f.projectTask(task);
-  db.put('runner_task','task-apple',0,{taskId:'task-apple',runId:'run-2abf',sequence:1,pendingEffectId:null,status:'needsHuman',task});
+  db.put('runner_task','task-apple',0,{taskId:'task-apple',runId:'run-2abf',sequence:1,pendingEffectId:'fx_apple_3',status:'needsHuman',task});
   const base={...db.owner,intentHash:'h',approvalId:null,approvalScopeHash:null,incarnation:before.incarnation,generation:1};
   db.put('effect','fx_apple_3',0,{...base,effectId:'fx_apple_3',taskId:'task-apple',runId:'run-2abf',status:'uncertain',revision:1});
-  const reviewed=await w.reconcile('task-apple','fx_apple_3','not_applied');
+  const reviewed=await w.reconcile('task-apple','fx_apple_3');
   assert.equal(reviewed.status,'needsHuman');
   const effect=db.get<any>('effect','fx_apple_3')!.value;
   assert.equal(effect.status,'not_applied');
   const evidence=db.list<any>('runner_evidence').map((e:any)=>e.value);
-  assert.ok(evidence.some((p:any)=>p.sessionGone===true && p.sessionId===null && p.effectId==='fx_apple_3'),'review records session-gone evidence with no session id');
+  assert.ok(evidence.some((p:any)=>p.evidence?.sessionGone===true && p.effectId==='fx_apple_3'),'self-verification records session-gone evidence');
   const diagAfter:any=await w.diagnostics();
   assert.deepEqual(diagAfter.effects.unresolved,[]);
   assert.equal(diagAfter.wouldBlockNewMission,false);
 });
 
-test('a session that vanished inside the live container still needs a live page',async()=>{
+test('a session that vanished inside the live container resolves as not-applied, not a refusal',async()=>{
   const f=fixture();
   const w=f.make();
   await w.ensure();
@@ -252,11 +259,65 @@ test('a session that vanished inside the live container still needs a live page'
   const binding=await w.foundation.registry.read(owner,owner);
   const task:any={id:'task-live',kind:'discover',target_url:'https://fiverr.example',goal:'Scan',status:'needsHuman',drafted_payload:{},interaction_version:1,log:[],session_id:'fx_run2_0',help:{kind:'recovery'}};
   f.projectTask(task);
-  w.foundation.persistence.put('runner_task','task-live',0,{taskId:'task-live',runId:'run-2',sequence:1,pendingEffectId:null,status:'needsHuman',task});
+  w.foundation.persistence.put('runner_task','task-live',0,{taskId:'task-live',runId:'run-2',sequence:1,pendingEffectId:'fx_live',status:'needsHuman',task});
   const base={...w.foundation.persistence.owner,intentHash:'h',approvalId:null,approvalScopeHash:null,incarnation:binding.incarnation,generation:binding.generation};
   w.foundation.persistence.put('effect','fx_live',0,{...base,effectId:'fx_live',taskId:'task-live',runId:'run-2',status:'uncertain',revision:1});
-  await assert.rejects(w.reconcile('task-live','fx_live','not_applied'),/CURRENT_PAGE_REQUIRED/);
-  assert.equal(w.foundation.persistence.get<any>('effect','fx_live')!.value.status,'uncertain');
+  // The session is gone, so the outcome cannot be confirmed from the live page. The agent
+  // resolves it as not-applied and the next mission opens a fresh session and re-observes —
+  // it no longer refuses and waits for a user to judge the page.
+  // Trade-off (finding 5), documented not silently accepted: resolving as not-applied
+  // assumes the action did not happen, which a dead session cannot prove — the old refusal
+  // kept the effect uncertain precisely because the outcome could still be checked. The
+  // refusal is not restored here because it deadlocked recovery: with the session gone,
+  // nothing could ever re-observe the page, so the effect stayed uncertain forever and the
+  // mission could never continue. The not-applied verdict lets the next mission open a
+  // fresh session and re-observe; the duplicate risk is bounded by that re-observation
+  // (the mission continues from the live page, it does not blindly re-dispatch) and by the
+  // per-effect auto-resume budget. The session-gone evidence stays in the ledger for audit.
+  const reconciled=await w.reconcile('task-live','fx_live');
+  assert.equal(reconciled.status,'needsHuman');
+  assert.equal(w.foundation.persistence.get<any>('effect','fx_live')!.value.status,'not_applied');
+});
+
+test('agent self-verification judges the real live page: confirmed when the goal is observed, not-applied when it is not',async()=>{
+  const f=fixture();
+  const w=f.make();
+  await w.ensure();
+  await w.saveDocument('generation/notes/plan.md',1,new TextEncoder().encode('Initial note'));
+  const binding=await w.foundation.registry.read(owner,owner);
+  const base={...w.foundation.persistence.owner,intentHash:'h',approvalId:null,approvalScopeHash:null,incarnation:binding.incarnation,generation:binding.generation};
+  // The live page for both tasks: a Fiverr search page on the task's origin.
+  const page={sessionID:'fx_live_0',currentURLString:'https://fiverr.example/search',title:'Fiverr',elements:[],humanControlled:false,controlEpoch:0,screenshotBase64:null};
+  f.fake.plantSnapshot('fx_live_0',page);
+  // Confirmed: a discover task whose extracted items show the goal
+  // (listings observed). This exercises the REAL verifyUncertainEffect
+  // in workspace-execution.ts — the snapshot above, the observed
+  // postcondition check, and the verdict — not a stubbed verdict.
+  const found:any={id:'task-found',kind:'discover',target_url:'https://fiverr.example/search',goal:'Scan',status:'needsHuman',drafted_payload:{},interaction_version:1,log:[],session_id:'fx_live_0',help:null,extracted_items:['listing-1']};
+  f.projectTask(found);
+  w.foundation.persistence.put('runner_task','task-found',0,{taskId:'task-found',runId:'run-found',sequence:1,pendingEffectId:'fx_found',status:'needsHuman',task:found});
+  w.foundation.persistence.put('effect','fx_found',0,{...base,effectId:'fx_found',taskId:'task-found',runId:'run-found',status:'uncertain',revision:1});
+  const confirmed=await w.reconcile('task-found','fx_found');
+  assert.equal(confirmed.status,'needsHuman');
+  assert.equal(w.foundation.persistence.get<any>('effect','fx_found')!.value.status,'confirmed');
+  const evidence=w.foundation.persistence.list<any>('runner_evidence').map((e:any)=>e.value);
+  assert.ok(evidence.some((p:any)=>p.verifiedBy==='agent' && p.effectId==='fx_found' && p.status==='confirmed'),'the confirmed verdict is agent self-verification from the live page');
+  // Not-applied (finding 3): the same page, but the goal is not
+  // observed — no listings were extracted. The check is the mission
+  // GOAL, not the specific action: for an intermediate action the
+  // goal is never achieved, so the verdict is not-applied even when
+  // the action itself did happen, and the mission retries from its
+  // fresh observation. The duplicate guard is that re-observation
+  // (the mission continues from the live page), not this verdict.
+  // Building action-specific verification is out of scope for this
+  // slice; the trade-off is documented here, not silently accepted.
+  const missed:any={id:'task-missed',kind:'discover',target_url:'https://fiverr.example/search',goal:'Scan',status:'needsHuman',drafted_payload:{},interaction_version:1,log:[],session_id:'fx_live_0',help:null,extracted_items:[]};
+  f.projectTask(missed);
+  w.foundation.persistence.put('runner_task','task-missed',0,{taskId:'task-missed',runId:'run-missed',sequence:1,pendingEffectId:'fx_missed',status:'needsHuman',task:missed});
+  w.foundation.persistence.put('effect','fx_missed',0,{...base,effectId:'fx_missed',taskId:'task-missed',runId:'run-missed',status:'uncertain',revision:1});
+  const notApplied=await w.reconcile('task-missed','fx_missed');
+  assert.equal(notApplied.status,'needsHuman');
+  assert.equal(w.foundation.persistence.get<any>('effect','fx_missed')!.value.status,'not_applied');
 });
 
 test('a binding with no recovery point refuses instead of starting empty',async()=>{

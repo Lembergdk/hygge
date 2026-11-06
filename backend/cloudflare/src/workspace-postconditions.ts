@@ -35,7 +35,10 @@ export function assertWorkspaceActionConsent(canonicalTask:any, input:{decision:
   // Older clients receive the same strict impact checks in the durable path.
   const task = {...canonicalTask, interaction_version:1};
   if (canonicalTask.scheduled_scan === true && (input.decision.effect !== 'reversible' && input.decision.action !== 'extract')) throw new Error('READ_ONLY_SCAN');
-  if (canonicalTask.workspace_requires_fresh_approval || needsActionApproval(task,input.decision)) {
+  // Approval is required only when the action itself is consequential (a scope expansion: pay, delete,
+  // publish). There is no blanket "fresh approval" flag: after an uncertain effect the agent
+  // self-verifies from the live page and continues; the next action is judged on its own impact.
+  if (needsActionApproval(task,input.decision)) {
     const proof:any=input.approvedActionProof;
     if (!proof || !input.snapshot || JSON.stringify(proof) !== JSON.stringify(canonicalTask.authorized_action)
       || proof.fingerprint !== actionFingerprint(input.decision,input.snapshot,canonicalTask.drafted_payload)) throw new Error('ACTION_APPROVAL_REQUIRED');

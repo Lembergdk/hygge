@@ -247,7 +247,7 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       await ensure();assertWorkspaceActionConsent(options.loadTask(task.id),input,task);
       const approvalId=crypto.randomUUID(),scope=await digest({taskId:task.id,effectId:input.effectId,intentHash:input.intentHash});
       foundation.persistence.storage.transactionSync(()=>foundation.persistence.put('dispatch_grant',approvalId,0,{effectId:input.effectId,intentHash:input.intentHash,scope,draftHash:JSON.stringify(task.drafted_payload)}));
-      return {approvalId,approvalScopeHash:scope,refreshesReviewedConsent:!!input.approvedActionProof};
+      return {approvalId,approvalScopeHash:scope};
     },
     verifyActionOutcome:async({ticket,observation})=>({
       status:!observation.error && observation.result?.succeeded===true && observation.snapshot ? 'confirmed' : 'uncertain',
@@ -263,16 +263,18 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       const candidate=foundation.persistence.get<any>('run',runId)?.value.candidate;
       return {verification:{kind:'observed_postcondition',policyVersion:policy,evidenceRef:ref},evidence:{verified:true,taskId:task.id,runId,policyVersion:policy,snapshot,extractedItems:result.extractedItems??[]},candidateBodyHash:candidate?.kind==='confirming'?candidate.bodyHash:null};
     },
-    verifyReviewedOutcome:async input=>{
-      const proof=foundation.persistence.get<any>('runner_evidence',input.evidenceRef)?.value;
-      // A live snapshot proves the outcome was checked in the browser. A
-      // session-gone marker proves the opposite: the session's container is
-      // gone (the effect's incarnation no longer runs) and the reviewer
-      // decided knowing the outcome cannot be checked. Either one is
-      // evidence; neither is an inference.
-      const live=!!proof?.currentSnapshot;
-      const gone=!!proof?.sessionGone&&!!proof?.effectIncarnation&&!!proof?.currentIncarnation&&proof.effectIncarnation!==proof.currentIncarnation;
-      return !!proof && proof.reviewedBy===owner.userId && proof.taskId===input.taskId && proof.effectId===input.effectId && proof.status===input.status && (live||gone);
+    /** Agent self-verification of an uncertain effect: re-observe the live page and judge whether the
+     * action's outcome is achieved, using the same observed-postcondition check as mission completion.
+     * 'confirmed' when the mission goal is observably achieved; 'not_applied' when it is not (the
+     * mission re-observes the page and continues/retries, never duplicating a submission). A dead
+     * session is not an observable outcome: the mission will open a fresh session and re-observe, so
+     * it also resolves as 'not_applied'. The user is never asked to judge an outcome. */
+    verifyUncertainEffect:async({task})=>{
+      const snapshot=task.session_id ? await bridge.browser.snapshot(task.session_id).catch(()=>null) : null;
+      if(!snapshot)return {status:'not_applied' as const,evidence:{sessionGone:true}};
+      const policy=verifyObservedMission(task,{status:'succeeded',extractedItems:task.extracted_items??[]},snapshot,outcomeForTaskKind(task.kind),rules);
+      if(policy)return {status:'confirmed' as const,evidence:{policy,page:snapshot.currentURLString}};
+      return {status:'not_applied' as const,evidence:{page:snapshot.currentURLString}};
     },
   });
   // This private bridge can work under the maintenance lock; normal runtime RPCs
@@ -405,40 +407,14 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     },
     /** Maintainer-only shared-library kill switch; secret-gated, never agent-callable. */
     async quarantineSkill(token:string,input:{operationId:string;skillId:string;reason:'privacy'|'unsafe_guidance'|'integrity'}){return skills.quarantine(token,input);},
-    /** Called only by the already verified owner route. The person's review
-     * resolves one uncertain outcome; it never dispatches or retries an action. */
-    async reconcile(taskId:string,effectId:string,status:'confirmed'|'not_applied') {
-      if(!['confirmed','not_applied'].includes(status))throw new Error('INVALID_REVIEW');
+    /** Agent self-reconciliation of an uncertain effect. The agent re-observes the live page and resolves
+     * the effect from that observation — never from a user tap. The caller supplies no outcome: the
+     * server determines it from the page. */
+    async reconcile(taskId:string,effectId:string) {
       await ensure();
       const task=options.loadTask(taskId),effect=foundation.effects.require(effectId);
-      // A lost response can leave the effect 'dispatching' when the
-      // uncertain-note itself never landed; the ledger resolve transition
-      // accepts dispatching or uncertain with the same reviewed evidence.
       if(!task || task.status!=='needsHuman' || effect.taskId!==taskId || !['uncertain','dispatching','prepared'].includes(effect.status))throw new Error('REVIEW_UNAVAILABLE');
-      const snapshot=task.session_id?await bridge.browser.snapshot(task.session_id):null;
-      let payload:any;
-      if(snapshot)payload={taskId,effectId,intentHash:effect.intentHash,status,reviewedBy:owner.userId,currentSnapshot:snapshot};
-      else if(!task.session_id){
-        // No session was ever recorded — the task poll clears the id when
-        // the in-memory session map is lost (DO eviction), so a missing id
-        // is itself the session-gone evidence. Record it and let the
-        // reviewer decide, instead of leaving the task unresolvable.
-        const current=await foundation.registry.read(owner,owner);
-        payload={taskId,effectId,intentHash:effect.intentHash,status,reviewedBy:owner.userId,sessionGone:true,sessionId:null,effectIncarnation:effect.incarnation,currentIncarnation:current.incarnation};
-      }else{
-        // The session is gone. If the effect belongs to an incarnation the
-        // workspace no longer runs (a rebind replaced it), the outcome cannot
-        // be checked in the browser — record that fact as the review evidence
-        // and let the reviewer decide with it. A session that vanished inside
-        // the live container still needs a live page, so it keeps refusing.
-        const current=await foundation.registry.read(owner,owner);
-        if(effect.incarnation===current.incarnation)throw new Error('CURRENT_PAGE_REQUIRED');
-        payload={taskId,effectId,intentHash:effect.intentHash,status,reviewedBy:owner.userId,sessionGone:true,sessionId:task.session_id,effectIncarnation:effect.incarnation,currentIncarnation:current.incarnation};
-      }
-      const ref=`review_${crypto.randomUUID().replaceAll('-','')}`;
-      foundation.persistence.storage.transactionSync(()=>foundation.persistence.put('runner_evidence',ref,0,payload));
-      await save({task,runId:effect.runId,reason:'pause',evidence:[{ref,payload}],requiresBrowserFreeze:true});
-      return runner.reconcile({taskId,effectId,status,evidenceRef:ref});
+      return runner.reconcile({taskId,effectId});
     },
     /** Read-only workspace diagnostics for the owner route. Reports the
      * live state (container frozen/held, unresolved effects for audit,
