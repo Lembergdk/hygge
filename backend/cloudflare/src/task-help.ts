@@ -95,13 +95,20 @@ export function mobileTask(task: any) {
         || !["needsHuman", "failed"].includes(task.status)
         || !["discover", "signup", "buildProfile", "apply", "message", "bookCalendar"].includes(task.kind)
         || (!task.help && !task.workspace_pending_effect_id)) return null;
-    const createdAt = typeof task.createdAt === "string" ? (Date.parse(task.createdAt) / 1000 - 978307200)
-      : (typeof task.createdAt === "number" ? task.createdAt : Date.now() / 1000 - 978307200);
+    // The projection is the app's only view of this task, and one bad
+    // field poisons the whole tasks response (the app decodes the list
+    // as one document, so a single undecodable row drops every task).
+    // The raw record's fields are model-shaped, so sanitize them to
+    // exactly what AgentTask decodes: string-valued payload, string
+    // lists, trace entries with a known action kind and the fields the
+    // app requires, and a finite createdAt.
+    const createdAt = createdAtSeconds(task.createdAt);
     return { id: task.id, kind: task.kind, siteID: host, targetURLString: task.target_url,
-      goal: task.goal ?? "", title: task.title ?? host, draftedPayload: task.drafted_payload ?? {},
-      browserTrace: task.browser_trace ?? [], informationRequests: task.information_requests ?? [],
+      goal: typeof task.goal === "string" ? task.goal : "", title: typeof task.title === "string" ? task.title : host,
+      draftedPayload: stringRecord(task.drafted_payload),
+      browserTrace: validTrace(task.browser_trace), informationRequests: stringList(task.information_requests),
       status: task.status === "awaiting_approval" ? "awaitingApproval" : task.status,
-      log: task.log ?? [], createdAt, backendTaskID: task.id,
+      log: stringList(task.log), createdAt, backendTaskID: task.id,
       browserSessionID: task.session_id ?? null, help: task.help ?? null, pendingReply: null,
       pendingEffectID: task.workspace_pending_effect_id ?? null };
   }
@@ -121,6 +128,43 @@ function siteHost(targetUrl: unknown): string | null {
     const host = u.hostname.replace(/^www\./, "");
     return host && host !== "invalid.example" ? host : null;
   } catch { return null; }
+}
+
+// Seconds since 2001-01-01 (the app's TimeInterval), never NaN: an
+// unparseable stored date falls back to now rather than poisoning
+// the projection (JSON has no NaN; it would serialize as null and
+// the app's required createdAt would fail to decode).
+function createdAtSeconds(value: unknown): number {
+  const seconds = typeof value === "string" ? Date.parse(value) / 1000 - 978307200
+    : typeof value === "number" ? value : NaN;
+  return Number.isFinite(seconds) ? seconds : Date.now() / 1000 - 978307200;
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (value && typeof value === "object")
+    for (const [k, v] of Object.entries(value as Record<string, unknown>))
+      if (typeof v === "string") out[k] = v;
+  return out;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v: unknown): v is string => typeof v === "string") : [];
+}
+
+// The app's BrowserTraceEvent: action must be a known BrowserActionKind
+// and the other fields the app requires must have the right types.
+// The model can emit an action outside that set (mobileBrowserAction
+// only maps a few), and one such entry would fail the whole tasks
+// response to decode — so drop entries that do not match, and emit
+// only the fields the app reads.
+const TRACE_ACTIONS = ["navigate", "click", "type", "select", "extract", "screenshot", "waitForHuman", "askUser", "done", "needsHuman"];
+function validTrace(value: unknown): any[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((e: any) => e && typeof e === "object" && TRACE_ACTIONS.includes(e.action)
+      && typeof e.target === "string" && typeof e.urlString === "string"
+      && typeof e.summary === "string" && typeof e.succeeded === "boolean")
+    .map((e: any) => ({ action: e.action, target: e.target, urlString: e.urlString, summary: e.summary, succeeded: e.succeeded }));
 }
 
 export function canResumeWithInboxCode(task: any): boolean {
