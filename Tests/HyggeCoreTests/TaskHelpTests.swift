@@ -68,6 +68,13 @@ final class TaskHelpTests: XCTestCase {
         XCTAssertNotEqual(first, TaskHelp.stableSynthesizedID(taskID: taskID, status: "failed", pendingEffectID: "fx_3", informationRequests: []))
         XCTAssertNotEqual(first, TaskHelp.stableSynthesizedID(taskID: taskID, status: "needsHuman", pendingEffectID: "fx_3", informationRequests: ["What should I use?"]))
         XCTAssertNotEqual(first, TaskHelp.stableSynthesizedID(taskID: UUID(), status: "needsHuman", pendingEffectID: "fx_3", informationRequests: []))
+        // The deadline is part of the situation: the same help with
+        // a deadline mints a different id than without one, and a
+        // changed deadline mints a different id again.
+        let dated = TaskHelp.stableSynthesizedID(taskID: taskID, status: "needsHuman", pendingEffectID: "fx_3", informationRequests: [], deadline: "2026-11-06T12:00:00.000Z")
+        XCTAssertNotEqual(first, dated)
+        XCTAssertEqual(dated, TaskHelp.stableSynthesizedID(taskID: taskID, status: "needsHuman", pendingEffectID: "fx_3", informationRequests: [], deadline: "2026-11-06T12:00:00.000Z"))
+        XCTAssertNotEqual(dated, TaskHelp.stableSynthesizedID(taskID: taskID, status: "needsHuman", pendingEffectID: "fx_3", informationRequests: [], deadline: "2026-11-07T12:00:00.000Z"))
     }
     func testOldCachesStillDecodeAndHelpLinksSurviveRoundTrip() throws {
         var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(task())) as! [String: Any]

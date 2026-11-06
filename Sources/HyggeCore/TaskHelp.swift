@@ -31,9 +31,12 @@ public struct TaskHelp: Codable, Equatable, Sendable, Identifiable {
     /// A stable id for a synthesized help request, derived from the help's
     /// content: the same situation re-synthesizes the same id across polls
     /// (so the transcript guard dedupes it and a review tap never goes
-    /// stale), while a changed situation mints a different id.
-    public static func stableSynthesizedID(taskID: UUID, status: String, pendingEffectID: String?, informationRequests: [String]) -> UUID {
-        let input = [taskID.uuidString, status, pendingEffectID ?? "", informationRequests.joined(separator: "\n")].joined(separator: "\u{1F}")
+    /// stale), while a changed situation mints a different id. The
+    /// deadline is part of the situation: attaching (or changing) one
+    /// must mint a different id, or the old chat entry would stand
+    /// for a help whose urgency changed.
+    public static func stableSynthesizedID(taskID: UUID, status: String, pendingEffectID: String?, informationRequests: [String], deadline: String? = nil) -> UUID {
+        let input = [taskID.uuidString, status, pendingEffectID ?? "", informationRequests.joined(separator: "\n"), deadline ?? ""].joined(separator: "\u{1F}")
         var bytes = Array(SHA256.hash(data: Data(input.utf8)).prefix(16))
         bytes[6] = (bytes[6] & 0x0F) | 0x50
         bytes[8] = (bytes[8] & 0x3F) | 0x80

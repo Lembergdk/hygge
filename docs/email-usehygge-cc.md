@@ -166,7 +166,8 @@ the coordinator):
   jobs-bearing mail evidencing a place becomes a feed proposal
   (`proposeSiteFromMail`, carrying `sourceMailDomain`);
   work-relevant mail with no place to attach becomes a question
-  in the chat thread (`appendAgentChat`); genuinely uninferrable senders are evaluated like work mail (the sender-decision card is gone). Outcomes
+  in the chat thread (`composeAndWriteMailChat` — the agent
+  composes the question from the mail, then it pushes); genuinely uninferrable senders are evaluated like work mail (the sender-decision card is gone). Outcomes
   are counted (`duplicate` / `proposed_site` / `chat_asked` /
   `reasoned`) without logging content.
 - Mail acts by default (2026-11-04): the sender-decision card is gone — every tracked sender's mail is evaluated like work mail always was (highlights, message push, site proposal, chat asks), and the only remembered sender call left is 'ignore'. Proposing a site and asking in chat no longer require sender authentication (asking is consent, not action); authentication still gates pushes, owner commands, and codes. The mail reading gains a bounded jobs list; a forwarded job alert proposes the site its links point at with your rationale, or lists the jobs in one chat message when no site pins. Filed-mail detail gains Ignore/Stop-ignoring, and Settings lists ignored senders.

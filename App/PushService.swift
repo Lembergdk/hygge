@@ -84,12 +84,14 @@ final class HyggeAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         }
     }
 
-    /// Hygge open when a push lands: still show the calm banner —
-    /// it means something needs the user now, wherever they are in
-    /// the app.
+    /// Hygge open when a push lands: show nothing. A push only ever
+    /// comes from a chat message, and the user is already looking at
+    /// the app — the conversation itself is the notice. (iOS
+    /// suppresses foreground pushes by default; presenting a banner
+    /// here would override that.)
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound])
+        completionHandler([])
     }
 }

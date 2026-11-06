@@ -19,6 +19,14 @@ export interface ChatServiceHost {
   mirror(doc:ChatDocument):Promise<void>;
   erase?(doc:ChatDocument):Promise<void>;
   deletedMessage(id:string):boolean;
+  /// Push for an agent-written chat message (policy Nov 5, 2026:
+  /// every chat message generates a push — no exceptions). Called
+  /// only for assistant events, after the message row is written.
+  /// The host owns the send (UserSandbox.schedulePush); this
+  /// adapter only reports that a message was published. No
+  /// foreground exception lives here: the app suppresses pushes
+  /// while open, so the server must not build a second one.
+  notifyChatMessage?(event:ChatEvent):void;
 }
 function safe(value:any):any {
   if(Array.isArray(value))return value.map(safe);
@@ -116,7 +124,16 @@ export function chatServices(host:ChatServiceHost):ChatServices {
     },
     mirrorFile:doc=>host.mirror(doc),
     eraseFile:doc=>host.erase?host.erase(doc):host.mirror({...doc,content:''}),
-    publishMessage(event:ChatEvent){host.put('messages',event.id,{id:event.id,fromAgent:event.kind==='assistant',text:String(event.value),createdAt:event.at});},
+    publishMessage(event:ChatEvent){
+      host.put('messages',event.id,{id:event.id,fromAgent:event.kind==='assistant',text:String(event.value),createdAt:event.at});
+      // An agent reply is a chat message, so it pushes — the one
+      // push-per-message rule covers in-conversation replies too.
+      // A push hook must never fail the turn that published the
+      // reply, so a throwing notifier is swallowed here.
+      if(event.kind==='assistant'){
+        try{host.notifyChatMessage?.(event);}catch{/* push delivery must never fail user work */}
+      }
+    },
     legacyMessages(){return host.rows('messages').map(r=>({...r.data,id:r.id})).filter(m=>typeof m.text==='string'&&!host.deletedMessage(m.id)).sort((a,b)=>String(a.createdAt??'').localeCompare(String(b.createdAt??'')));},
     clearMessages(ids){for(const id of ids)host.remove('messages',id);},
   };

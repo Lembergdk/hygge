@@ -18,7 +18,11 @@ import { help, informationHelp, actionFingerprint, needsActionApproval } from ".
 //     "target": "visible element label or URL",
 //     "value": "literal text to type (optional)",
 //     "valueRef": "credential.username"|"credential.secret"|"draft.<key>",
-//     "reason": "one short clause" }
+//     "reason": "one short clause",
+//     "deadline": "ISO 8601 date-time, only when the page or a client
+//       message states one (offer expiry, application closing date,
+//       code expiry) — never invented; carried onto the help as the
+//       card's expiration date (task-help.ts)" }
 //
 // Safety rails enforced here, not by the prompt alone:
 // - valueRef is resolved by the worker/vault; literal values aimed at
@@ -46,7 +50,7 @@ export function normalizeBrowserDecision(input:unknown):Record<string,any> {
   const targeted=new Set(['click','type','upload','select','check','press','hover']);
   if(decision.target===undefined&&!targeted.has(decision.action))decision.target='';
   if(typeof decision.target!=='string'||targeted.has(decision.action)&&!decision.target.trim())throw Error('INVALID_BROWSER_TARGET');
-  for(const key of ['value','valueRef','reason','effect','preview','userMessage'])if(decision[key]!==undefined&&typeof decision[key]!=='string')throw Error('INVALID_BROWSER_DECISION');
+  for(const key of ['value','valueRef','reason','effect','preview','userMessage','deadline'])if(decision[key]!==undefined&&typeof decision[key]!=='string')throw Error('INVALID_BROWSER_DECISION');
   canonical(decision); // no permissive stringify: reject unsupported nested values before side effects
   return decision;
 }
@@ -69,7 +73,8 @@ const SYSTEM = [
   '"target":"observed element ref (or empty for page navigation)","value":"text to type",',
   '"valueRef":"credential.username|credential.secret|emailCode.code|draft.<key>","reason":"short",',
   '"effect":"reversible|accountCreation|public|permanent|destructive","preview":"exact proposed content or changes for consequential actions",',
-  '"questions":[{"text":"A necessary question","suggestedRefs":["draft.location"]}]}.',
+  '"questions":[{"text":"A necessary question","suggestedRefs":["draft.location"]}],',
+  '"deadline":"ISO 8601 date-time, ONLY when the page or a client message states one (an offer expiry, an application closing date, a code expiry) — never invent or estimate one; omit it when nothing states a deadline"}.',
   "When a tool fails, use its failure code and nextStep, inspect the page and verify effects before retrying. A timeout does not mean nothing happened. Previous attempts may have partially completed; never duplicate a submission. Explain uncertainty honestly.",
   "For needsHuman, include userMessage: one or two warm, plain-language sentences saying what you need and what the user should do. Keep technical reasoning in reason; never expose internal diagnostics or claim an expired session is saved.",
   "AUTONOMY: handle safe reversible choices, navigation, preparation, and recovery yourself.",
@@ -620,12 +625,12 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     if (decision.action === "needsHuman") {
       trace.push({ action: "needsHuman", target: decision.target ?? "", urlString: snapshot.currentURLString,
                    summary: decision.reason || "Human checkpoint", succeeded: false, ...stamp });
-      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, help: help("verification", typeof decision.userMessage === "string" && decision.userMessage.trim() ? decision.userMessage.trim().slice(0, 400) : "This site has a check I couldn't finish. Open the browser to complete it, or stop here.", [], "Complete check"), sessionProbe, resumedSession, ...routing() };
+      return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, help: help("verification", typeof decision.userMessage === "string" && decision.userMessage.trim() ? decision.userMessage.trim().slice(0, 400) : "This site has a check I couldn't finish. Open the browser to complete it, or stop here.", [], "Complete check", typeof decision.deadline === "string" ? decision.deadline : null), sessionProbe, resumedSession, ...routing() };
     }
 
     if ((task.workspace_requires_fresh_approval || needsActionApproval(task, decision)) && decision.consentGranted !== true) {
       await recordToolApproval("requested");
-      const request = help("approval", `${decision.preview || decision.reason || "This step changes something outside Hygge."}\nProposed action: ${decision.action} “${decision.targetLabel ?? decision.target}”${decision.value ? ` — ${decision.value}` : ""}`, [], "Approve and continue");
+      const request = help("approval", `${decision.preview || decision.reason || "This step changes something outside Hygge."}\nProposed action: ${decision.action} “${decision.targetLabel ?? decision.target}”${decision.value ? ` — ${decision.value}` : ""}`, [], "Approve and continue", typeof decision.deadline === "string" ? decision.deadline : null);
       return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID,
         help: request, pendingAction: { decision, fingerprint: actionFingerprint(decision, snapshot, task.drafted_payload) },
         sessionProbe, resumedSession, ...routing() };

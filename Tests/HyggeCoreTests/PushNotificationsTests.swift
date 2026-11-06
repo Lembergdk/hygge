@@ -21,8 +21,11 @@ final class PushNotificationsTests: XCTestCase {
     }
 
     func testPushRouteFallbackNeverGuessesAmbiguousNeedsYou() {
+        // New work without a reference kind is a chat message (the
+        // offer message names the listing from the conversation);
+        // it never lands on the feed on its own.
         XCTAssertEqual(PushDeepLink.parse(kind: "new_work", ref: feedID.uuidString.lowercased(), refKind: nil),
-                       .feedItem(feedID))
+                       .chat(feedID))
         XCTAssertEqual(PushDeepLink.parse(kind: "new_work", ref: feedID.uuidString.lowercased(), refKind: "chat"),
                        .chat(feedID))
         XCTAssertEqual(PushDeepLink.parse(kind: "needs_you", ref: taskID.uuidString.lowercased(), refKind: "task"),

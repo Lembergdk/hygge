@@ -111,10 +111,21 @@ struct ConversationView: View {
                         .onAppear {
                             store.markChatRead()
                             for task in store.chatHelpTasks { store.surfaceTaskHelp(taskID: task.id) }
-                            if let id = store.conversationTaskID,
+                            // A tapped push names one message: land on it.
+                            if let id = store.pendingChatMessageID,
+                               let entry = store.chatTranscript.first(where: { $0.id == id }) {
+                                store.pendingChatMessageID = nil
+                                proxy.scrollTo(entry.id, anchor: .top)
+                            } else if let id = store.conversationTaskID,
                                let entry = store.chatTranscript.last(where: { $0.taskID == id }) {
                                 proxy.scrollTo(entry.id, anchor: .top)
                             } else { proxy.scrollTo("bottom", anchor: .bottom) }
+                        }
+                        .onChange(of: store.pendingChatMessageID) { _, id in
+                            if let id, let entry = store.chatTranscript.first(where: { $0.id == id }) {
+                                store.pendingChatMessageID = nil
+                                proxy.scrollTo(entry.id, anchor: .top)
+                            }
                         }
                         .onChange(of: store.conversationTaskID) { _, id in
                             if let entry = store.chatTranscript.last(where: { $0.taskID == id }) {
@@ -182,7 +193,9 @@ struct ConversationView: View {
 
     /// The mini-card a message is about — attached above the
     /// composer before sending, stamped below its bubble after.
-    private func chatContextCard(_ context: ChatContextRef) -> some View {
+    /// A card that opens its feed item carries a chevron so a
+    /// live card reads as tappable; the composer copy never does.
+    private func chatContextCard(_ context: ChatContextRef, showsOpenChevron: Bool = false) -> some View {
         HStack(spacing: 10) {
             if let domain = context.siteDomain {
                 SiteLogoTile(domain: domain, name: context.title, size: 34)
@@ -200,6 +213,10 @@ struct ConversationView: View {
                     Text(context.subtitle).font(.caption).foregroundStyle(HyggeTheme.secondary).lineLimit(2)
                 }
             }
+            if showsOpenChevron {
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                    .foregroundStyle(HyggeTheme.secondary).accessibilityHidden(true)
+            }
         }
         .padding(.horizontal, 12).padding(.vertical, 9)
         .background(bubbleBackground, in: RoundedRectangle(cornerRadius: 16))
@@ -211,7 +228,11 @@ struct ConversationView: View {
     /// A message's card, below its bubble: trailing-aligned for the
     /// user (as the bubble is), under the bubble text for Hygge.
     /// A card whose feed element still exists is a button into the
-    /// feed; anything unresolvable renders untappable.
+    /// feed; anything unresolvable renders untappable — and muted,
+    /// so a live card reads as live. The user row has no avatar
+    /// slot, so the card takes the avatar's 37pt (30pt avatar +
+    /// 7pt spacing) as trailing padding to line up with the
+    /// bubble's text.
     @ViewBuilder
     private func contextCardRow(_ context: ChatContextRef, fromAgent: Bool) -> some View {
         if fromAgent {
@@ -222,7 +243,7 @@ struct ConversationView: View {
         } else {
             HStack(spacing: 0) {
                 Spacer(minLength: 44)
-                contextCard(context)
+                contextCard(context).padding(.trailing, 37)
             }
         }
     }
@@ -230,41 +251,68 @@ struct ConversationView: View {
     @ViewBuilder
     private func contextCard(_ context: ChatContextRef) -> some View {
         if isResolvableContext(context) {
-            Button { openContextInFeed(context) } label: { chatContextCard(context) }
+            Button { openContextInFeed(context) } label: { chatContextCard(context, showsOpenChevron: true) }
                 .buttonStyle(.plain)
                 .accessibilityHint("Opens in the feed")
         } else {
-            chatContextCard(context)
+            chatContextCard(context).opacity(0.55)
         }
     }
 
     private func isResolvableContext(_ context: ChatContextRef) -> Bool {
+        // A site context carries a site id, not a UUID-typed row id:
+        // resolve it against the proposals by site, not by row.
+        if context.kind == "site" { return store.proposals.contains(where: { $0.siteID == context.id }) }
         guard let id = UUID(uuidString: context.id) else { return false }
         switch context.kind {
         case "opportunity": return store.opportunities.contains(where: { $0.id == id })
         case "task": return store.tasks.contains(where: { $0.id == id })
         case "mail": return store.filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() })
+        case "event": return store.activityEvents.contains(where: { $0.id == id })
         default: return false
         }
     }
 
     /// Sets the feed-open flag and lets HomeFeedView close this chat
-    /// (sheet or bubble) before opening the card. ConversationView's
-    /// own dismiss only covers the sheet, so it is not called here.
+    /// before opening the card — then dismisses this view too, so a
+    /// chat hosted by the filed-mail detail sheet does not strand
+    /// the focus behind two still-open sheets. `dismiss` closes
+    /// whichever sheet presented this ConversationView (the mail
+    /// detail's sheet, or the conversation sheet itself) and is a
+    /// no-op in the floating bubble, where Home's own dismissal
+    /// covers it; the flag is still what tells Home which card
+    /// to open once the sheet is gone.
     private func openContextInFeed(_ context: ChatContextRef) {
-        guard let id = UUID(uuidString: context.id) else { return }
         switch context.kind {
         case "opportunity":
-            guard store.opportunities.contains(where: { $0.id == id }) else { return }
+            guard let id = UUID(uuidString: context.id),
+                  store.opportunities.contains(where: { $0.id == id }) else { return missingContext() }
             store.pendingOpportunityOpenID = id
         case "task":
-            guard store.tasks.contains(where: { $0.id == id }) else { return }
+            guard let id = UUID(uuidString: context.id),
+                  store.tasks.contains(where: { $0.id == id }) else { return missingContext() }
             store.pendingTaskFocusOpenID = id
         case "mail":
-            guard store.filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() }) else { return }
+            guard let id = UUID(uuidString: context.id),
+                  store.filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() }) else { return missingContext() }
             store.pendingEmailOpenID = id
+        case "site":
+            guard let proposal = store.proposals.first(where: { $0.siteID == context.id }) else { return missingContext() }
+            store.pendingProposalOpenID = proposal.id
+        case "event":
+            guard let id = UUID(uuidString: context.id),
+                  store.activityEvents.contains(where: { $0.id == id }) else { return missingContext() }
+            store.pendingEventOpenID = id
         default: return
         }
+        dismiss()
+    }
+
+    /// The card's feed item vanished between render and tap: close
+    /// the chat so Home can say so in one line.
+    private func missingContext() {
+        store.lastMessage = "That one is already sorted. Everything waiting for you is below."
+        dismiss()
     }
 
     private var composer: some View {
@@ -450,9 +498,23 @@ struct ConversationView: View {
         catch { agentError = "I couldn't report the calendar result. Retrying this saved action will check for an existing event first." }
     }
 
+    /// A deadline is an ISO-8601 string; parse it leniently (with or
+    /// without fractional seconds) and render nothing when it does
+    /// not parse — the deadline's validity is the server's job.
+    private static func deadlineDate(_ deadline: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: deadline) { return date }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: deadline)
+    }
+
     @ViewBuilder
     private func taskHelpCard(_ task: AgentTask, help: TaskHelp) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let deadline = help.deadline, let date = Self.deadlineDate(deadline) {
+                Text("Expires \(date.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption).foregroundStyle(HyggeTheme.secondary)
+            }
             if help.kind == .information, let question = help.questions.first {
                 ForEach(question.suggestions, id: \.self) { suggestion in
                     Button(suggestion) {

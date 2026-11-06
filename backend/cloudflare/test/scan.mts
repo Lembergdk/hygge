@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MemoryStateDb, StateStore } from "../src/state.ts";
+import { planTickNotifications } from "../src/push.ts";
 import {
   CRON_SLOTS_UTC, MemoryScanDb, ScanStore, categoriesToReopen,
   checkExhaustion, clearStaleEpisode, dailyCap, effectiveTickNow, evaluateGate,
@@ -43,8 +44,12 @@ const UPWORK = { id: "upwork", name: "Upwork", url: "https://www.upwork.com", ca
 const FIVERR = { id: "fiverr", name: "Fiverr", url: "https://www.fiverr.com", category: "petCare", account: "proposed" };
 
 function harness(mission: (input: ScanMissionInput, call: number) => ScanMissionOutcome,
-                 credentials: Record<string, string> = { "rover.com": "cred-rover" }) {
-  const state = new StateStore(new MemoryStateDb());
+                 credentials: Record<string, string> = { "rover.com": "cred-rover" },
+                 opts: {
+                   composeOfferMessage?: ScanDeps["composeOfferMessage"];
+                   allowMessage?: (id: string) => boolean;
+                 } = {}) {
+  const state = new StateStore(new MemoryStateDb(), opts.allowMessage);
   const scansDb = new MemoryScanDb();
   const scans = new ScanStore(scansDb);
   const calls: ScanMissionInput[] = [];
@@ -66,6 +71,19 @@ function harness(mission: (input: ScanMissionInput, call: number) => ScanMission
     runProbeMission: async () => ({
       status: "succeeded",
       checks: { signupReachable: true, signupFormPresent: true, profileEditReachable: true, applyStartable: true },
+    }),
+    // The stub stands in for the model composer: deterministic
+    // text built from the same facts, so tick tests can assert the
+    // wiring (one message, tombstone fallback, idempotency)
+    // without a model. Production copy comes from the
+    // chat-composer, never this shape.
+    composeOfferMessage: opts.composeOfferMessage ?? (async (input) => {
+      const parts = [
+        input.title,
+        input.payLabel && input.payLabel !== "See listing" ? input.payLabel : "",
+        input.isRemote ? "Remote" : (input.locationLabel && input.locationLabel !== "See listing" ? input.locationLabel : ""),
+      ].filter(Boolean);
+      return `I found new work on ${input.siteName}: ${parts.join(" · ")}${input.moreCount > 0 ? ` (+${input.moreCount} more)` : ""}. It's in your feed.`;
     }),
     idFactory: () => `run-${++seq}`,
   };
@@ -229,6 +247,86 @@ test("a tick that surfaces nothing writes no chat message", async () => {
   const summary = await runScheduledTick(h.deps, { slot: 0, now: D(DAY1) });
   assert.equal(summary.offerChatMessageId, null);
   assert.equal(h.state.list("messages").length, 0);
+});
+
+test("a deleted offer message cannot 500 the tick: the batch falls through to the next listing", async () => {
+  // The first-ranked listing's message id is tombstoned (the user
+  // deleted that message): the write throws MESSAGE_DELETED.
+  // "Weekend dog sitting" outranks "Cat visits daily" (its required
+  // skill matches the profile), so it is the first write attempted.
+  const firstId = offerChatMessageId(scanOpportunityId("rover", "Weekend dog sitting"));
+  const h = harness(
+    () => ok(["Weekend dog sitting | $35/hr | Leeds | skills: Dog walking", "Cat visits daily | $30/hr | Leeds"]),
+    { "rover.com": "cred-rover" },
+    { allowMessage: (id) => id !== firstId },
+  );
+  seedUser(h.state, { sites: [ROVER] });
+  const summary = await runScheduledTick(h.deps, { slot: 0, now: D(DAY1) });
+  assert.equal(summary.surfacedIds.length, 2, "both listings still surface");
+  assert.equal(h.state.list("feedItems").length, 2);
+  const secondId = offerChatMessageId(scanOpportunityId("rover", "Cat visits daily"));
+  assert.equal(summary.offerChatMessageId, secondId, "the message falls through to the next surfaced listing");
+  assert.ok(summary.offerChatMessageText?.includes("Cat visits daily"));
+  assert.equal(h.state.list("messages").length, 1);
+  const planned = planTickNotifications(summary);
+  assert.equal(planned.length, 1, "the batch's push planning survives — only the failed message's own push is skipped");
+  assert.equal(planned[0].refId, secondId);
+});
+
+test("a re-surfaced listing never rewrites its message: one row, proven by the id", async () => {
+  const h = harness(() => ok(["Weekend dog sitting | $35/hr | Leeds"]));
+  seedUser(h.state, { sites: [ROVER] });
+  const first = await runScheduledTick(h.deps, { slot: 0, now: D(DAY1) });
+  assert.equal(first.surfacedIds.length, 1);
+  assert.equal(h.state.list("messages").length, 1);
+  const original = h.state.list("messages")[0].data as Record<string, unknown>;
+  const messageId = String(original.id);
+  const originalCreatedAt = original.createdAt;
+  // The opportunity/feed rows are removed (the gate only remembers
+  // rows that still exist), so the next tick surfaces the same
+  // listing again — a TRUE re-surface, not gate dedupe.
+  for (const row of h.state.list("opportunities")) h.state.remove("opportunities", row.id);
+  for (const row of h.state.list("feedItems")) h.state.remove("feedItems", row.id);
+  const second = await runScheduledTick(h.deps, { slot: 1, now: D("2026-11-02T13:00:00.000Z") });
+  assert.equal(second.surfacedIds.length, 1, "the listing surfaces again once its rows are gone");
+  const after = h.state.list("messages");
+  assert.equal(after.length, 1, "still exactly one message row");
+  const kept = after[0].data as Record<string, unknown>;
+  assert.equal(kept.id, messageId, "the same deterministic id — idempotency by id, not by gate dedupe");
+  assert.equal(kept.createdAt, originalCreatedAt, "the original row's createdAt is preserved — a read message never reappears as new");
+  assert.equal(kept.text, original.text, "the original text stands");
+  assert.equal(second.offerChatMessageId, null, "no new message means no new push for the re-surface");
+  assert.deepEqual(planTickNotifications(second), [], "never re-push the same listing");
+});
+
+test("a composition failure writes no message and plans no push, but the tick still surfaces the feed", async () => {
+  const h = harness(() => ok(["Weekend dog sitting | $35/hr | Leeds"]), { "rover.com": "cred-rover" },
+    { composeOfferMessage: async () => null });
+  seedUser(h.state, { sites: [ROVER] });
+  const summary = await runScheduledTick(h.deps, { slot: 0, now: D(DAY1) });
+  assert.equal(summary.surfacedIds.length, 1);
+  assert.equal(h.state.list("feedItems").length, 1);
+  assert.equal(summary.offerChatMessageId, null);
+  assert.equal(summary.offerChatMessageText, null);
+  assert.equal(h.state.list("messages").length, 0);
+  assert.deepEqual(planTickNotifications(summary), []);
+  assert.ok(summary.log.some((line) => /composition/.test(line)), "the failure is logged server-side");
+});
+
+test("a combined tick — surfaced listings plus a needs-you episode — writes one message and plans one push", async () => {
+  const h = harness((input) => input.site.id === "rover"
+    ? ok(["Weekend dog sitting | $35/hr | Leeds"])
+    : { status: "failed", items: [], loginFailure: true },
+  { "rover.com": "cred-rover", "upwork.com": "cred-upwork" });
+  seedUser(h.state, { sites: [ROVER, UPWORK] });
+  const summary = await runScheduledTick(h.deps, { slot: 0, now: D(DAY1) });
+  assert.equal(summary.surfacedIds.length, 1);
+  assert.deepEqual(summary.needsYouItemIds, [needsYouItemId("upwork")]);
+  assert.equal(h.state.list("messages").length, 1, "one chat message for the surfaced listing");
+  const planned = planTickNotifications(summary);
+  assert.equal(planned.length, 1, "the needs-you episode contributes no push of its own");
+  assert.equal(planned[0].kind, "new_work");
+  assert.equal(planned[0].refId, summary.offerChatMessageId);
 });
 
 test("cadence tiers: logged 3x/day, public 1x/day, proposed 0x", async () => {

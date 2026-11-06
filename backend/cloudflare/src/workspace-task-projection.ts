@@ -1,6 +1,7 @@
 import type { RunCompletionReceipt } from './workspace-contract.ts';
 import { WorkspacePersistence, canonical, fail, type WorkspaceStorage } from './workspace-persistence.ts';
 import { StateStore, createSqliteStateDb, ensureStateSchema } from './state.ts';
+import { helpRoutesToChat, decisionHelpMessageText } from './task-help.ts';
 export type WorkspaceTask = Record<string, any> & { id:string; status:string };
 export interface TaskProjectionMeta { runId:string; requestId:string; completionReceiptId?:string }
 export type TaskProjector = (task:WorkspaceTask,meta:TaskProjectionMeta)=>void;
@@ -23,7 +24,22 @@ export function createWorkspaceTaskProjection(storage:WorkspaceStorage,db:Worksp
     if(old){if(old.value.digest!==text)fail('IDEMPOTENCY_CONFLICT');return;}
     const timestamp=now(); task.updated_at=timestamp; task.updatedAt=timestamp;
     storage.sql.exec('INSERT INTO tasks (id,task) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET task=excluded.task',task.id,JSON.stringify(task));
-    if(task.help&&task.mobile_task&&!store.get('messages',task.help.id))store.upsert('messages',task.help.id,{id:task.help.id,fromAgent:true,text:`${task.mobile_task.title}: ${task.help.message}`,taskID:task.mobile_task.id,helpID:task.help.id,createdAt:timestamp},timestamp);
+    // The chat mirror is gated by helpRoutesToChat — the SAME
+    // function the saveTask path (user-sandbox.ts) uses. That
+    // function is the authoritative router: this projector must
+    // never grow its own routing, or a future runner could
+    // silently diverge from it. This projector is the fallback
+    // mirror for runners created without a projectTask override;
+    // in production the override (saveTask) is the mirror and
+    // this line does not run. Either way the text is the shared
+    // decisionHelpMessageText relay (the help's own model-composed
+    // words, verbatim) — same id (help.id), same fields.
+    // A deleted message's tombstone must not fail the projection:
+    // the write is guarded and the task row above is already saved.
+    if(task.help&&task.mobile_task&&helpRoutesToChat(task.help)&&!store.get('messages',task.help.id)){
+      const text=decisionHelpMessageText(task);
+      if(text){try{store.upsert('messages',task.help.id,{id:task.help.id,fromAgent:true,text,taskID:task.mobile_task.id,helpID:task.help.id,createdAt:timestamp},timestamp);}catch{/* a deleted message stays deleted; the feed card remains */}}
+    }
     if(task.mobile_task?.siteID&&['signup','buildProfile'].includes(task.kind)){
       const siteID=task.mobile_task.siteID;
       const state=task.status==='succeeded'?(task.kind==='buildProfile'||task.drafted_payload?.setupMode==='connect'?'watching':'hasAccount'):['needsHuman','failed'].includes(task.status)?'needsVerification':null;

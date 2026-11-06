@@ -47,7 +47,7 @@ public enum PushDeepLink {
         case "email": return .email(id)
         default: break
         }
-        if kind == "new_work" { return .feedItem(id) }
+        if kind == "new_work" { return .chat(id) }
         if kind == "message_waiting" { return .email(id) }
         return .home
     }

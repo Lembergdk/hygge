@@ -200,9 +200,17 @@ final class AppStore {
     /// A chat card tapped in the conversation: the feed card it is
     /// about, opened as a feed focus (not as chat).
     var pendingTaskFocusOpenID: UUID?
+    /// A chat card tapped in the conversation for a site proposal or
+    /// a journal event: the feed card it is about, opened as a feed
+    /// focus (the proposal id / the event id).
+    var pendingProposalOpenID: UUID?
+    var pendingEventOpenID: UUID?
     /// A tapped new-work push: the chat message it names — open the
     /// bare conversation, no task attached.
     var pendingChatOpenID: UUID?
+    /// The message a tapped new-work push names, once it is verified
+    /// to be in the transcript: the conversation scrolls to it.
+    var pendingChatMessageID: UUID?
     var highlightedOpportunityID: UUID?
     static let pushTokenKey = "hyggePushTokenV1"
     static let pushPrimerResolvedKey = "hyggePushPrimerResolvedV1"
@@ -577,7 +585,10 @@ final class AppStore {
     /// (handled elsewhere, dismissed), Home says so in one line —
     /// never a wrong element silently substituted.
     func handlePushRoute(_ route: String) async {
-        await pullFromServer()
+        // The pull's result matters: a failed pull leaves the last
+        // known transcript in place, so a missing message after a
+        // failed pull is "unconfirmed", not "gone".
+        let pulled = await pullFromServer()
         switch PushDeepLink.parse(route: route) {
         case .task(let id):
             if tasks.contains(where: { $0.id == id }) {
@@ -587,8 +598,18 @@ final class AppStore {
             }
         case .chat(let id):
             // The message itself is the landing: open the
-            // conversation it lives in (HomeFeedView observes this).
-            pendingChatOpenID = id
+            // conversation it lives in (HomeFeedView observes this)
+            // and scroll to it — but only when it is actually in
+            // the transcript after the pull. Otherwise say so in
+            // one line instead of opening a bare conversation.
+            if chatTranscript.contains(where: { $0.id == id }) {
+                pendingChatMessageID = id
+                pendingChatOpenID = id
+            } else {
+                lastMessage = pulled
+                    ? "That message isn't here anymore. Everything waiting for you is below."
+                    : "I couldn't reach your conversation just now. Everything waiting for you is below."
+            }
         case .feedItem(let id):
             highlightedOpportunityID = id
             if opportunities.contains(where: { $0.id == id }) {
@@ -627,7 +648,10 @@ final class AppStore {
         pendingOpportunityOpenID = nil
         pendingEmailOpenID = nil
         pendingTaskFocusOpenID = nil
+        pendingProposalOpenID = nil
+        pendingEventOpenID = nil
         pendingChatOpenID = nil
+        pendingChatMessageID = nil
         highlightedOpportunityID = nil
         await backend.signOut()
         isSignedIn = false
@@ -863,7 +887,19 @@ final class AppStore {
                 questions: task.informationRequests.map { .init(text: $0) },
                 actionLabel: reviewing || task.status == .failed ? "Check and continue" : "Complete check")
         }
-        guard let help = tasks[index].help, !chatTranscript.contains(where: { $0.helpID == help.id }) else { return }
+        guard let help = tasks[index].help else { return }
+        // Single source for the chat entry: the message the server
+        // wrote for this help already counts, so never synthesize a
+        // second one beside it. The server mirror carries the help's
+        // own id (and may carry a task context); match on any of
+        // those, not just helpID, so a row that arrived without its
+        // helpID field — or in the task-context shape — still
+        // dedupes. A tap still reaches this path, and it still
+        // synthesizes when no server message exists.
+        guard !chatTranscript.contains(where: {
+            $0.helpID == help.id || $0.id == help.id
+                || ($0.fromAgent && $0.context?.kind == "task" && $0.context?.id == taskID.uuidString)
+        }) else { return }
         chatTranscript.append(ChatEntry(id: help.id, fromAgent: true,
             text: "\(siteName(id: tasks[index].siteID)): \(help.message)" + (help.questions.first.map { "\n\n" + $0.text } ?? ""), taskID: taskID, helpID: help.id))
     }

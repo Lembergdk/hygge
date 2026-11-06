@@ -8,27 +8,47 @@ Format (user's call, 2026-11-03, superseding the brief's
 title-only draft): messages from Hygge wear the sender's name
 (`Hygge`) with the actual message as the body; the new-work chat
 push names its listing. Every tap opens the exact element that
-triggered it. Feed items never push (policy Nov 5, 2026).
+triggered it.
+
+Policy (Mikael, Nov 5, 2026 — the spec for this document): every
+decision card warrants a chat message linking to the card, and
+every chat message generates a push — no exceptions. A push only
+ever comes from a chat message; no feed card ever pushes on its
+own. No push notifications while the app is open/foregrounded
+(enforced app-side). Chat messages linking to cards are composed
+by the agent from context and chat history — no static texts.
+The deadline a card carries is set by the agent itself when it
+surfaces something that has one; see "Deadlines" below.
 
 ## Triggers (the complete list)
 
 | # | Server event | Where it fires | Push |
 |---|---|---|---|
-| 1 | A task freshly enters `needsHuman` with a chat-routed help (a deadline approval, a human-only check) | `UserSandbox.runTask` → `shouldNotifyNeedsHuman` + `helpRoutesToChat` | `needs_you`, title `Hygge`, body = the chat card's own words, deep link to the task. Information questions and deadline-free approvals stay in the feed and never push |
-| 2 | A scheduled-scan tick surfaces new feed items | `POST /scheduled-scan/tick` → `planTickNotifications(summary)` | `new_work`, title `Hygge`, body `New work on <site>:` + first listing (title · its own pay label · place) + count, deep link `chat/<message-id>` opening the conversation the message lives in |
-| 2b | A scheduled-scan tick opens a needs-you episode (login failure / human check) | same tick hook | none — the episode waits in the feed, no push |
-| 3 | Authenticated mail from a tracked (or work-ruled) sender mentions a client message | `UserSandbox.handleEmailInbound` → triage highlights | `message_waiting`, title `Hygge`, body `<Site> emailed: "<subject>"`, deep link to that filed mail; at most one per sender per day |
+| 1 | A task freshly enters `needsHuman` (or `failed` with a help) carrying a chat-routed help — any decision kind: information, approval, verification, credentials, recovery | `UserSandbox.saveTask` → `shouldNotifyDecisionHelp` + `helpRoutesToChat` | `needs_you`, title `Hygge`, body = the chat message's own words (the help card's text), deep link `task/<id>` opening the task's chat help card. A help-less `needsHuman` gets no message and no push — there is no content to compose a message about |
+| 2 | A scheduled-scan tick surfaces new listings | `POST /scheduled-scan/tick` → `planTickNotifications(summary)` | `new_work`, title `Hygge`, body = the agent-composed chat message text, deep link `chat/<message-id>` opening the conversation the message lives in |
+| 2b | A scheduled-scan tick opens a needs-you episode (login failure / human check) | same tick hook | none — the episode waits in the feed; it has no chat message, so it cannot push |
+| 3 | Authenticated mail from a tracked (or work-ruled) sender mentions a client message | `UserSandbox.handleEmailInbound` → triage highlights → backing chat message + embedded mail card | `message_waiting`, title `Hygge`, body = the backing chat message's composed words, deep link `chat/<message-id>`; at most one per sender per day |
+| 3b | Authenticated mail asks a question the agent cannot answer alone | `handleEmailInbound` → `composeAndWriteMailChat` | `needs_you`, title `Hygge`, body = the composed chat question, deep link `chat/<message-id>`; once per mail (deterministic id dedupes) |
+| 4 | The agent writes a reply in conversation | `chat-services.ts` `publishMessage` → `notifyChatMessage` | `needs_you`, title `Hygge`, body = the reply's own words, deep link `chat/<message-id>` |
 
-Rules that bound both:
+Rules that bound all of them:
 
+- **A push only ever comes from a chat message.** No feed card
+  ever generates a push on its own. If there is no chat
+  message, there is no push — that is why a help-less
+  `needsHuman` and a scan needs-you episode stay silent.
+- **Every chat message generates a push — no exceptions.** Any
+  server path that writes an agent chat message schedules its
+  push in the same step. There is no open-app exception
+  server-side; the app suppresses banners while foregrounded.
 - **At most one push per scan tick.** A tick sends at most the
   one new-work chat message; a scan batch never produces one
   push per item, and a needs-you episode never pushes at all.
 - **Scan missions never double-notify.** Trigger 1 excludes
   scheduled-scan tasks; a tick's only push is trigger 2.
 - **Fresh transitions only.** A task already sitting in
-  `needsHuman` does not re-notify. A resumed run that hits a
-  further check is a new entry and does notify.
+  `needsHuman` (or `failed`) does not re-notify. A resumed run
+  that hits a further check is a new entry and does notify.
 - **Paused users receive nothing.** Every send re-reads the
   Brief 01 server-side pause flag first.
 - **No token, no send.** Denied permission means no token was ever
@@ -41,16 +61,24 @@ Rules that bound both:
 
 ## Payload
 
-The only shape `buildPushPayload` (backend `src/push.ts`) can emit:
+The only shape `buildPushPayload` (backend `src/push.ts`) can emit
+— shown here for a new-work push, whose ref is the chat message
+id itself:
 
 ```json
 {
-  "aps": { "alert": { "title": "Hygge", "body": "Rover: I need a detail to continue. Which dates are you free?" }, "sound": "default" },
-  "hyggeKind": "needs_you",
-  "hyggeRef": "<task-or-feed-item-or-mail-id>",
-  "hyggeRoute": "task/<id>"
+  "aps": { "alert": { "title": "Hygge", "body": "I found weekend dog sitting on Rover for £25 a night — it's in your feed." }, "sound": "default" },
+  "hyggeKind": "new_work",
+  "hyggeRef": "<chat message id>",
+  "hyggeRoute": "chat/<chat message id>"
 }
 ```
+
+The body above is an example of what the composer produces from
+the listing's facts — never a template; every message is composed
+fresh from context (see "How the message text is composed").
+`needs_you` pushes carry the task id instead
+(`"hyggeRef": "<task id>"`, `"hyggeRoute": "task/<task id>"`).
 
 - Titles and bodies pass one formatting path (`pushSafeText`):
   whitespace collapsed, code-shaped digit runs redacted,
@@ -66,9 +94,54 @@ The only shape `buildPushPayload` (backend `src/push.ts`) can emit:
   The app parses them in `PushDeepLink` (HyggeCore); anything
   unknown lands on Home. Each route opens the exact element it
   names, after a fresh pull: the task's chat help card, the
-  listing's (or episode's) own detail, that one filed mail. A
+  chat message that triggered the push, that one filed mail. A
   route naming something already handled lands on Home with one
   plain line — never a substituted element.
+
+## How the message text is composed
+
+No chat message linking to a card carries a static string. Each
+surface composes its text from context plus recent chat history
+via `chat-composer.ts`, using the drafting tier (wonder-1.0),
+naming only facts present in the context — never invented, never
+a code or password, never a greeting or sign-off. The feed card
+stays the interaction surface; the message is the notification,
+not the interaction.
+
+Decision helps are the one surface that is not freshly composed:
+the help message was already written by the model in the mission
+loop from live page context, so the mirror relays it verbatim
+(`decisionHelpMessageText` in `task-help.ts`) rather than
+re-drafting it — the message and the card can never disagree.
+
+Failure semantics: composition retries once, then fails closed —
+no message is written and no push is scheduled. The feed card
+remains the durable surface, and the next tick (or the next
+turn) can compose again. There is no canned fallback string
+anywhere.
+
+## Deadlines
+
+- The agent itself sets a deadline when it surfaces something
+  that carries one (an offer expiry, an application closing
+  date, a code expiry): the mission loop's model decision carries
+  `deadline` through to `help()` (`agent.ts`, `task-help.ts`).
+- `DEADLINE_WINDOW_HOURS = 24` (`task-help.ts`) is the "short"
+  window. It is Mikael's call to change, not a settled decision.
+- Validation: a deadline must parse as a real ISO date in the
+  future. Garbage or past dates are dropped (and logged) and
+  treated as no deadline. A date beyond the 24h window is kept
+  as the card's expiration date but is not "short" and never
+  escalates.
+- Under the new policy the deadline no longer gates whether a
+  decision card gets a message — every decision card gets one.
+  The deadline drives the card's expiration date and the
+  short-deadline urgency treatment.
+- Some producers never set one: onboarding/profile questions,
+  credentials and recovery helps, checkpoint-budget verification,
+  human-takeover verification, and the workspace runner's
+  recovery help. Information helps carry one only when the agent
+  surfaces one.
 
 ## Token lifecycle
 

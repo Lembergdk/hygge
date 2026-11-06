@@ -1,26 +1,117 @@
 // Conversation-first handoffs, grounded suggestions, and exact-action consent.
 // Kept pure so the same policy is tested independently of storage and UI.
-export function help(kind: string, message: string, questions: any[] = [], actionLabel = "Continue",
-                     deadline: string | null = null) {
-  return { id: crypto.randomUUID(), kind, message, questions, actionLabel, deadline };
+//
+/// "Short" for a deadline (policy settled Nov 5, 2026, Mikael's call
+/// to change): a deadline inside this many hours of now is short —
+/// it drives the card's short-deadline urgency treatment. A deadline
+/// further out is still a real expiration date on the card; it is
+/// simply not short. Garbage, past, and unparseable dates are no
+/// deadline at all (see parseHelpDeadline).
+export const DEADLINE_WINDOW_HOURS = 24;
+
+/// A help's deadline, validated: a real ISO date in the future, or
+/// null. Garbage, past, and unparseable values are not deadlines —
+/// they are logged by the caller and never treated as one, so a
+/// malformed model value can never escalate anything.
+export function parseHelpDeadline(value: unknown, now: Date = new Date()): Date | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = new Date(value.trim());
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.getTime() > now.getTime() ? parsed : null;
 }
 
-/// Feed/chat routing for a task help (policy settled Nov 5, 2026):
-/// information questions live in the feed only, and an approval
-/// reaches chat only when it carries a deadline — a short-deadline
-/// approval gets both feed and chat, a deadline-free one feed only.
-/// Every other kind routes as before. A help-less needsHuman keeps
-/// its existing push (there is no kind to route on).
+/// True when the deadline is a real future date inside the short
+/// window (DEADLINE_WINDOW_HOURS). Garbage, past, and far-future
+/// dates are not short: they must not escalate.
+export function isShortDeadline(value: unknown, now: Date = new Date()): boolean {
+  const parsed = parseHelpDeadline(value, now);
+  if (!parsed) return false;
+  return parsed.getTime() - now.getTime() <= DEADLINE_WINDOW_HOURS * 60 * 60 * 1000;
+}
+
+/// Deadline producers (the agent is the deadline producer — it
+/// defines the deadline from page/client content using its own
+/// reasoning; help() validates it, see above):
+/// - SET a deadline: approval (agent.ts needsActionApproval path,
+///   from decision.deadline), verification from a model needsHuman
+///   decision (agent.ts, decision.deadline — e.g. a code expiry the
+///   page states), information (informationHelp, only when the
+///   agent surfaces one via decision.deadline).
+/// - NEVER set one: credentials (a stale login does not expire),
+///   recovery (a session ending carries no expiry), onboarding/
+///   profile questions (never wanted), checkpoint-budget
+///   verification (askAfterTrying — no expiry is knowable),
+///   human-takeover verification (user-sandbox.ts), and the
+///   workspace runner's recoveryHelp (no page content to read one
+///   from). A help built without a deadline has deadline null, and
+///   the card shows no expiration date for it.
+
+export function help(kind: string, message: string, questions: any[] = [], actionLabel = "Continue",
+                     deadline: string | null = null) {
+  // The deadline is agent-set from page/client content (an offer
+  // expiry, an application closing date, a code expiry) — never
+  // invented. Validate it at construction: garbage or past dates
+  // are dropped (and logged) rather than stored, so a malformed
+  // model value can never reach the card as an expiration date.
+  let validDeadline: string | null = null;
+  if (deadline !== null && deadline !== undefined) {
+    const parsed = parseHelpDeadline(deadline);
+    if (parsed) validDeadline = parsed.toISOString();
+    else console.warn(`help: dropping invalid deadline ${JSON.stringify(String(deadline).slice(0, 80))} for kind ${kind}`);
+  }
+  return { id: crypto.randomUUID(), kind, message, questions, actionLabel, deadline: validDeadline };
+}
+
+/// Feed/chat routing for a task help (policy settled Nov 5, 2026,
+/// as revised Nov 5, 21:07 CST): EVERY decision card warrants a
+/// chat message linking to the card, and every chat message
+/// generates a push. So every well-formed decision kind —
+/// information, approval, verification, credentials, recovery —
+/// routes to chat. The deadline no longer gates whether a decision
+/// card gets a message (all do); it drives the card's expiration
+/// date and the short-deadline urgency treatment (isShortDeadline).
+///
+/// A help object with an unknown or missing kind is still a
+/// decision card by construction — it is routed to chat and flagged
+/// server-side (logged) rather than silently dropped or silently
+/// routed. A null help (help-less needsHuman) carries no content
+/// any message could be composed about, so it gets NO chat message
+/// and NO push: a push only ever comes from a chat message, and a
+/// feed card alone never pushes.
 export function helpRoutesToChat(help: any): boolean {
-  if (!help) return true;
-  if (help.kind === "information") return false;
-  if (help.kind === "approval") {
-    return typeof help.deadline === "string" && help.deadline.trim().length > 0;
+  if (!help) return false;
+  const known = ["information", "approval", "verification", "credentials", "recovery"];
+  if (typeof help.kind !== "string" || !known.includes(help.kind)) {
+    console.warn(`helpRoutesToChat: unknown help kind ${JSON.stringify(String(help.kind ?? null)).slice(0, 80)} (id ${String(help.id ?? "?").slice(0, 36)}) — routing to chat as a decision card by construction; investigate the producer`);
+    return true;
   }
   return true;
 }
 
+/// The chat message relaying a decision help: the help's own
+/// model-composed words, verbatim — the help message plus its first
+/// question, both written by the mission model from live page
+/// context (agent.ts). The mirror relays; it does not rephrase, so
+/// the message and the feed card can never disagree, and no static
+/// text remains in the message: the old `${title}: ` prefix is gone
+/// (the card carries the title). This is the single text shape for
+/// the mirror — saveTask (user-sandbox.ts) and the workspace
+/// projector (workspace-task-projection.ts) both use it, so the two
+/// mirror paths cannot silently diverge. Null when there is no
+/// model-composed message to relay.
+export function decisionHelpMessageText(task: any): string | null {
+  const help = task?.help;
+  if (!help || typeof help.message !== "string" || !help.message.trim()) return null;
+  const firstQuestion = typeof help.questions?.[0]?.text === "string" && help.questions[0].text.trim()
+    ? help.questions[0].text.trim() : "";
+  return firstQuestion ? `${help.message.trim()}\n\n${firstQuestion}` : help.message.trim();
+}
+
 export function informationHelp(decision: any, draft: Record<string, string>) {
+  // An information help carries a deadline only when the agent
+  // surfaces one (decision.deadline, from page/client content) —
+  // onboarding and profile questions never do.
+  const deadline = typeof decision?.deadline === "string" ? decision.deadline : null;
   const raw = Array.isArray(decision.questions) ? decision.questions.slice(0, 5) : [];
   const questions = raw.map((q: any) => {
     const text = String(typeof q === "string" ? q : q.text ?? "").slice(0, 400);
@@ -32,10 +123,10 @@ export function informationHelp(decision: any, draft: Record<string, string>) {
     return { text, suggestions: [...new Set(suggestions)] };
   }).filter((q: any) => q.text);
   if (questions.some((q: any) => /password|secret|passcode|one.time code|verification code/i.test(q.text))) {
-    return help("verification", "This sign-in step needs you. Enter the requested secret only on the site, never in chat.", [], "Complete check");
+    return help("verification", "This sign-in step needs you. Enter the requested secret only on the site, never in chat.", [], "Complete check", deadline);
   }
   if (!questions.length) questions.push({ text: "What should I use for this step?", suggestions: [] });
-  return help("information", String(decision.reason || "I need a detail to continue."), questions);
+  return help("information", String(decision.reason || "I need a detail to continue."), questions, "Continue", deadline);
 }
 
 export function actionFingerprint(decision: any, snapshot: any, draft: any): string {
@@ -81,7 +172,8 @@ export function applyHelpReply(task: any, body: any): string | null {
     }
     const remaining = pending.questions.filter((q: any) => !provided.includes(q));
     if (remaining.length) {
-      task.help = help("information", "Thanks. One more detail before I continue.", remaining);
+      task.help = help("information", "Thanks. One more detail before I continue.", remaining,
+        "Continue", pending.deadline ?? null);
       task.information_requests = remaining.map((q: any) => q.text);
       return null;
     }

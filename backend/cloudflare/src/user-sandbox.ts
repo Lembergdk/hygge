@@ -7,7 +7,7 @@ import { ChatStore, sqlChatStorage, type ChatDocument } from './chat-store.ts';
 import { chatServices } from './chat-services.ts';
 import { latestMissionJob } from './jobs.ts';
 import { classifyBrowserFailure } from "./browser-failure.ts";
-import { help, helpRoutesToChat, applyHelpReply, mobileTask, canResumeWithInboxCode, reconcileEndedSession, rejectTaskHelp } from "./task-help.ts";
+import { help, helpRoutesToChat, decisionHelpMessageText, applyHelpReply, mobileTask, canResumeWithInboxCode, reconcileEndedSession, rejectTaskHelp } from "./task-help.ts";
 import { bindWorkspaceOwner, workspaceMode } from './workspace-owner.ts';
 import { migrateCredentialSchema } from './schema-migrations.ts';
 import { createWorkspaceExecution, type WorkspaceExecution } from './workspace-execution.ts';
@@ -54,9 +54,10 @@ import {
   unknownAccessRecord, withdrawProposalsForSite, type Eligibility, type ProbeOutcome, type SiteAccessRecord,
 } from "./web-access.ts";
 import {
-  apnsConfigFromEnv, d1PushDb, messageWaitingEvent, needsHumanEvent, notifyUser, planTickNotifications,
-  shouldNotifyNeedsHuman, type PushEvent,
+  apnsConfigFromEnv, d1PushDb, chatMessageEvent, messageWaitingEvent, needsHumanEvent, notifyUser, planTickNotifications,
+  shouldNotifyDecisionHelp, type PushEvent,
 } from "./push.ts";
+import { createCardMessageComposer, recentChatContext } from "./chat-composer.ts";
 import {
   claimMissionJob, enqueueMissionJob, finishMissionJob, getMissionJob,
   isTerminalJobState, type MissionJobMessage,
@@ -543,18 +544,34 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   private saveTask(task: any) {
-    // Feed/chat routing (policy Nov 5, 2026): information questions
-    // and deadline-free approvals surface in the feed only — the
-    // feed decision card is their entry point, and opening it still
-    // surfaces the question in chat (AppStore.surfaceTaskHelp), so
-    // skipping this mirror never strands an answer.
+    // The previously stored status, read before this save: the
+    // decision-help push below fires only on a FRESH entry into a
+    // help-awaiting state, so a re-save of a task already waiting
+    // never re-pushes. No previous row (snapshot import) never
+    // pushes either — an import is not a fresh entry.
+    const previousStatus = task.id ? (this.loadTask(task.id)?.status ?? null) : null;
+    // Feed/chat routing (policy Nov 5, 2026, as revised Nov 5,
+    // 21:07 CST): EVERY decision card gets a chat message linking
+    // to it. The mirror writes the help's own model-composed words
+    // verbatim (decisionHelpMessageText) — no static text remains.
+    // The mirror id and fields are the app dedupe's contract
+    // (id == help.id, taskID, helpID — no context field): do not
+    // rename them without accounting for the app side.
+    // A deleted message's tombstone (MESSAGE_DELETED) must never
+    // fail the task save: the write is guarded, the task row below
+    // is still saved, and the feed card remains the entry point.
     if (task.help && task.mobile_task && helpRoutesToChat(task.help)) {
       const now = new Date().toISOString();
       const store = this.stateStore();
-      if (!store.get("messages", task.help.id)) store.upsert("messages", task.help.id, {
-        id: task.help.id, fromAgent: true, text: `${task.mobile_task.title}: ${task.help.message}${task.help.questions?.[0] ? `\n\n${task.help.questions[0].text}` : ""}`,
-        taskID: task.mobile_task.id, helpID: task.help.id, createdAt: now,
-      });
+      const text = decisionHelpMessageText(task);
+      if (text && !store.get("messages", task.help.id)) {
+        try {
+          store.upsert("messages", task.help.id, {
+            id: task.help.id, fromAgent: true, text,
+            taskID: task.mobile_task.id, helpID: task.help.id, createdAt: now,
+          });
+        } catch { /* a deleted message stays deleted; the feed card remains */ }
+      }
     }
     if (task.mobile_task?.siteID && ["signup", "buildProfile"].includes(task.kind)) {
       const siteID = task.mobile_task.siteID;
@@ -576,6 +593,33 @@ export class UserSandbox extends DurableObject<Env> {
       task.id,
       JSON.stringify(task),
     );
+    // Brief 07, trigger #1 — the ONE enforcement point for the
+    // decision-help push (policy Nov 5, 2026): a fresh entry into
+    // a help-awaiting state (needsHuman, or failed with a help)
+    // with a chat-routed help pushes, as the chat message the
+    // mirror above just wrote. Centralized here so it fires on
+    // BOTH runners: legacy runTaskLegacy used to push from its own
+    // block after the run, but retained-v2 returns from the
+    // mission early and persists through this saveTask instead —
+    // the legacy block could never fire there, so V2 decision
+    // cards got a chat message and no push. Scan missions are
+    // excluded — their episodes never notify (a tick's only push
+    // is the new-work chat message). A help-less task never pushes:
+    // helpRoutesToChat(null) is false, because there is no chat
+    // message to push about. The body is the same words the chat
+    // card shows: the site, the ask, and the first question.
+    if (shouldNotifyDecisionHelp(previousStatus, task.status, { scheduledScan: task.scheduled_scan === true })
+        && helpRoutesToChat(task.help)) {
+      const helpText = (task.help?.message as string | undefined)?.trim() ?? "";
+      const firstQuestion = (task.help?.questions?.[0]?.text as string | undefined)?.trim() ?? "";
+      const domain = domainOf(task.target_url ?? "");
+      const siteRow = this.stateStore().list("sites")
+        .map((row) => scanSiteFromRow(String(row.id), row.data))
+        .find((site) => site && domainOfUrl(site.startURLString) === domain);
+      const siteName = siteRow?.name ?? domain;
+      const message = [helpText, firstQuestion].filter(Boolean).join(" ");
+      this.schedulePush([needsHumanEvent(String(task.id), message ? `${siteName}: ${message}` : undefined)]);
+    }
   }
 
   // ---- Brief 04 inbox (receive only) ------------------------------
@@ -692,13 +736,50 @@ export class UserSandbox extends DurableObject<Env> {
     }, receivedAt);
   }
 
-  /// A question from Hygge in the lifelong thread, for mail whose
-  /// next step is genuinely the user's call and fits no feed card.
-  private appendAgentChat(text: string, atIso: string, seed: string) {
-    const id = UserSandbox.uuidFromSeed(`${seed}chat`);
+  /// Compose and write one agent chat message for mail (policy
+  /// Nov 5, 2026): the text is composed by the model from the
+  /// given facts plus recent chat — never a canned string — and
+  /// the message is the push's backing row, so the caller
+  /// schedules the push from the returned text. Returns the
+  /// written message, or null when no message was written:
+  /// already asked/told (the deterministic id dedupes, once per
+  /// mail), composition failed or unavailable, or the write itself
+  /// failed (e.g. a deleted message's tombstone). A null return
+  /// means NO push for that mail: the journal entry still files
+  /// and any feed card remains the durable surface.
+  private async composeAndWriteMailChat(input: {
+    surface: "mail-question" | "mail";
+    facts: Record<string, string>;
+    atIso: string;
+    id: string;
+    context?: Record<string, unknown>;
+  }): Promise<{ id: string; text: string } | null> {
     const store = this.stateStore();
-    if (store.get("messages", id)) return;
-    store.upsert("messages", id, { id, fromAgent: true, text, createdAt: atIso }, atIso);
+    if (store.get("messages", input.id)) return null;
+    const composer = createCardMessageComposer(new LLMClient(this.llmConfig("hygge-browser-agent")));
+    if (!composer) {
+      console.warn(`mail chat: model not configured, skipping ${input.surface} message`);
+      return null;
+    }
+    const text = await composer({
+      surface: input.surface,
+      facts: input.facts,
+      recentChat: recentChatContext(store.list("messages")),
+    }).catch(() => null);
+    if (!text) {
+      console.warn(`mail chat: composition failed for ${input.surface}; no message, no push`);
+      return null;
+    }
+    try {
+      store.upsert("messages", input.id, {
+        id: input.id, fromAgent: true, text, createdAt: input.atIso,
+        ...(input.context ? { context: input.context } : {}),
+      }, input.atIso);
+    } catch {
+      console.warn(`mail chat: message write failed for ${input.surface}; no message, no push`);
+      return null;
+    }
+    return { id: input.id, text };
   }
 
   /// An email-triggered look for work runs the same guarded tick as
@@ -1022,11 +1103,25 @@ export class UserSandbox extends DurableObject<Env> {
           if (readingInstruction && delivery.contentHash) {
             const named = readingInstruction.kind === "add"
               ? readingInstruction.domain : "site" in readingInstruction ? readingInstruction.site : null;
-            this.appendAgentChat(named
-              ? `You asked by email about ${named}, but I don't have that job site yet. Shall I add it and start looking there?`
-              : `You asked by email to ${readingInstruction.kind}, but I couldn't tell exactly what you meant. Tell me here and I'll do it.`,
-            delivery.receivedAt, delivery.contentHash);
-            outcome = "chat_asked";
+            // A mail question is a chat message, so it pushes —
+            // once per mail (the deterministic id dedupes). The
+            // question text is composed by the model from the
+            // instruction facts, never a canned string.
+            const asked = await this.composeAndWriteMailChat({
+              surface: "mail-question",
+              facts: {
+                instruction: readingInstruction.kind,
+                ...(named ? { site: named } : {}),
+                sender: s.senderDomain,
+                subject: s.subject || "(no subject)",
+              },
+              atIso: delivery.receivedAt,
+              id: UserSandbox.uuidFromSeed(`${delivery.contentHash}chat`),
+            });
+            if (asked) {
+              outcome = "chat_asked";
+              this.schedulePush([chatMessageEvent(asked.id, asked.text)]);
+            }
           }
           this.journalEmail(delivery.receivedAt,
             `Filed mail from your address: ${s.subject || "(no subject)"}`, detail, null, hash);
@@ -1046,27 +1141,47 @@ export class UserSandbox extends DurableObject<Env> {
           detail, null, hash);
       } else if (chatAsk && delivery.contentHash) {
         const titles = readingJobs.map((j) => j.title);
-        const listed = titles.length > 1
-          ? `${titles.slice(0, -1).join(", ")}, and ${titles[titles.length - 1]}`
-          : titles[0] ?? "";
-        this.appendAgentChat(
-          titles.length
-            ? `That email from ${s.senderDomain} — “${s.subject || "(no subject)"}” — lists ${titles.length === 1 ? "a role" : `${titles.length} roles`}: ${listed}. I couldn't tell which job site they belong to. Want me to look into any of these?`
-            : `Mail from ${s.senderDomain} — “${s.subject || "(no subject)"}”. ${s.summary} It looks work-related, but I couldn't tell which job site it belongs to. What would you like me to do with mail like this?`,
-          delivery.receivedAt, delivery.contentHash);
-        outcome = "chat_asked";
-        this.journalEmail(delivery.receivedAt,
-          `Filed mail from ${s.senderDomain || "a new sender"}: ${s.subject || "(no subject)"}. Asked you in chat what to do with mail like this.`,
-          detail, null, hash);
+        // A mail question is a chat message, so it pushes — once
+        // per mail (the deterministic id dedupes). The question
+        // text is composed by the model from the mail facts, never
+        // a canned string. The journal says "asked you in chat"
+        // only when the question was actually written.
+        const asked = await this.composeAndWriteMailChat({
+          surface: "mail-question",
+          facts: {
+            sender: s.senderDomain,
+            subject: s.subject || "(no subject)",
+            summary: s.summary,
+            ...(titles.length ? { roles: titles.join(", "), roleCount: String(titles.length) } : {}),
+          },
+          atIso: delivery.receivedAt,
+          id: UserSandbox.uuidFromSeed(`${delivery.contentHash}chat`),
+        });
+        if (asked) {
+          outcome = "chat_asked";
+          this.schedulePush([chatMessageEvent(asked.id, asked.text)]);
+          this.journalEmail(delivery.receivedAt,
+            `Filed mail from ${s.senderDomain || "a new sender"}: ${s.subject || "(no subject)"}. Asked you in chat what to do with mail like this.`,
+            detail, null, hash);
+        } else {
+          this.journalEmail(delivery.receivedAt,
+            `Filed mail from ${s.senderDomain || "a new sender"}: ${s.subject || "(no subject)"}`,
+            detail, null, hash);
+        }
       } else {
         this.journalEmail(delivery.receivedAt,
           `Filed mail from ${s.senderDomain || "a site"}: ${s.subject || "(no subject)"}`,
           detail, null, hash);
       }
       // A client message may be waiting: the one mail event worth
-      // a push. Authenticated tracked (or work-ruled) senders only,
-      // at most one per sender per day — the rest stay in the
-      // journal. The tap opens this exact filed mail.
+      // a push — but only backed by a chat message (policy Nov 5,
+      // 2026). The message carries the embedded mail card
+      // (context kind "mail", id = summaryId — the agreed contract
+      // with the app-side card-tap fix) and the push opens that
+      // message, never the filed mail directly and never without
+      // a message. Authenticated tracked (or work-ruled) senders
+      // only, at most one per sender per day — the rest stay in
+      // the journal.
       const mentionsMessage = (delivery.triage?.highlights ?? []).some((h) => h.kind === "client_message")
         || readingMentions.some((m) => m.kind === "client_message");
       if (mentionsMessage && triage.decision === "work" && triage.relation !== "owner"
@@ -1075,10 +1190,21 @@ export class UserSandbox extends DurableObject<Env> {
         const capKey = `mailPush:${s.senderDomain.toLowerCase()}:${day}`;
         const already = [...this.ctx.storage.sql.exec("SELECT value FROM kv WHERE key = ?", capKey)] as Row[];
         if (!already.length) {
-          this.ctx.storage.sql.exec("INSERT OR REPLACE INTO kv (key, value) VALUES (?, '1')", capKey);
-          this.schedulePush([messageWaitingEvent(summaryId, {
-            siteName: triage.site?.name ?? s.senderDomain, subject: s.subject,
-          })]);
+          const backing = await this.composeAndWriteMailChat({
+            surface: "mail",
+            facts: {
+              site: triage.site?.name ?? s.senderDomain,
+              subject: s.subject || "(no subject)",
+              summary: s.summary,
+            },
+            atIso: delivery.receivedAt,
+            id: summaryId,
+            context: { kind: "mail", id: summaryId },
+          });
+          if (backing) {
+            this.ctx.storage.sql.exec("INSERT OR REPLACE INTO kv (key, value) VALUES (?, '1')", capKey);
+            this.schedulePush([messageWaitingEvent(backing.id, backing.text)]);
+          }
         }
       }
     }
@@ -1428,7 +1554,6 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   private async runTaskLegacy(task: any, browser: UserBrowser, workspaceHooks?: WorkspaceMissionHooks) {
-    const statusBeforeRun = String(task.status ?? "");
     // The persisted running state claims the request; the runner receives its approved scope.
     task.status = "approved";
     const kind = MEMORY_KIND[task.kind] ?? "searchOpportunities";
@@ -1614,23 +1739,13 @@ export class UserSandbox extends DurableObject<Env> {
     // Brief 05: a mission that succeeded proves the sign-in works
     // again — end any scheduled-scan login-failure episode here.
     if (result.status === "succeeded") this.healScanEpisodes(domain);
-    // Brief 07: a fresh needsHuman entry (a chat-routed approval
-    // or a human-only check) is push trigger #1. Scan missions are
-    // excluded — their episodes notify once per tick instead. The
-    // body is the same words the chat card shows: the site, the
-    // ask, and the first question. Feed-only helps (information,
-    // deadline-free approvals) never push.
-    if (shouldNotifyNeedsHuman(statusBeforeRun, task.status, { scheduledScan: task.scheduled_scan === true })
-        && helpRoutesToChat(task.help)) {
-      const helpText = (task.help?.message as string | undefined)?.trim() ?? "";
-      const firstQuestion = (task.help?.questions?.[0]?.text as string | undefined)?.trim() ?? "";
-      const siteRow = this.stateStore().list("sites")
-        .map((row) => scanSiteFromRow(String(row.id), row.data))
-        .find((site) => site && domainOfUrl(site.startURLString) === domain);
-      const siteName = siteRow?.name ?? domain;
-      const message = [helpText, firstQuestion].filter(Boolean).join(" ");
-      this.schedulePush([needsHumanEvent(String(task.id), message ? `${siteName}: ${message}` : undefined)]);
-    }
+    // Brief 07 trigger #1 (the decision-help push) lives in
+    // saveTask above, not here: saveTask owns the fresh-transition
+    // check against the stored row, so the push fires on both the
+    // legacy path and retained-v2 (which persists through
+    // saveTask). Scan missions never notify here either — their
+    // episodes stay in the feed, and a tick's only push is the
+    // new-work chat message.
     return task;
   }
 
@@ -1918,6 +2033,24 @@ export class UserSandbox extends DurableObject<Env> {
       saveSiteAccess: (record) => this.saveSiteAccessRecord(record),
       runProbeMission: (input) => this.runWebProbe(input, browser),
       idFactory: () => crypto.randomUUID(),
+      // The tick's one chat message is composed by the model from
+      // the listing facts (chat-composer.ts) — never a canned
+      // string. No model configured means no message and no push.
+      composeOfferMessage: async (input) => {
+        const composer = createCardMessageComposer(new LLMClient(this.llmConfig("hygge-browser-agent")));
+        if (!composer) return null;
+        return composer({
+          surface: "offer",
+          facts: {
+            site: input.siteName,
+            listing: input.title,
+            pay: input.payLabel,
+            place: input.isRemote ? "Remote" : input.locationLabel,
+            ...(input.moreCount > 0 ? { moreListings: String(input.moreCount) } : {}),
+          },
+          recentChat: input.recentChat,
+        });
+      },
       log: (message) => {
         this.ctx.storage.sql.exec(
           "INSERT INTO events (kind, payload) VALUES (?, ?)",
@@ -2017,6 +2150,12 @@ export class UserSandbox extends DurableObject<Env> {
       mirror:async(doc:ChatDocument)=>{await this.workspace().saveDocument(`${doc.generation}/${doc.path}`,doc.revision,new TextEncoder().encode(doc.content));},
       erase:async(doc:ChatDocument)=>{await this.workspace().eraseDocument(`${doc.generation}/${doc.path}`,doc.revision);},
       deletedMessage:id=>Boolean(store.db.get(`deleted-message:${id}`)),
+      // Every agent reply in the conversation pushes (policy Nov 5,
+      // 2026: every chat message generates a push — no exceptions).
+      // The body is the reply's own words; the tap opens the reply.
+      // No foreground exception here: the app suppresses pushes
+      // while open, so the server must not build a second one.
+      notifyChatMessage:(event)=>{this.schedulePush([chatMessageEvent(event.id,String(event.value))]);},
     });
     return new ChatAgent(store,new LLMClient(this.llmConfig('hygge-conversation')),services);
   }
