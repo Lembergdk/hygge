@@ -53,9 +53,10 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   // checkpoint. Operation ids are derived from the dead incarnation so a
   // retry after a partial rebind replays the same registry operations
   // instead of starting a second fence/start. The rebind never resolves,
-  // bypasses, or hides an unresolved effect: the effects gate in
-  // assertWorkspaceReady still refuses the mission, and the effect still
-  // belongs to the review flow.
+  // bypasses, or hides an unresolved effect: the effect stays recorded
+  // for audit and review. It simply no longer gates anything — there is
+  // no effect gate, so a stuck effect cannot refuse a mission or an
+  // upgrade.
   async function receiptForCheckpoint(checkpointId:string){
     const prefix=`receipt/${ownerKey(owner)}/`;
     const rows=[...storage.sql.exec('SELECT value FROM workspace_registry WHERE key LIKE ?',prefix+'%')] as {value:unknown}[];
@@ -232,7 +233,13 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   const runner=createWorkspaceTaskRunner({owner,storage,foundation,saveWorkspace:save,projectTask:(task)=>options.projectTask(task),
     assertWorkspaceReady:async task=>{
       await ensure();const status=await bridge.status();if(status.frozen || status.humanControlled)throw new Error('WORKSPACE_CAPTURE_OR_HUMAN_PENDING');
-      if(foundation.persistence.list<any>('effect').some(e=>e.value.taskId!==task.id && ['prepared','dispatching','uncertain'].includes(e.value.status)))throw new Error('WORKSPACE_HAS_UNRESOLVED_ACTION');
+      // No effect gate: one task's unresolved effect never blocks
+      // another task. The duplicate risk that motivated the gate is
+      // handled where it belongs — the agent verifies the live page
+      // before retrying a mutation ("never duplicate a submission"),
+      // and a task pauses itself when its OWN action is uncertain
+      // (see the runner). A global block just let one stuck
+      // background step brick every mission.
       // Node also enforces global control/freeze for every agent mutation.
     },
     authorizeAction:async(task,input)=>{
@@ -279,7 +286,11 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     prepare:async()=>{await ensure();const status=await bridge.status();if(status.humanControlled||status.frozen)throw Error('WORKSPACE_CAPTURE_OR_HUMAN_PENDING');return foundation.registry.read(owner,owner);},
     structuredHash:()=>structuredWorkspaceHash(storage),verifyFiles:(source,target)=>verifyImageFiles(objects,owner,source,target),
     assertIdle(){options.assertOwnerIdle?.();if(lineagePins.size||foundation.persistence.get('runner_owner','active'))throw Error('WORKSPACE_ADMISSION_BUSY');
-      if(foundation.persistence.list<any>('effect').some(e=>['prepared','dispatching','uncertain'].includes(e.value.status)))throw Error('WORKSPACE_HAS_UNRESOLVED_ACTION');},
+      // No effect gate here either: a past mission's unresolved
+      // effect does not make the filesystem inconsistent, and the
+      // runner_owner check above already proves no mission is
+      // actively running. A stuck effect must not block an upgrade.
+    },
     async capture(record,target){
       const writeId=`${record.operationId}_${target?'target':'source'}`;
       const prior=await foundation.registry.saved(owner,owner,writeId);if(prior)return foundation.verifyDurability(prior.receipt.receiptId);
@@ -433,12 +444,14 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       return runner.reconcile({taskId,effectId,status,evidenceRef:ref});
     },
     /** Read-only workspace diagnostics for the owner route. Reports the
-     * live gate state (container frozen/held, unresolved effects, admission,
-     * binding/lease, recent tasks) without dispatching, resolving, or
-     * retrying anything. Every section is best-effort: a failed section
-     * reports its error instead of failing the whole read, so a wedged
-     * workspace still shows its state. Attaching the container (ensure) is
-     * the same call /sandbox/verify already makes; ensure now also rebinds a
+     * live state (container frozen/held, unresolved effects for audit,
+     * admission, binding/lease, recent tasks) without dispatching,
+     * resolving, or retrying anything. Unresolved effects are listed
+     * but do not block a new mission — there is no effect gate. Every
+     * section is best-effort: a failed section reports its error
+     * instead of failing the whole read, so a wedged workspace still
+     * shows its state. Attaching the container (ensure) is the same
+     * call /sandbox/verify already makes; ensure now also rebinds a
      * dead container (fence + start from the checkpoint), so opening
      * diagnostics can warm a wedged workspace. It still resolves no effect
      * and dispatches nothing. */
@@ -489,7 +502,9 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       const reasons: string[] = [];
       if (out.container.ok === true && out.container.frozen) reasons.push('container frozen');
       if (out.container.ok === true && out.container.humanControlled) reasons.push('browser held by human');
-      if (unresolved.length) reasons.push(`${unresolved.length} unresolved effect(s): ${unresolved.map(e => e.effectId).join(',')}`);
+      // Unresolved effects are reported above for audit, but they no
+      // longer block a new mission (there is no effect gate), so they
+      // are not block reasons.
       out.wouldBlockNewMission = reasons.length > 0 ? true : (out.container.ok === true ? false : null);
       out.blockReasons = reasons;
       out.ms = Date.now() - startedAt;
