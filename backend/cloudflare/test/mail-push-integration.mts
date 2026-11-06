@@ -568,9 +568,9 @@ test("expiry: a draft with an explicit deadline fires once", async () => {
   }
 });
 
-test("expiry: a failed composition still sets the flag — no message, no push, no re-fire", async () => {
+test("expiry: a failed composition is retried on a later tick — no notice until it succeeds, then exactly once", async () => {
   const t = makeSandbox();
-  const restore = stubModelFailure();
+  const restoreFail = stubModelFailure();
   try {
     const deadline = new Date("2026-11-05T18:00:00.000Z").toISOString();
     const task = {
@@ -595,20 +595,176 @@ test("expiry: a failed composition still sets the flag — no message, no push, 
     await t.drain();
     const messagesBefore = t.messages().length;
     const pushesBefore = t.pushes.length;
+    // First tick: composition fails. No notice — but the flag is
+    // NOT set; the failure is recorded as retry state instead.
     await (t.sandbox as any).notifyExpiredCards(new Date("2026-11-05T19:00:00.000Z"));
     await t.drain();
-    assert.equal(t.messages().length, messagesBefore, "exactly-once wins: no notice is ever written for this deadline");
+    assert.equal(t.messages().length, messagesBefore, "a failed composition writes no notice");
     assert.equal(t.pushes.length, pushesBefore);
-    assert.equal(t.taskRow(task.id).expiryNotifiedFor, deadline, "the flag is set before composition, so a retry cannot double-send");
-    const failures = t.eventsOfKind("chat-composer-failure");
-    assert.equal(failures.length, 1);
-    assert.equal(failures[0].surface, "expiry");
-    // A later tick still does not re-fire.
-    await (t.sandbox as any).notifyExpiredCards(new Date("2026-11-06T19:00:00.000Z"));
+    const stored = t.taskRow(task.id);
+    assert.equal(stored.expiryNotifiedFor, undefined, "the success flag is NOT set on failure");
+    assert.equal(stored.expiryNoticeAttempts, 1, "the failure is recorded as one attempt");
+    assert.equal(stored.expiryNoticeFor, deadline, "the attempt is keyed to this deadline");
+    assert.equal(stored.expiryNoticeNextRetryAt, "2026-11-05T20:00:00.000Z", "next retry is 1h out");
+    assert.equal(t.eventsOfKind("chat-composer-failure").length, 1);
+    assert.equal(t.eventsOfKind("chat-composer-failure")[0].surface, "expiry");
+    // Inside the backoff window: the card is not retried yet, and
+    // the failure is not re-reported.
+    await (t.sandbox as any).notifyExpiredCards(new Date("2026-11-05T19:30:00.000Z"));
     await t.drain();
     assert.equal(t.messages().length, messagesBefore);
     assert.equal(t.pushes.length, pushesBefore);
+    assert.equal(t.taskRow(task.id).expiryNoticeAttempts, 1, "no attempt is consumed inside the backoff");
+    assert.equal(t.eventsOfKind("chat-composer-failure").length, 1);
+    // Past the backoff, with a working model: exactly one notice,
+    // and the flag lands only now.
+    restoreFail();
+    const restoreOk = stubModel("The Rover signup check expired — it is still in your feed to review or dismiss.");
+    try {
+      await (t.sandbox as any).notifyExpiredCards(new Date("2026-11-05T21:00:00.000Z"));
+      await t.drain();
+      const messageId = "expiry-chat-cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+      assert.ok(t.message(messageId), "the retry writes the notice");
+      assert.equal(t.messages().length, messagesBefore + 1, "exactly one notice");
+      assert.equal(t.pushes.length, pushesBefore + 1, "one push for the notice");
+      const done = t.taskRow(task.id);
+      assert.equal(done.expiryNotifiedFor, deadline, "the flag is set only after success");
+      assert.ok(done.expiryNotifiedAt, "the flag carries the notice time");
+      assert.equal(done.expiryNoticeAttempts, undefined, "the retry state is cleared on success");
+      assert.equal(done.expiryNoticeNextRetryAt, undefined);
+      // A later tick still does not re-fire.
+      await (t.sandbox as any).notifyExpiredCards(new Date("2026-11-06T19:00:00.000Z"));
+      await t.drain();
+      assert.equal(t.messages().length, messagesBefore + 1);
+      assert.equal(t.pushes.length, pushesBefore + 1);
+    } finally {
+      restoreOk();
+    }
+  } finally {
+    restoreFail();
+  }
+});
+
+test("expiry: the retry bound is respected — five failures, then silence, no duplicates", async () => {
+  const t = makeSandbox();
+  const restore = stubModelFailure();
+  try {
+    const deadline = new Date("2026-11-05T18:00:00.000Z").toISOString();
+    const task = {
+      ...BASE_TASK,
+      id: "d0000000-0000-4000-8000-000000000001",
+      status: "needsHuman",
+      help: {
+        id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", kind: "verification",
+        message: "Finish the check on Rover.", questions: [],
+        actionLabel: "Complete check", deadline,
+      },
+      mobile_task: {
+        id: "d0000000-0000-4000-8000-000000000001", kind: "signup", siteID: "rover.com",
+        targetURLString: "https://www.rover.com/join", title: "Join Rover", goal: "Join Rover",
+        draftedPayload: {}, status: "needsHuman", log: [], createdAt: Date.now() / 1000 - 978307200,
+      },
+    };
+    (t.sandbox as any).saveTask(task);
+    await t.drain();
+    const messagesBefore = t.messages().length;
+    const pushesBefore = t.pushes.length;
+    // Five failures, each past the previous backoff (1h, 2h, 3h,
+    // 4h, 5h out): attempts 1..5, next retry pushed out each time.
+    const ticks: Array<[string, number, string]> = [
+      ["2026-11-05T19:00:00.000Z", 1, "2026-11-05T20:00:00.000Z"],
+      ["2026-11-05T20:30:00.000Z", 2, "2026-11-05T22:30:00.000Z"],
+      ["2026-11-05T23:00:00.000Z", 3, "2026-11-06T02:00:00.000Z"],
+      ["2026-11-06T02:30:00.000Z", 4, "2026-11-06T06:30:00.000Z"],
+      ["2026-11-06T07:00:00.000Z", 5, "2026-11-06T12:00:00.000Z"],
+    ];
+    for (const [at, attempts, nextRetry] of ticks) {
+      await (t.sandbox as any).notifyExpiredCards(new Date(at));
+      await t.drain();
+      assert.equal(t.messages().length, messagesBefore, `no notice on failure ${attempts}`);
+      assert.equal(t.pushes.length, pushesBefore);
+      const stored = t.taskRow(task.id);
+      assert.equal(stored.expiryNoticeAttempts, attempts, `attempt ${attempts} recorded`);
+      assert.equal(stored.expiryNoticeNextRetryAt, nextRetry, `backoff ${attempts}h out`);
+      assert.equal(stored.expiryNotifiedFor, undefined, "the success flag is never set");
+      assert.equal(t.eventsOfKind("chat-composer-failure").length, attempts, "each failure is reported once");
+    }
+    // Past the last backoff, and then with a working model: the
+    // bound is exhausted, so nothing ever fires for this deadline.
+    await (t.sandbox as any).notifyExpiredCards(new Date("2026-11-06T12:30:00.000Z"));
+    await t.drain();
+    assert.equal(t.taskRow(task.id).expiryNoticeAttempts, 5, "no attempt is consumed past the bound");
+    assert.equal(t.eventsOfKind("chat-composer-failure").length, 5);
+    restore();
+    const restoreOk = stubModel("Must never be composed.");
+    try {
+      await (t.sandbox as any).notifyExpiredCards(new Date("2026-11-06T13:00:00.000Z"));
+      await t.drain();
+      assert.equal(t.messages().length, messagesBefore, "the bound holds even when the model recovers");
+      assert.equal(t.pushes.length, pushesBefore);
+      assert.equal(t.taskRow(task.id).expiryNotifiedFor, undefined);
+    } finally {
+      restoreOk();
+    }
   } finally {
     restore();
+  }
+});
+
+test("expiry: a new deadline after failed attempts gets its own notice", async () => {
+  const t = makeSandbox();
+  const restoreFail = stubModelFailure();
+  try {
+    const firstDeadline = new Date("2026-11-05T18:00:00.000Z").toISOString();
+    const task = {
+      ...BASE_TASK,
+      id: "e0000000-0000-4000-8000-000000000001",
+      status: "needsHuman",
+      help: {
+        id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", kind: "verification",
+        message: "Finish the check on Rover.", questions: [],
+        actionLabel: "Complete check", deadline: firstDeadline,
+      },
+      mobile_task: {
+        id: "e0000000-0000-4000-8000-000000000001", kind: "signup", siteID: "rover.com",
+        targetURLString: "https://www.rover.com/join", title: "Join Rover", goal: "Join Rover",
+        draftedPayload: {}, status: "needsHuman", log: [], createdAt: Date.now() / 1000 - 978307200,
+      },
+    };
+    (t.sandbox as any).saveTask(task);
+    await t.drain();
+    // One failed attempt against the first deadline.
+    await (t.sandbox as any).notifyExpiredCards(new Date("2026-11-05T19:00:00.000Z"));
+    await t.drain();
+    assert.equal(t.taskRow(task.id).expiryNoticeAttempts, 1);
+    // The help is re-asked with a NEW deadline (same help id).
+    // Re-save the stored row so the retry state survives: only
+    // the deadline changes.
+    const secondDeadline = new Date("2026-11-05T18:30:00.000Z").toISOString();
+    const stored = t.taskRow(task.id);
+    (t.sandbox as any).saveTask({
+      ...stored,
+      help: { ...stored.help, deadline: secondDeadline },
+    });
+    await t.drain();
+    const messagesBefore = t.messages().length;
+    const pushesBefore = t.pushes.length;
+    restoreFail();
+    const restoreOk = stubModel("The Rover signup check expired — it is still in your feed to review or dismiss.");
+    try {
+      await (t.sandbox as any).notifyExpiredCards(new Date("2026-11-05T19:30:00.000Z"));
+      await t.drain();
+      const messageId = "expiry-chat-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+      assert.ok(t.message(messageId), "the new deadline gets its own notice");
+      assert.equal(t.messages().length, messagesBefore + 1, "exactly one notice");
+      assert.equal(t.pushes.length, pushesBefore + 1, "one push for the notice");
+      const done = t.taskRow(task.id);
+      assert.equal(done.expiryNotifiedFor, secondDeadline, "the flag names the new deadline");
+      assert.equal(done.expiryNoticeAttempts, undefined, "the old deadline's attempts do not carry over");
+    } finally {
+      restoreOk();
+    }
+  } finally {
+    restoreFail();
   }
 });

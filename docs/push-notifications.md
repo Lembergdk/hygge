@@ -29,7 +29,7 @@ below.
 |---|---|---|---|
 | 1 | A task freshly enters `needsHuman` (or `failed` with a help) carrying a chat-routed help — any decision kind: information, approval, verification, credentials, recovery | `UserSandbox.saveTask` → `shouldNotifyDecisionHelp` + `helpRoutesToChat` | `needs_you`, title `Hygge`, body = the chat message's own words (the help card's text), deep link `task/<id>` opening the task's chat help card. A help-less `needsHuman` gets no message and no push — there is no content to compose a message about. The push fires only when the mirror message row actually exists (see "How the message text is composed") |
 | 1b | A task freshly enters `awaitingApproval` — a draft is ready for review ("Ready for your review") | `UserSandbox.saveTask` → `notifyDraftReady` | `needs_you`, title `Hygge`, body = the agent-composed draft message, deep link `chat/<message-id>` opening the message whose embedded card is the draft. Deterministic id `draft-chat-<taskId>`, idempotent |
-| 1c | A still-pending decision card reaches its expiry date | Scheduled tick → `UserSandbox.notifyExpiredCards` | `needs_you`, title `Hygge`, body = the agent-composed expiry notice, deep link `chat/<message-id>` opening the message whose embedded card is the expired card. Exactly once per card (server flag `expiryNotifiedFor`); a lifecycle notice, not urgency — expiry never affects routing |
+| 1c | A still-pending decision card reaches its expiry date | Scheduled tick → `UserSandbox.notifyExpiredCards` | `needs_you`, title `Hygge`, body = the agent-composed expiry notice, deep link `chat/<message-id>` opening the message whose embedded card is the expired card. Exactly once per card (server flag `expiryNotifiedFor`, set only after the message is written and its push scheduled); a failed composition is retried on later ticks (bounded: 5 attempts, at least 1h apart, growing). A lifecycle notice, not urgency — expiry never affects routing |
 | 2 | A scheduled-scan tick surfaces new listings | `POST /scheduled-scan/tick` → `planTickNotifications(summary)` | `new_work`, title `Hygge`, body = the agent-composed chat message text, deep link `chat/<message-id>` opening the conversation the message lives in |
 | 2b | A scheduled-scan tick opens a needs-you episode (login failure / human check) | same tick hook | none — the episode waits in the feed; it has no chat message, so it cannot push |
 | 3 | Authenticated mail from a tracked (or work-ruled) sender mentions a client message | `UserSandbox.handleEmailInbound` → triage highlights → backing chat message + embedded mail card | `message_waiting`, title `Hygge`, body = the backing chat message's composed words, deep link `chat/<message-id>`; at most one per sender per day. Skipped when the same mail already produced a chat question (trigger 3b) — one mail, one push |
@@ -56,9 +56,12 @@ Rules that bound all of them:
   pushes once — the question's push. The backing push is skipped
   when the mail already produced a chat question.
 - **Expiry notices fire exactly once per card.** The server flag
-  (`expiryNotifiedFor` on the task, set before composition) means
-  a later tick never re-fires for the same deadline; a re-asked
-  help with a new deadline gets its own notice.
+  (`expiryNotifiedFor` on the task) is set only after the message
+  is written and its push scheduled; a failed composition leaves
+  the card eligible and is retried on later ticks (bounded: 5
+  attempts, at least 1h apart, growing) — a later tick never
+  re-fires for the same deadline once notified; a re-asked help
+  with a new deadline gets its own notice.
 - **Fresh transitions only.** A task already sitting in
   `needsHuman` (or `failed`) does not re-notify. A resumed run
   that hits a further check is a new entry and does notify.

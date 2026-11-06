@@ -64,6 +64,17 @@ import {
 } from "./jobs.ts";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
+/// Expiry-notice retry (policy Nov 5, 2026): a failed expiry
+/// composition is retried on later ticks, bounded — 5 attempts,
+/// each at least 1h apart (growing: 1h, 2h, 3h, 4h, 5h). Ticks run
+/// 3×/day (07:00/13:00/19:00 UTC), so the backoff is usually
+/// already elapsed by the next tick and 5 attempts span roughly
+/// 5 tick slots (~30h). The bound exists so a persistently
+/// unconfigured model stops trying; the expired card stays
+/// visible and dismissable in the feed, so the information is
+/// never lost — only the push/message is.
+const MAX_EXPIRY_NOTICE_ATTEMPTS = 5;
+const EXPIRY_NOTICE_RETRY_BASE_MS = 60 * 60 * 1000;
 const CONTAINER_IMAGE = "cloudflare/debian-trixie";
 
 const MEMORY_KIND: Record<string, string> = {
@@ -872,17 +883,23 @@ export class UserSandbox extends DurableObject<Env> {
   /// the tick's response never waits on model composition). No
   /// new scheduler.
   ///
-  /// Exactly-once: the dedupe flag (`expiryNotifiedAt` +
+  /// Exactly-once with retry: the success flag (`expiryNotifiedAt` +
   /// `expiryNotifiedFor`, the deadline it fired for) is written
-  /// to the task row by saveTask BEFORE any composition, so a
-  /// retry/tick overlap can never double-send; the in-memory
-  /// pending set below closes the race between two ticks that
-  /// scanned before either flag landed. The price is that a
-  /// failed composition means no notice ever for that deadline —
-  /// the failure is reported, and the feed card remains. Keying
-  /// the flag by the deadline value (not just the task) means a
-  /// later re-asked help with a NEW deadline still gets its own
-  /// notice.
+  /// ONLY after the message is written and its push scheduled —
+  /// never before composition. A failed composition leaves the
+  /// card eligible: the failure is recorded as retry state
+  /// (`expiryNoticeAttempts` + `expiryNoticeNextRetryAt`, keyed
+  /// to the deadline by `expiryNoticeFor`), bounded to
+  /// MAX_EXPIRY_NOTICE_ATTEMPTS attempts at least
+  /// EXPIRY_NOTICE_RETRY_BASE_MS apart (growing: 1h, 2h, ...),
+  /// then it stops — a persistently unconfigured model must not
+  /// retry forever. The in-memory pending set closes the race
+  /// between two ticks that scanned before either flag landed,
+  /// and a message row that already exists (a previous tick
+  /// wrote it but crashed before flagging) is flagged rather
+  /// than re-sent. Keying the flag and the retry state by the
+  /// deadline value (not just the task) means a later re-asked
+  /// help with a NEW deadline still gets its own notice.
   ///
   /// Scope: only still-pending cards — needsHuman / failed with a
   /// help, awaitingApproval drafts — carrying a deadline (the
@@ -913,18 +930,37 @@ export class UserSandbox extends DurableObject<Env> {
       const messageId = task.help?.id
         ? `expiry-chat-${String(task.help.id).toLowerCase()}`
         : `expiry-chat-${String(task.id).toLowerCase()}`;
+      // Already written (a previous tick wrote it but crashed
+      // before flagging): flag it rather than re-send.
+      if (store.get("messages", messageId)) {
+        task.expiryNotifiedAt = now.toISOString();
+        task.expiryNotifiedFor = deadline;
+        delete task.expiryNoticeAttempts;
+        delete task.expiryNoticeNextRetryAt;
+        delete task.expiryNoticeFor;
+        this.saveTask(task);
+        continue;
+      }
+      // Retry state is per deadline: a re-asked help with a new
+      // deadline starts its own attempts — including a fresh
+      // backoff (the old deadline's next-retry time must not gate
+      // the new one).
+      const sameDeadline = task.expiryNoticeFor === deadline;
+      let attempts = 0;
+      if (sameDeadline && Number.isFinite(task.expiryNoticeAttempts)) {
+        attempts = Math.max(0, Math.trunc(task.expiryNoticeAttempts));
+      }
+      if (attempts >= MAX_EXPIRY_NOTICE_ATTEMPTS) continue;
+      const nextRetryMs = sameDeadline ? Date.parse(task.expiryNoticeNextRetryAt ?? "") : NaN;
+      if (Number.isFinite(nextRetryMs) && nextRetryMs > now.getTime()) continue;
       if (this.composedChatPending.has(messageId)) continue;
-      // Flag first (see header): exactly-once wins over retry.
-      task.expiryNotifiedAt = now.toISOString();
-      task.expiryNotifiedFor = deadline;
-      this.saveTask(task);
       this.composedChatPending.add(messageId);
       try {
-        if (store.get("messages", messageId)) continue;
         const composer = this.cardComposer();
         if (!composer) {
+          this.recordExpiryNoticeAttempt(task, deadline, attempts, now);
           this.reportComposerFailure("expiry", "model_unconfigured");
-          console.warn(`expiry chat: model not configured, skipping notice for ${task.id}`);
+          console.warn(`expiry chat: model not configured, will retry notice for ${task.id}`);
           continue;
         }
         const text = await composer({
@@ -937,8 +973,9 @@ export class UserSandbox extends DurableObject<Env> {
           recentChat: recentChatContext(store.list("messages")),
         }).catch(() => null);
         if (!text) {
+          this.recordExpiryNoticeAttempt(task, deadline, attempts, now);
           this.reportComposerFailure("expiry", "compose_failed");
-          console.warn(`expiry chat: composition failed for ${task.id}; no message, no push (flag already set, no retry)`);
+          console.warn(`expiry chat: composition failed for ${task.id}; will retry`);
           continue;
         }
         try {
@@ -948,14 +985,36 @@ export class UserSandbox extends DurableObject<Env> {
             previousResponseId: lastChatMessageId(store.list("messages")),
           });
         } catch {
-          console.warn(`expiry chat: message write failed for ${task.id}; no message, no push`);
+          this.recordExpiryNoticeAttempt(task, deadline, attempts, now);
+          console.warn(`expiry chat: message write failed for ${task.id}; will retry`);
           continue;
         }
         this.schedulePush([chatMessageEvent(messageId, text)]);
+        // Mark notified only now: the message exists and its push
+        // is scheduled. Clear the retry state with it.
+        task.expiryNotifiedAt = now.toISOString();
+        task.expiryNotifiedFor = deadline;
+        delete task.expiryNoticeAttempts;
+        delete task.expiryNoticeNextRetryAt;
+        delete task.expiryNoticeFor;
+        this.saveTask(task);
       } finally {
         this.composedChatPending.delete(messageId);
       }
     }
+  }
+
+  /// Record one failed expiry-notice attempt: increment the
+  /// per-deadline counter and push the next retry at least
+  /// EXPIRY_NOTICE_RETRY_BASE_MS × (attempts + 1) out (1h, 2h,
+  /// 3h, ...). Persisted via saveTask — safe here because the
+  /// task's status is unchanged, so no fresh-transition push,
+  /// mirror re-fire, or draft notice can trigger (see saveTask).
+  private recordExpiryNoticeAttempt(task: any, deadline: string, attempts: number, now: Date): void {
+    task.expiryNoticeAttempts = attempts + 1;
+    task.expiryNoticeFor = deadline;
+    task.expiryNoticeNextRetryAt = new Date(now.getTime() + EXPIRY_NOTICE_RETRY_BASE_MS * (attempts + 1)).toISOString();
+    this.saveTask(task);
   }
 
   // ---- Brief 04 inbox (receive only) ------------------------------
@@ -3033,8 +3092,10 @@ export class UserSandbox extends DurableObject<Env> {
         // the server-side trigger that notices newly-expired
         // still-pending cards and prompts the agent. Fire-and-
         // forget so the tick's response never waits on model
-        // composition; the exactly-once flag is written before any
-        // compose, so overlaps cannot double-send.
+        // composition; the success flag is written only after the
+        // message and its push, and a failed composition is
+        // retried on later ticks (bounded), so overlaps cannot
+        // double-send and failures are not dropped.
         this.runAfterSave(this.notifyExpiredCards());
         return json(summary);
       }
