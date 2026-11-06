@@ -767,7 +767,7 @@ private struct ThinkingDots: View {
                     let phase = reduceMotion ? 0.5
                         : 0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 3.2 - Double(index) * 0.55)
                     Circle()
-                        .fill(GPTheme.teal.opacity(0.35 + 0.65 * phase))
+                        .fill(HyggeTheme.butter.opacity(0.35 + 0.65 * phase))
                         .frame(width: 8, height: 8)
                         .scaleEffect(0.75 + 0.35 * phase)
                         .offset(y: -3 * phase)
