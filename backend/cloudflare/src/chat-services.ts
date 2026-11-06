@@ -86,7 +86,7 @@ export function chatServices(host:ChatServiceHost):ChatServices {
         const domain=String(args.domain??'').trim().toLowerCase().replace(/^https?:\/\//,'').replace(/^www\./,'').split('/')[0];
         if(!/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(domain))throw new Error('INVALID_SITE_DOMAIN');
         let s=host.rows('sites').map(r=>({id:r.id,...r.data})).find(s=>siteDomain(s)===domain);
-        if(!s){if(!await host.plus()&&host.rows('sites').length>=10)return {status:'site_limit',message:'Free supports up to 10 sites.'};s={id:domain,name:domain.split('.')[0],startURLString:`https://${domain}`,category:row.profile?.interests?.[0]??'localGig',goalTemplate:'Find work matching my profile.'};host.put('sites',s.id,s);host.put('accountStates',s.id,{siteID:s.id,state:'proposed'});}
+        if(!s){const approved=host.rows('sites').filter(r=>['watching','profileLive','hasAccount'].includes(host.get('accountStates',r.id)?.data?.state)).length;if(!await host.plus()&&approved>=10)return {status:'site_limit',message:'Free supports up to 10 sites.'};s={id:domain,name:domain.split('.')[0],startURLString:`https://${domain}`,category:row.profile?.interests?.[0]??'localGig',goalTemplate:'Find work matching my profile.'};host.put('sites',s.id,s);host.put('accountStates',s.id,{siteID:s.id,state:'proposed'});}
         return draftSite(s,operationId);
       }
       if(name==='join_site')return draftSite(site(host,args.siteId),operationId);

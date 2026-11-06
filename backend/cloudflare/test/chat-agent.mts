@@ -145,6 +145,21 @@ test('real service adapter adds both drafts idempotently without external signup
  const h=hostFixture();const first=await h.services.execute('add_site',{domain:'contra.com'},'operation');await h.services.execute('add_site',{domain:'contra.com'},'other-operation');await h.services.execute('add_site',{domain:'toptal.com'},'toptal');assert.equal(h.tasks.length,2);assert.equal(h.tasks[0].status,'awaiting_approval');assert.equal(h.host.rows('sites').length,2);
  const p=await h.services.prepare('approve_task',{taskId:first.taskId});assert.match(p.title,/contra/);assert.ok(p.details?.displayName);h.tasks[0].drafted_payload.displayName='Changed';const changed=await h.services.prepare('approve_task',{taskId:first.taskId});assert.notEqual(changed.fingerprint,p.fingerprint);
 });
+test('free site cap counts only approved sites, not every site row',async()=>{
+ const h=hostFixture();
+ const approved=['watching','profileLive','hasAccount'];
+ for(let i=0;i<9;i++){const id=`site${i}.example`;h.host.put('sites',id,{id,name:`Site ${i}`,startURLString:`https://${id}`});h.host.put('accountStates',id,{siteID:id,state:approved[i%3]});}
+ // Proposed, stopped, and stateless rows must not consume the cap.
+ for(const [id,state] of [['new.example','proposed'],['old.example','stopped']]){h.host.put('sites',id,{id,name:id,startURLString:`https://${id}`});h.host.put('accountStates',id,{siteID:id,state});}
+ h.host.put('sites','ghost.example',{id:'ghost.example',name:'ghost',startURLString:'https://ghost.example'});
+ assert.equal(h.host.rows('sites').length,12);
+ const added=await h.services.execute('add_site',{domain:'fresh.example'},'op-fresh') as any;
+ assert.notEqual(added.status,'site_limit');
+ // Once ten sites are approved, the next new site still trips the cap.
+ h.host.put('accountStates','fresh.example',{siteID:'fresh.example',state:'watching'});
+ const blocked=await h.services.execute('add_site',{domain:'blocked.example'},'op-blocked') as any;
+ assert.equal(blocked.status,'site_limit');
+});
 test('service adapter publishes assistant replies to the push hook and never user messages',async()=>{
  const h=hostFixture();const notified:any[]=[];
  (h.host as any).notifyChatMessage=(e:any)=>{notified.push(e);};
