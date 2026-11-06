@@ -3,12 +3,16 @@ import Foundation
 /// Brief 07 push routing contract, shared by the app shell and its
 /// tests. The server payload carries a descriptive title + body
 /// plus one reference (`hyggeRoute`): "task/<uuid>",
-/// "feed/<uuid>", "email/<uuid>", or "home" — each naming the
-/// exact element the tap opens. Parsing lives here so the landing
-/// rules are unit-tested without UIKit; anything unknown or
-/// malformed lands on Home instead of failing.
+/// "chat/<uuid>", "feed/<uuid>", "email/<uuid>", or "home" — each
+/// naming the exact element the tap opens. "chat" opens the bare
+/// conversation (a chat message with no task, e.g. new work);
+/// "feed" survives only for payloads already sent — nothing plans
+/// a feed push anymore. Parsing lives here so the landing rules
+/// are unit-tested without UIKit; anything unknown or malformed
+/// lands on Home instead of failing.
 public enum PushRoute: Equatable, Sendable {
     case task(UUID)
+    case chat(UUID)
     case feedItem(UUID)
     case email(UUID)
     case home
@@ -24,6 +28,7 @@ public enum PushDeepLink {
         guard parts.count == 2, let id = UUID(uuidString: parts[1]) else { return .home }
         switch parts[0] {
         case "task": return .task(id)
+        case "chat": return .chat(id)
         case "feed": return .feedItem(id)
         case "email": return .email(id)
         default: return .home
@@ -37,11 +42,12 @@ public enum PushDeepLink {
         guard let ref, let id = UUID(uuidString: ref) else { return .home }
         switch refKind {
         case "task": return .task(id)
+        case "chat": return .chat(id)
         case "feed": return .feedItem(id)
         case "email": return .email(id)
         default: break
         }
-        if kind == "new_work" { return .feedItem(id) }
+        if kind == "new_work" { return .chat(id) }
         if kind == "message_waiting" { return .email(id) }
         return .home
     }

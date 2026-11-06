@@ -1,19 +1,22 @@
 /// Push notifications (Brief 07, descriptive format by the user's
 /// call 2026-11-03): device-token registration, the APNs sender,
-/// and the trigger rules. Transactional only — a task entering
-/// `needsHuman`, a scheduled-scan batch (new work or a blocked
-/// look), and tracked-site mail mentioning a client message are
-/// the only events that can ever notify. There is no digest, no
-/// marketing path, and no other caller.
+/// and the trigger rules. Transactional only — a task entering a
+/// help-awaiting state with a chat-routed help, a new-work chat
+/// message from a scheduled scan, a mail question asked in chat,
+/// an in-conversation agent reply, and tracked-site mail mentioning
+/// a client message are the only events that can ever notify. A push
+/// only ever comes from a chat message (policy Nov 5, 2026): feed
+/// items never push, and a feed card alone never pushes. There is
+/// no digest, no marketing path, and no other caller.
 ///
 /// Format: messages from Hygge wear the sender's name (`Hygge`)
-/// with the actual message as the body; feed pushes name the
-/// content (site, listing, the listing's own pay words). Bodies
-/// are built only by the bounded builders below: text is
-/// whitespace-collapsed, code-shaped digit runs are redacted, and
-/// everything truncates at a word boundary. A code, a login
-/// detail, or an earnings claim still has no path in — pay
-/// appears only as the listing's own label.
+/// with the actual message as the body; the new-work chat push
+/// carries the composed offer message's own words. Bodies are built
+/// only by the bounded builders below: text is whitespace-collapsed,
+/// code-shaped digit runs are redacted, and everything truncates at
+/// a word boundary. A code, a login detail, or an earnings claim
+/// still has no path in — pay appears only as the listing's own
+/// label.
 ///
 /// Tokens are personal data: they live in D1 `device_tokens` keyed
 /// to the owning user, are never logged, and prove nothing about
@@ -31,7 +34,11 @@ import type { ScanTickSummary } from "./scan.ts";
 // ---- trigger vocabulary ------------------------------------------------
 
 export type PushKind = "needs_you" | "new_work" | "message_waiting";
-export type PushRefKind = "task" | "feed" | "email";
+/// Where the tap lands: a task's chat, the bare conversation, a
+/// feed item, or a filed mail. `feed` survives only for payloads
+/// already sent; nothing in this codebase plans a feed push
+/// anymore (policy Nov 5, 2026 — feed items never push).
+export type PushRefKind = "task" | "chat" | "feed" | "email";
 
 export interface PushEvent {
   kind: PushKind;
@@ -59,7 +66,14 @@ export function pushSafeText(text: string, maxChars = PUSH_BODY_MAX_CHARS): stri
 }
 
 /// A chat message from Hygge: the sender's name, then the message
-/// itself — the same words the thread shows.
+/// itself — the same words the thread shows. The fallback body
+/// ("Something needs you.") is a documented carve-out, not a
+/// composed message: it fires only when a caller builds this event
+/// with no message text at all. Every current caller passes the
+/// message's own words (saveTask's push is gated on the mirror row
+/// existing, so a body-less event cannot come from a decision
+/// help); the fallback exists so a malformed call still notifies
+/// rather than silently dropping. See docs/push-notifications.md.
 export function needsHumanEvent(taskId: string, message?: string): PushEvent {
   return {
     kind: "needs_you", refKind: "task", refId: taskId,
@@ -68,24 +82,51 @@ export function needsHumanEvent(taskId: string, message?: string): PushEvent {
   };
 }
 
-/// Tracked-site mail mentioning a client message. The body is the
-/// site's own (already code-redacted) subject line, attributed —
-/// Hygge relays that mail arrived; it has not read the message.
-export function messageWaitingEvent(
-  mailId: string, detail: { siteName: string; subject: string },
-): PushEvent {
-  const subject = detail.subject?.trim() || "You may have a new message";
+/// Any agent-written chat message that is not one of the named
+/// triggers below: a mail question, an in-conversation reply. The
+/// body is the message's own words; the tap opens the message
+/// itself (refKind "chat"). Every chat message pushes — no
+/// exceptions — so every such message is built through this event.
+/// The fallback body is the same documented carve-out as
+/// needsHumanEvent: it fires only when no message text is given,
+/// which no current caller does.
+export function chatMessageEvent(messageId: string, body: string): PushEvent {
   return {
-    kind: "message_waiting", refKind: "email", refId: mailId,
+    kind: "needs_you", refKind: "chat", refId: messageId,
     title: "Hygge",
-    body: `${detail.siteName} emailed: “${subject}”`,
+    body: body?.trim() ? body : "Something needs you.",
+  };
+}
+
+/// Tracked-site mail mentioning a client message. The push is
+/// backed by a chat message (policy Nov 5, 2026): the tap opens
+/// that message, whose embedded mail card opens the filed mail —
+/// never the filed mail directly, and never a push without a
+/// message. The body is the backing message's own (composed)
+/// words; the site's subject is context for the composer, not the
+/// body. At most one per sender per day (enforced at the call site).
+/// The fallback body is the same documented carve-out as
+/// needsHumanEvent: it fires only when no message text is given,
+/// which no current caller does.
+export function messageWaitingEvent(messageId: string, body: string): PushEvent {
+  return {
+    kind: "message_waiting", refKind: "chat", refId: messageId,
+    title: "Hygge",
+    body: body?.trim() ? body : "You may have a new message",
   };
 }
 
 /// A task run notifies only on a *fresh* entry into needsHuman, and
-/// never for scheduled-scan missions: scan episodes notify once per
-/// tick through `planTickNotifications`, so the same episode can
-/// never produce two pushes.
+/// never for scheduled-scan missions: scan episodes stay in the
+/// feed, and a tick's only push is the new-work chat message
+/// planned by `planTickNotifications` below.
+///
+/// Retained as a tested utility (no production caller — the live
+/// gate is shouldNotifyDecisionHelp below, which extends this
+/// predicate to failed-with-help): its tests pin the fresh-entry
+/// semantics both gates share, so a future change to either is
+/// caught against the same cases. Do not delete it as dead code
+/// without moving its cases onto shouldNotifyDecisionHelp first.
 export function shouldNotifyNeedsHuman(
   previousStatus: string | null | undefined,
   nextStatus: string | null | undefined,
@@ -95,45 +136,57 @@ export function shouldNotifyNeedsHuman(
   return nextStatus === "needsHuman" && previousStatus !== "needsHuman";
 }
 
-/// At most ONE push per scan tick, whatever the tick found. A
-/// needs-you episode outranks new work (it blocks future scans);
-/// the new items are still waiting in the feed when the user opens
-/// the app from the needs-you push.
+/// The decision-card push gate (policy Nov 5, 2026): a task freshly
+/// enters a help-awaiting state — `needsHuman`, or `failed` with a
+/// help to answer (a failed task's recovery card is a decision card
+/// too: the app treats `failed` as needing chat help, and the
+/// mirror writes it a chat message, so the message must push like
+/// any other). Never for scheduled-scan missions. The caller ANDs
+/// this with helpRoutesToChat: a help-less task has no message to
+/// push about, so it never pushes.
+export function shouldNotifyDecisionHelp(
+  previousStatus: string | null | undefined,
+  nextStatus: string | null | undefined,
+  opts: { scheduledScan?: boolean } = {},
+): boolean {
+  if (opts.scheduledScan) return false;
+  if (nextStatus === "needsHuman") return previousStatus !== "needsHuman";
+  if (nextStatus === "failed") return previousStatus !== "needsHuman" && previousStatus !== "failed";
+  return false;
+}
+
+/// The new-work chat message, as a push: it opens the conversation
+/// the message lives in (refKind "chat"), never the feed item
+/// directly — the listing itself is reached from the message's
+/// embedded card. The body is the composed message's own words.
+/// The fallback body is the same documented carve-out as
+/// needsHumanEvent: it fires only when no message text is given,
+/// which planTickNotifications never does (it requires the
+/// composed text to plan anything).
+export function newWorkChatEvent(messageId: string, body: string): PushEvent {
+  return {
+    kind: "new_work", refKind: "chat", refId: messageId,
+    title: "Hygge",
+    body: body?.trim() ? body : "New work is waiting in your feed.",
+  };
+}
+
+/// At most ONE push per scan tick, whatever the tick found — and
+/// only for new work, as a chat message. Needs-you episodes and
+/// bare feed surfacing never push: they wait in the feed until
+/// the user opens the app. A tick with nothing new plans nothing.
+/// The push carries the composed offer message's text: a tick
+/// whose message was never written (composition failed, or the
+/// listing was already told about once) plans no push — a push
+/// only ever comes from a chat message.
 export function planTickNotifications(
-  summary: Pick<ScanTickSummary, "paused" | "surfacedIds" | "needsYouItemIds" | "firstSurfaced" | "firstNeedsYou">,
+  summary: Pick<ScanTickSummary, "paused" | "surfacedIds" | "needsYouItemIds" | "offerChatMessageId" | "offerChatMessageText">,
 ): PushEvent[] {
   if (summary.paused) return [];
-  const needsYou = summary.needsYouItemIds?.[0];
-  if (needsYou) {
-    const detail = summary.firstNeedsYou;
-    return [{
-      kind: "needs_you", refKind: "feed", refId: needsYou,
-      title: detail ? `${detail.siteName} needs you` : "Hygge needs you",
-      body: detail?.title || "Something in your feed needs you.",
-    }];
-  }
-  const surfaced = summary.surfacedIds?.[0];
-  if (surfaced) {
-    const first = summary.firstSurfaced;
-    if (!first) {
-      return [{
-        kind: "new_work", refKind: "feed", refId: surfaced,
-        title: "New work found", body: "Fresh work is waiting in your feed.",
-      }];
-    }
-    const parts = [
-      first.title,
-      first.payLabel && first.payLabel !== "See listing" ? first.payLabel : "",
-      first.isRemote ? "Remote" : (first.locationLabel && first.locationLabel !== "See listing" ? first.locationLabel : ""),
-    ].filter(Boolean);
-    const more = (summary.surfacedIds?.length ?? 1) - 1;
-    return [{
-      kind: "new_work", refKind: "feed", refId: surfaced,
-      title: `New work on ${first.siteName}`,
-      body: parts.join(" · ") + (more > 0 ? ` (+${more} more)` : ""),
-    }];
-  }
-  return [];
+  const messageId = summary.offerChatMessageId;
+  const text = summary.offerChatMessageText;
+  if (!messageId || !text || !(summary.surfacedIds?.length ?? 0)) return [];
+  return [newWorkChatEvent(messageId, text)];
 }
 
 // ---- payload -------------------------------------------------------------
@@ -149,7 +202,24 @@ export interface PushPayload {
 /// title+body plus the reference the tap opens. No badge: the
 /// server does not keep a badge count, and inventing one would
 /// drift from what the feed actually shows.
-export function buildPushPayload(event: PushEvent): PushPayload {
+///
+/// Runtime validation (defense in depth — `PushRefKind` is
+/// compile-time only): a malformed event builds NO payload.
+/// An unknown refKind or a refId that cannot be a route segment
+/// (empty, or containing a slash/whitespace) returns null and is
+/// logged, instead of emitting a bogus route the app would land
+/// on Home from. Callers treat null as "do not send".
+const VALID_REF_KINDS: ReadonlySet<string> = new Set(["task", "chat", "feed", "email"]);
+export function buildPushPayload(event: PushEvent): PushPayload | null {
+  if (!VALID_REF_KINDS.has(event.refKind)) {
+    console.warn(`buildPushPayload: dropping event with unknown refKind ${JSON.stringify(String(event.refKind))} (kind ${event.kind})`);
+    return null;
+  }
+  if (event.refId !== null && event.refId !== undefined
+      && (typeof event.refId !== "string" || !event.refId.trim() || /[\s/]/.test(event.refId))) {
+    console.warn(`buildPushPayload: dropping event with malformed refId for refKind ${event.refKind} (kind ${event.kind})`);
+    return null;
+  }
   const route = event.refId ? `${event.refKind}/${event.refId}` : "home";
   return {
     aps: {
@@ -504,6 +574,12 @@ export async function notifyUser(
 
   const fetchFn = opts.fetchFn ?? fetch;
   const payload = buildPushPayload(event);
+  if (!payload) {
+    // Malformed event (bad refKind/refId): nothing is sent, and
+    // the drop is logged so a bad producer is visible server-side.
+    await db.logAttempt(userId, event.kind, "invalid_event").catch(() => {});
+    return { outcome: "failed", ...zero };
+  }
   let jwt: string;
   try {
     jwt = await (opts.jwtCache ?? apnsJwtCache).token(config, opts.nowMs);

@@ -172,6 +172,11 @@ struct FeedTaskReview: View {
                     Text(store.siteName(id: task.siteID)).font(.subheadline.weight(.medium)).foregroundStyle(HyggeTheme.sageDeep)
                 }
                 .feedCardDismissRegion()
+                // Display-only expiry: the draft stays readable, but
+                // every action on it renders disabled below.
+                if task.help?.isExpired == true {
+                    Text("Expired").font(.caption.weight(.semibold)).foregroundStyle(HyggeTheme.secondary)
+                }
                 if task.needsChatHelp {
                     Text(task.help?.message ?? "Hygge needs your help to continue.").foregroundStyle(HyggeTheme.ink)
                         .fixedSize(horizontal: false, vertical: true)
@@ -184,6 +189,7 @@ struct FeedTaskReview: View {
                                     store.tasks.first { $0.id == taskID }?.draftedPayload[key] ?? ""
                                 }, set: { store.updatePayload(taskID: taskID, key: key, value: $0) }), axis: .vertical)
                                     .foregroundStyle(HyggeTheme.ink).lineLimit(2...12)
+                                    .disabled(task.help?.isExpired == true)
                             } else { Text(task.draftedPayload[key] ?? "").foregroundStyle(HyggeTheme.ink) }
                         }.padding(18).hyggeCard(radius: 18)
                     }
@@ -200,14 +206,14 @@ struct FeedTaskReview: View {
             if let task {
                 if task.needsChatHelp {
                     FeedPrimaryButton(title: "Continue in chat") {
-                        store.surfaceTaskHelp(taskID: task.id); store.conversationTaskID = task.id; close()
-                    }
+                        store.surfaceTaskHelp(taskID: task.id, userInitiated: true); store.conversationTaskID = task.id; close()
+                    }.disabled(task.help?.isExpired == true)
                 } else if task.status == .awaitingApproval || task.status == .draft {
                     FeedPrimaryButton(title: submitting ? "Starting…" : actionTitle(task)) {
                         guard !submitting else { return }; submitting = true
                         Task { await store.approveAndRun(taskID: taskID) }
                         close()
-                    }.disabled(submitting || store.isPaused)
+                    }.disabled(submitting || store.isPaused || task.help?.isExpired == true)
                 } else if task.browserSessionID != nil {
                     FeedPrimaryButton(title: "Watch live browser") { openBrowser() }
                 }

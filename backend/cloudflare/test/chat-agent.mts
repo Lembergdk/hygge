@@ -145,6 +145,23 @@ test('real service adapter adds both drafts idempotently without external signup
  const h=hostFixture();const first=await h.services.execute('add_site',{domain:'contra.com'},'operation');await h.services.execute('add_site',{domain:'contra.com'},'other-operation');await h.services.execute('add_site',{domain:'toptal.com'},'toptal');assert.equal(h.tasks.length,2);assert.equal(h.tasks[0].status,'awaiting_approval');assert.equal(h.host.rows('sites').length,2);
  const p=await h.services.prepare('approve_task',{taskId:first.taskId});assert.match(p.title,/contra/);assert.ok(p.details?.displayName);h.tasks[0].drafted_payload.displayName='Changed';const changed=await h.services.prepare('approve_task',{taskId:first.taskId});assert.notEqual(changed.fingerprint,p.fingerprint);
 });
+test('service adapter publishes assistant replies to the push hook and never user messages',async()=>{
+ const h=hostFixture();const notified:any[]=[];
+ (h.host as any).notifyChatMessage=(e:any)=>{notified.push(e);};
+ const reply={sequence:1,id:'reply-1',kind:'assistant',value:'Both setup drafts are ready.',at:new Date().toISOString()};
+ h.services.publishMessage(reply);
+ assert.equal(notified.length,1);
+ assert.equal(notified[0].id,'reply-1');
+ assert.equal(h.host.rows('messages').length,1, "the reply row is still written");
+ const user={sequence:2,id:'user-1',kind:'user',value:'Add both',at:new Date().toISOString()};
+ h.services.publishMessage(user);
+ assert.equal(notified.length,1, "a user message never notifies");
+ assert.equal(h.host.rows('messages').length,2);
+ // A throwing notifier must never fail the publish itself.
+ (h.host as any).notifyChatMessage=()=>{throw new Error('push down');};
+ h.services.publishMessage({sequence:3,id:'reply-2',kind:'assistant',value:'Still here.',at:new Date().toISOString()});
+ assert.equal(h.host.rows('messages').length,3);
+});
 test('service adapter enforces approved site, pause and free-plan rest for discovery',async()=>{
  const h=hostFixture();h.host.put('sites','rover',{id:'rover',name:'Rover',startURLString:'https://rover.com'});
  assert.equal((await h.services.execute('scan_site',{siteId:'rover'},'scan')).status,'not_approved');h.host.put('accountStates','rover',{state:'watching'});

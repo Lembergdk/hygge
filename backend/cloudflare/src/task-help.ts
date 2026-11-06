@@ -1,10 +1,123 @@
 // Conversation-first handoffs, grounded suggestions, and exact-action consent.
 // Kept pure so the same policy is tested independently of storage and UI.
-export function help(kind: string, message: string, questions: any[] = [], actionLabel = "Continue") {
-  return { id: crypto.randomUUID(), kind, message, questions, actionLabel };
+//
+/// A help's deadline is an OPTIONAL EXPIRY TIME, FOR DISPLAY
+/// ONLY (policy settled Nov 5, 2026, simplified Nov 5, 22:08 CST):
+/// it never drives routing, escalation, or enforcement — every
+/// decision card goes to chat anyway, so an expiry cannot gate
+/// anything. The agent sets it where applicable (session-related
+/// cards, client/job-site deadlines); never-deadline cases (e.g.
+/// onboarding questions) never get one. There is no "short"
+/// concept and no window: a deadline is a real expiration date on
+/// the card, full stop. Garbage, past, and unparseable dates are
+/// no deadline at all (see parseHelpDeadline). A deadline that
+/// lapses after it was set renders as a past "Expires" date on a
+/// still-live card — accepted as a display detail for now.
+export function parseHelpDeadline(value: unknown, now: Date = new Date()): Date | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = new Date(value.trim());
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.getTime() > now.getTime() ? parsed : null;
+}
+
+/// Deadline producers (the agent is the deadline producer — it
+/// defines the deadline from page/client content using its own
+/// reasoning; help() validates it, see above):
+/// - SET a deadline: approval (agent.ts needsActionApproval path,
+///   from decision.deadline), verification from a model needsHuman
+///   decision (agent.ts, decision.deadline — e.g. a code expiry the
+///   page states), information (informationHelp, only when the
+///   agent surfaces one via decision.deadline).
+/// - NEVER set one: credentials (a stale login does not expire),
+///   recovery (a session ending carries no expiry), onboarding/
+///   profile questions (never wanted), checkpoint-budget
+///   verification (askAfterTrying — no expiry is knowable),
+///   human-takeover verification (user-sandbox.ts), and the
+///   workspace runner's recoveryHelp (no page content to read one
+///   from). A help built without a deadline has deadline null, and
+///   the card shows no expiration date for it.
+
+export function help(kind: string, message: string, questions: any[] = [], actionLabel = "Continue",
+                     deadline: string | null = null, opts: { staticText?: boolean } = {}) {
+  // The deadline is agent-set from page/client content (an offer
+  // expiry, an application closing date, a code expiry) — never
+  // invented. Validate it at construction: garbage or past dates
+  // are dropped (and logged) rather than stored, so a malformed
+  // model value can never reach the card as an expiration date.
+  // `staticText` marks a help whose message is a hardcoded literal
+  // rather than model-composed text (recovery/verification/
+  // credentials fallbacks, checkpoint and takeover wording). The
+  // mirror (saveTask) composes the chat message for a static help
+  // from its facts via chat-composer.ts instead of relaying the
+  // literal verbatim; the literal stays only as the logged
+  // fallback when composition fails. Model-composed helps carry no
+  // marker and relay verbatim.
+  let validDeadline: string | null = null;
+  if (deadline !== null && deadline !== undefined) {
+    const parsed = parseHelpDeadline(deadline);
+    if (parsed) validDeadline = parsed.toISOString();
+    else console.warn(`help: dropping invalid deadline ${JSON.stringify(String(deadline).slice(0, 80))} for kind ${kind}`);
+  }
+  return { id: crypto.randomUUID(), kind, message, questions, actionLabel, deadline: validDeadline,
+    ...(opts.staticText ? { staticText: true } : {}) };
+}
+
+/// Feed/chat routing for a task help (policy settled Nov 5, 2026,
+/// as revised Nov 5, 21:07 CST): EVERY decision card warrants a
+/// chat message linking to the card, and every chat message
+/// generates a push. So every well-formed decision kind —
+/// information, approval, verification, credentials, recovery —
+/// routes to chat. The deadline no longer gates whether a decision
+/// card gets a message (all do); the deadline is the card's
+/// expiration date, display only — it never escalates or enforces
+/// anything.
+///
+/// A help object with an unknown or missing kind is still a
+/// decision card by construction — it is routed to chat and flagged
+/// server-side (logged) rather than silently dropped or silently
+/// routed. A null help (help-less needsHuman) carries no content
+/// any message could be composed about, so it gets NO chat message
+/// and NO push: a push only ever comes from a chat message, and a
+/// feed card alone never pushes.
+export function helpRoutesToChat(help: any): boolean {
+  if (!help) return false;
+  const known = ["information", "approval", "verification", "credentials", "recovery"];
+  if (typeof help.kind !== "string" || !known.includes(help.kind)) {
+    console.warn(`helpRoutesToChat: unknown help kind ${JSON.stringify(String(help.kind ?? null)).slice(0, 80)} (id ${String(help.id ?? "?").slice(0, 36)}) — routing to chat as a decision card by construction; investigate the producer`);
+    return true;
+  }
+  return true;
+}
+
+/// The chat message relaying a decision help: the help's own
+/// words, verbatim — the help message plus its first question. For
+/// a model-composed help both were written by the mission model
+/// from live page context (agent.ts), so the mirror relays; it
+/// does not rephrase, so the message and the feed card can never
+/// disagree. For a help marked `staticText` (a hardcoded literal,
+/// see help()), this relay is only the immediately-written text:
+/// saveTask composes the message from the help's facts via
+/// chat-composer.ts and replaces this row's text with the composed
+/// version, falling back to this relay (logged) when composition
+/// fails. The old `${title}: ` prefix is gone from the server
+/// mirror (the card carries the title). This is the single text
+/// shape for the mirror — saveTask (user-sandbox.ts) and the
+/// workspace projector (workspace-task-projection.ts) both use it,
+/// so the two mirror paths cannot silently diverge. Null when
+/// there is no message to relay.
+export function decisionHelpMessageText(task: any): string | null {
+  const help = task?.help;
+  if (!help || typeof help.message !== "string" || !help.message.trim()) return null;
+  const firstQuestion = typeof help.questions?.[0]?.text === "string" && help.questions[0].text.trim()
+    ? help.questions[0].text.trim() : "";
+  return firstQuestion ? `${help.message.trim()}\n\n${firstQuestion}` : help.message.trim();
 }
 
 export function informationHelp(decision: any, draft: Record<string, string>) {
+  // An information help carries a deadline only when the agent
+  // surfaces one (decision.deadline, from page/client content) —
+  // onboarding and profile questions never do.
+  const deadline = typeof decision?.deadline === "string" ? decision.deadline : null;
   const raw = Array.isArray(decision.questions) ? decision.questions.slice(0, 5) : [];
   const questions = raw.map((q: any) => {
     const text = String(typeof q === "string" ? q : q.text ?? "").slice(0, 400);
@@ -16,10 +129,17 @@ export function informationHelp(decision: any, draft: Record<string, string>) {
     return { text, suggestions: [...new Set(suggestions)] };
   }).filter((q: any) => q.text);
   if (questions.some((q: any) => /password|secret|passcode|one.time code|verification code/i.test(q.text))) {
-    return help("verification", "This sign-in step needs you. Enter the requested secret only on the site, never in chat.", [], "Complete check");
+    return help("verification", "This sign-in step needs you. Enter the requested secret only on the site, never in chat.", [], "Complete check", deadline, { staticText: true });
   }
-  if (!questions.length) questions.push({ text: "What should I use for this step?", suggestions: [] });
-  return help("information", String(decision.reason || "I need a detail to continue."), questions);
+  const usedFallbackQuestion = !questions.length;
+  if (usedFallbackQuestion) questions.push({ text: "What should I use for this step?", suggestions: [] });
+  // Static when the message is the literal fallback (no model
+  // reason) or the question is the literal fallback (the model
+  // asked nothing): the mirror composes from these facts instead
+  // of relaying the literal. A model reason with model questions
+  // relays verbatim.
+  const staticText = !decision.reason || usedFallbackQuestion;
+  return help("information", String(decision.reason || "I need a detail to continue."), questions, "Continue", deadline, staticText ? { staticText: true } : {});
 }
 
 export function actionFingerprint(decision: any, snapshot: any, draft: any): string {
@@ -65,7 +185,8 @@ export function applyHelpReply(task: any, body: any): string | null {
     }
     const remaining = pending.questions.filter((q: any) => !provided.includes(q));
     if (remaining.length) {
-      task.help = help("information", "Thanks. One more detail before I continue.", remaining);
+      task.help = help("information", "Thanks. One more detail before I continue.", remaining,
+        "Continue", pending.deadline ?? null, { staticText: true });
       task.information_requests = remaining.map((q: any) => q.text);
       return null;
     }
@@ -183,7 +304,7 @@ export function reconcileEndedSession(task: any, sessionAvailable: boolean, acti
   task.checkpoint = null;
   task.information_requests = [];
   task.failure = { code: "session_ended" };
-  task.help = help("recovery", "This browser session ended before we finished. I can open a new session and check where we left off, or you can stop here.", [], "Open new session");
+  task.help = help("recovery", "This browser session ended before we finished. I can open a new session and check where we left off, or you can stop here.", [], "Open new session", null, { staticText: true });
   return true;
 }
 

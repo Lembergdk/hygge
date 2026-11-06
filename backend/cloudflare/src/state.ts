@@ -100,6 +100,35 @@ export function normalizeId(id: unknown): string {
   return String(id ?? "").trim().toLowerCase();
 }
 
+/// The transcript chain (strict previous_response_id policy, Nov 5,
+/// 2026): every new chat message references the previous last
+/// message in the chat. The row field is `previousResponseId` — the
+/// camelCase twin of the Responses API's `previous_response_id`,
+/// the same convention as ChatStore meta's `responseId` (the
+/// provider-side chain, which still advances only on real agent
+/// turns; this field chains the transcript itself). Its value is
+/// the id of the message written immediately before this one,
+/// resolved from the live transcript AT WRITE TIME — never a cached
+/// id — so the chain survives imports, resets, and concurrent
+/// writers. Null only when the transcript is empty (the first
+/// message has no predecessor). "Last" is latest `createdAt`, the
+/// order the app displays; ties break by id so the choice is
+/// deterministic. List order is NOT used (listRows sorts by
+/// updatedAt, which an in-place text upgrade changes). This holds
+/// only because every writer stamps createdAt with the write time
+/// — mail questions included, never the mail's receivedAt — so
+/// latest-createdAt IS the last message written.
+export function lastChatMessageId(rows: Array<{ id: string; data: any }>): string | null {
+  let best: { id: string; createdAt: string } | null = null;
+  for (const row of rows) {
+    const createdAt = String((row.data as Record<string, unknown> | null)?.createdAt ?? "");
+    if (!best || createdAt > best.createdAt || (createdAt === best.createdAt && row.id > best.id)) {
+      best = { id: row.id, createdAt };
+    }
+  }
+  return best?.id ?? null;
+}
+
 /// True when an incoming write should replace what is stored:
 /// newest `updated_at` wins; equal timestamps let the later write
 /// win (last-write-wins); a missing stored row always applies.

@@ -14,6 +14,10 @@ struct SwipeFeedCard<Content: View>: View {
     let chat: () -> Void
     let dismiss: () -> Void
     var allowsDismissal = true
+    /// False when the card's action is gone (e.g. an expired
+    /// decision): the rightward swipe never reveals chat, and no
+    /// chat action is offered. Dismissal is unaffected.
+    var allowsChat = true
     @ViewBuilder var content: Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var offset: CGFloat = 0
@@ -47,13 +51,17 @@ struct SwipeFeedCard<Content: View>: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { open() }
-            .accessibilityAction(named: Text("Chat about this")) { chat() }
             .accessibilityActions {
+                if allowsChat { Button("Chat about this", action: chat) }
                 if allowsDismissal { Button("Dismiss", action: dismiss) }
             }
-            .accessibilityHint(allowsDismissal
-                ? "Opens details. Swipe right to chat about this, left to dismiss."
-                : "Opens details. Swipe right to chat about this.")
+            .accessibilityHint(allowsChat
+                ? (allowsDismissal
+                    ? "Opens details. Swipe right to chat about this, left to dismiss."
+                    : "Opens details. Swipe right to chat about this.")
+                : (allowsDismissal
+                    ? "Opens details. Swipe left to dismiss."
+                    : "Opens details."))
             .onChange(of: openCardID) { _, value in if value != id { close() } }
     }
     private var rotation: Double {
@@ -67,7 +75,7 @@ struct SwipeFeedCard<Content: View>: View {
     private func beginDrag() { origin = offset; openCardID = id }
     private func drag(_ translation: CGFloat) {
         guard !committing else { return }
-        offset = min(width, max(allowsDismissal ? -width : 0, origin + translation))
+        offset = min(allowsChat ? width : 0, max(allowsDismissal ? -width : 0, origin + translation))
         let next = Double(abs(offset)) >= FeedSwipe.threshold(width: Double(width))
         if next != armed {
             armed = next

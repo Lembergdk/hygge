@@ -7,9 +7,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   APNS_JWT_TTL_MS, ApnsJwtCache, MemoryPushDb, apnsConfigFromEnv, apnsHostFor,
-  buildPushPayload, consecutiveFailures, handleDeviceTokenRequest, importApnsKey,
-  isBadTokenResult, messageWaitingEvent, needsHumanEvent, normalizeDeviceToken, notifyUser,
-  pemToPkcs8, planTickNotifications, sendToToken, shouldNotifyNeedsHuman,
+  buildPushPayload, chatMessageEvent, consecutiveFailures, handleDeviceTokenRequest, importApnsKey,
+  isBadTokenResult, messageWaitingEvent, needsHumanEvent, newWorkChatEvent, normalizeDeviceToken, notifyUser,
+  pemToPkcs8, planTickNotifications, sendToToken, shouldNotifyDecisionHelp, shouldNotifyNeedsHuman,
   signApnsJwt, type ApnsConfig, type PushFetch,
 } from "../src/push.ts";
 
@@ -110,7 +110,7 @@ test("APNs config: missing pieces mean unconfigured; host follows environment", 
 // ---- payload --------------------------------------------------------------
 
 test("payload is descriptive title + body + reference, still with no room for secrets", () => {
-  const needs = buildPushPayload(needsHumanEvent("task-1", "Rover: I need a detail to continue. Which dates are you free?"));
+  const needs = buildPushPayload(needsHumanEvent("task-1", "Rover: I need a detail to continue. Which dates are you free?"))!;
   assert.deepEqual(Object.keys(needs).sort(), ["aps", "hyggeKind", "hyggeRef", "hyggeRoute"]);
   assert.deepEqual(Object.keys(needs.aps).sort(), ["alert", "sound"]);
   assert.deepEqual(Object.keys(needs.aps.alert).sort(), ["body", "title"]);
@@ -118,22 +118,58 @@ test("payload is descriptive title + body + reference, still with no room for se
   assert.equal(needs.aps.alert.body, "Rover: I need a detail to continue. Which dates are you free?");
   assert.equal(needs.hyggeRoute, "task/task-1");
   // A code-shaped run never rides a push, whatever the source text said.
-  const coded = buildPushPayload(needsHumanEvent("task-2", "Your code is 731904, enter it now"));
+  const coded = buildPushPayload(needsHumanEvent("task-2", "Your code is 731904, enter it now"))!;
   assert.equal(JSON.stringify(coded).includes("731904"), false);
   // Long bodies truncate at a word boundary.
-  const long = buildPushPayload(needsHumanEvent("task-3", "x ".repeat(200)));
+  const long = buildPushPayload(needsHumanEvent("task-3", "x ".repeat(200)))!;
   assert.ok(long.aps.alert.body.length <= 181 && long.aps.alert.body.endsWith("…"), long.aps.alert.body);
-  const mail = buildPushPayload(messageWaitingEvent("mail-1", { siteName: "Rover", subject: "New message from Alex" }));
+  // Tracked-site mail pushes are backed by a chat message: the tap
+  // opens the message, whose embedded mail card opens the filed
+  // mail — never the filed mail directly.
+  const mail = buildPushPayload(messageWaitingEvent("msg-1", "Rover wrote about your booking — there's a new message waiting for you."))!;
   assert.equal(mail.aps.alert.title, "Hygge");
-  assert.match(mail.aps.alert.body, /Rover emailed/);
-  assert.equal(mail.hyggeRoute, "email/mail-1");
-  assert.equal(buildPushPayload({ kind: "new_work", refKind: "feed", refId: null, title: "New work found", body: "Fresh work is waiting in your feed." }).hyggeRoute, "home");
-  for (const payload of [needs, mail]) {
+  assert.equal(mail.hyggeKind, "message_waiting");
+  assert.equal(mail.hyggeRoute, "chat/msg-1");
+  // A chat message's push opens the message itself.
+  const chat = buildPushPayload(chatMessageEvent("msg-2", "That email lists two roles — which job site do they belong to?"))!;
+  assert.equal(chat.hyggeKind, "needs_you");
+  assert.equal(chat.hyggeRoute, "chat/msg-2");
+  assert.equal(buildPushPayload({ kind: "new_work", refKind: "feed", refId: null, title: "New work found", body: "Fresh work is waiting in your feed." })!.hyggeRoute, "home");
+  for (const payload of [needs, mail, chat]) {
     const serialized = JSON.stringify(payload).toLowerCase();
     for (const banned of ["password", "secret", "token", "credential"]) {
       assert.equal(serialized.includes(banned), false, `payload must not contain ${banned}: ${serialized}`);
     }
   }
+});
+
+test("payload validation: a malformed event builds no payload instead of a bogus route", () => {
+  const warnings: unknown[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+  try {
+    assert.equal(buildPushPayload({ kind: "new_work", refKind: "bogus" as never, refId: "m1", title: "Hygge", body: "New work" }), null);
+    assert.equal(buildPushPayload({ kind: "new_work", refKind: "chat", refId: "has/slash", title: "Hygge", body: "New work" }), null);
+    assert.equal(buildPushPayload({ kind: "new_work", refKind: "chat", refId: "has space", title: "Hygge", body: "New work" }), null);
+    assert.equal(buildPushPayload({ kind: "new_work", refKind: "chat", refId: "", title: "Hygge", body: "New work" }), null);
+    assert.equal(warnings.length, 4, "each dropped event is logged");
+    assert.match(String(warnings[0]), /unknown refKind/);
+    // A null refId is still the bare conversation (route "home").
+    assert.equal(buildPushPayload({ kind: "new_work", refKind: "chat", refId: null, title: "Hygge", body: "New work" })!.hyggeRoute, "home");
+  } finally {
+    console.warn = original;
+  }
+});
+
+test("a malformed event is a logged invalid_event, never an APNs attempt", async () => {
+  const { pem } = await testKey();
+  const db = await seededDb();
+  const { fetchFn, calls } = fakeFetch(okResponse);
+  const result = await notifyUser(db, testConfig(pem), "user-1",
+    { kind: "new_work", refKind: "bogus" as never, refId: "m1", title: "Hygge", body: "New work" }, { fetchFn, jwtCache: new ApnsJwtCache() });
+  assert.deepEqual(result, { outcome: "failed", attempted: 0, delivered: 0, removedTokens: 0 });
+  assert.equal(calls.length, 0);
+  assert.equal(db.log.at(-1)?.apnsStatus, "invalid_event");
 });
 
 // ---- trigger gating ---------------------------------------------------------
@@ -146,32 +182,91 @@ test("needsHuman notifies only on a fresh, non-scan transition", () => {
   assert.equal(shouldNotifyNeedsHuman("approved", "needsHuman", { scheduledScan: true }), false);
 });
 
-test("a scan tick plans at most one push; needs-you wins; paused/empty plan none", () => {
-  assert.deepEqual(planTickNotifications({ paused: true, surfacedIds: ["s1"], needsYouItemIds: ["n1"] }), []);
-  assert.deepEqual(planTickNotifications({ paused: false, surfacedIds: [], needsYouItemIds: [] }), []);
-  // Descriptive feed push: the first listing named, the rest counted.
+test("decision-help gate: fresh needsHuman or failed-with-help notifies; scan missions and re-saves never do", () => {
+  assert.equal(shouldNotifyDecisionHelp("approved", "needsHuman"), true);
+  assert.equal(shouldNotifyDecisionHelp("running", "needsHuman"), true);
+  assert.equal(shouldNotifyDecisionHelp("needsHuman", "needsHuman"), false, "a re-save of a waiting task never re-pushes");
+  assert.equal(shouldNotifyDecisionHelp("approved", "failed"), true, "a fresh failed task with a recovery help notifies — its card is a decision card too");
+  assert.equal(shouldNotifyDecisionHelp("failed", "failed"), false);
+  assert.equal(shouldNotifyDecisionHelp("needsHuman", "failed"), false);
+  assert.equal(shouldNotifyDecisionHelp("approved", "succeeded"), false);
+  assert.equal(shouldNotifyDecisionHelp(null, "needsHuman"), true, "a first-seen task entering needsHuman notifies");
+  assert.equal(shouldNotifyDecisionHelp("approved", "needsHuman", { scheduledScan: true }), false, "scan missions never notify");
+  assert.equal(shouldNotifyDecisionHelp("approved", "failed", { scheduledScan: true }), false);
+});
+
+test("a scan tick plans at most one push — the new-work chat message only; feed items never push", () => {
+  assert.deepEqual(planTickNotifications({ paused: true, surfacedIds: ["s1"], needsYouItemIds: ["n1"], offerChatMessageId: "m1", offerChatMessageText: "New work on Rover." }), []);
+  assert.deepEqual(planTickNotifications({ paused: false, surfacedIds: [], needsYouItemIds: [], offerChatMessageId: null, offerChatMessageText: null }), []);
+  // A needs-you episode is durable: it waits in the feed, no push.
+  assert.deepEqual(planTickNotifications({
+    paused: false, surfacedIds: [], needsYouItemIds: ["n1", "n2"], offerChatMessageId: null, offerChatMessageText: null,
+  }), []);
+  // Surfacing without a chat message plans nothing: a push only
+  // ever comes from a chat message, so a tick whose message was
+  // never written (composition failed) plans no push.
+  assert.deepEqual(planTickNotifications({
+    paused: false, surfacedIds: ["s1"], needsYouItemIds: [], offerChatMessageId: null, offerChatMessageText: null,
+  }), []);
+  assert.deepEqual(planTickNotifications({
+    paused: false, surfacedIds: ["s1"], needsYouItemIds: [], offerChatMessageId: "m1", offerChatMessageText: null,
+  }), []);
+  // New work: one chat push carrying the composed message's own
+  // words, opening the conversation — never the feed item.
   const work = planTickNotifications({
-    paused: false, surfacedIds: ["s1", "s2", "s3"], needsYouItemIds: [],
-    firstSurfaced: { siteName: "Rover", title: "Weekend dog sitting for Milo", payLabel: "£25/night", locationLabel: "Leeds", isRemote: false },
+    paused: false, surfacedIds: ["s1", "s2", "s3"], needsYouItemIds: [], offerChatMessageId: "m1",
+    offerChatMessageText: "I found weekend dog sitting on Rover, £25 a night in Leeds — and two more new listings in your feed.",
   });
   assert.equal(work.length, 1);
   assert.equal(work[0].kind, "new_work");
-  assert.equal(work[0].refId, "s1");
-  assert.equal(work[0].title, "New work on Rover");
-  assert.equal(work[0].body, "Weekend dog sitting for Milo · £25/night · Leeds (+2 more)");
-  // Needs-you wins and names the site.
-  const both = planTickNotifications({
-    paused: false, surfacedIds: ["s1"], needsYouItemIds: ["n1", "n2"],
-    firstNeedsYou: { siteName: "Rover", title: "Your saved login for Rover needs you" },
+  assert.equal(work[0].refKind, "chat");
+  assert.equal(work[0].refId, "m1");
+  assert.equal(work[0].title, "Hygge");
+  assert.equal(work[0].body, "I found weekend dog sitting on Rover, £25 a night in Leeds — and two more new listings in your feed.");
+  assert.equal(buildPushPayload(work[0])!.hyggeRoute, "chat/m1");
+});
+
+test("a combined tick — surfaced listings plus a needs-you episode — plans exactly the one new-work push", () => {
+  const planned = planTickNotifications({
+    paused: false, surfacedIds: ["s1", "s2"], needsYouItemIds: ["n1"],
+    offerChatMessageId: "m1", offerChatMessageText: "New work on Rover: weekend dog sitting.",
   });
-  assert.equal(both.length, 1);
-  assert.equal(both[0].kind, "needs_you");
-  assert.equal(both[0].refId, "n1");
-  assert.equal(both[0].title, "Rover needs you");
-  assert.match(both[0].body, /saved login for Rover/);
-  // Without details the fallbacks stay calm and generic.
-  const plain = planTickNotifications({ paused: false, surfacedIds: ["s1"], needsYouItemIds: [] });
-  assert.equal(plain[0].title, "New work found");
+  assert.equal(planned.length, 1, "the needs-you episode contributes no push of its own");
+  assert.equal(planned[0].kind, "new_work");
+  assert.equal(planned[0].refKind, "chat");
+  assert.equal(planned[0].refId, "m1");
+  // And the same tick with no message written plans nothing at all,
+  // even though it surfaced listings and opened an episode.
+  assert.deepEqual(planTickNotifications({
+    paused: false, surfacedIds: ["s1", "s2"], needsYouItemIds: ["n1"],
+    offerChatMessageId: null, offerChatMessageText: null,
+  }), []);
+});
+
+test("a help-less needsHuman never pushes: the gate composition", async () => {
+  // The saveTask push is shouldNotifyDecisionHelp AND
+  // helpRoutesToChat. A help-less task passes the transition half
+  // and fails the routing half — no chat message exists to push
+  // about, so no push is ever planned for it.
+  const { helpRoutesToChat } = await import("../src/task-help.ts");
+  const fresh = shouldNotifyDecisionHelp("approved", "needsHuman");
+  assert.equal(fresh, true);
+  assert.equal(helpRoutesToChat(null), false);
+  assert.equal(fresh && helpRoutesToChat(null), false);
+  // And every well-formed decision kind passes both halves.
+  for (const kind of ["information", "approval", "verification", "credentials", "recovery"]) {
+    assert.equal(fresh && helpRoutesToChat({ kind, message: "x" }), true, `${kind} pushes`);
+  }
+  // A scan mission fails the transition half whatever its help is.
+  assert.equal(shouldNotifyDecisionHelp("approved", "needsHuman", { scheduledScan: true }) && helpRoutesToChat({ kind: "verification", message: "x" }), false);
+});
+
+test("newWorkChatEvent carries the composed message's words, with no feed route", () => {
+  const event = newWorkChatEvent("m9", "I found cat visits on Rover, £30 a day — remote, and it's in your feed.");
+  assert.equal(event.kind, "new_work");
+  assert.equal(event.refKind, "chat");
+  assert.equal(event.body, "I found cat visits on Rover, £30 a day — remote, and it's in your feed.");
+  assert.equal(buildPushPayload(event)!.hyggeRoute, "chat/m9");
 });
 
 // ---- token registration -------------------------------------------------------

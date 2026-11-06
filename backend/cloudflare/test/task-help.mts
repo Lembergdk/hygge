@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { help, informationHelp, applyHelpReply, actionFingerprint, needsActionApproval, mobileTask, canResumeWithInboxCode } from '../src/task-help.ts';
+import { help, helpRoutesToChat, decisionHelpMessageText, parseHelpDeadline, informationHelp, applyHelpReply, actionFingerprint, needsActionApproval, mobileTask, canResumeWithInboxCode } from '../src/task-help.ts';
 import { runMission } from '../src/agent.ts';
 const task = () => ({ id: 'task', kind: 'signup', target_url: 'https://example.com', goal: 'Connect account', status: 'approved', interaction_version: 1, drafted_payload: { location: 'Austin', setupMode: 'connect' } });
 const snapshot = (labels = ['Account settings']) => ({ sessionID: 'kept', currentURLString: 'https://example.com', title: 'Account', elements: labels.map(label => ({ label, kind: 'click' })), humanControlled: false });
@@ -10,6 +10,127 @@ class Browser {
   async snapshot() { return snapshot(this.labels); }
   async act(_id: string, action: any) { this.actions.push(action); return snapshot(this.labels); }
 }
+test('feed/chat routing (policy Nov 5, 2026): every decision card routes to chat; help-less never does', () => {
+  // Every well-formed decision kind routes to chat: all decision
+  // cards warrant a chat message linking to the card, and every
+  // chat message generates a push.
+  for (const kind of ['information', 'approval', 'verification', 'credentials', 'recovery']) {
+    assert.equal(helpRoutesToChat(help(kind, 'Something needs you')), true, `${kind} routes to chat`);
+  }
+  // The deadline no longer gates routing: a deadline-free approval
+  // routes to chat exactly like a deadline approval.
+  assert.equal(helpRoutesToChat(help('approval', 'Publish?')), true);
+  const soon = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+  assert.equal(helpRoutesToChat(help('approval', 'Publish?', [], 'Approve and continue', soon)), true);
+  // Help-less needsHuman: no content any message could be composed
+  // about, so NO chat message and NO push (a push only ever comes
+  // from a chat message).
+  assert.equal(helpRoutesToChat(null), false, "a help-less needsHuman gets no message and no push");
+  assert.equal(helpRoutesToChat(undefined), false);
+});
+
+test('feed/chat routing: an unknown or missing kind is made visible, not silently routed', () => {
+  const warnings: unknown[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+  try {
+    assert.equal(helpRoutesToChat({ id: 'x', message: 'Typo kind' }), true, "unknown kind routes to chat as a decision card by construction");
+    assert.equal(helpRoutesToChat(help('info', 'Typo kind')), true);
+    assert.equal(helpRoutesToChat({ id: 'y', kind: 'Information', message: 'Wrong case' }), true);
+    assert.equal(warnings.length, 3, "each unknown kind is logged server-side");
+    assert.match(String(warnings[0]), /unknown help kind/);
+  } finally {
+    console.warn = original;
+  }
+});
+
+test('deadline validation: garbage, past, and blank dates are no deadline; any valid future date is display-only', () => {
+  // The deadline is an OPTIONAL EXPIRY TIME, FOR DISPLAY ONLY
+  // (policy Nov 5, 2026, simplified Nov 5, 22:08 CST): no "short"
+  // concept, no window, no escalation or enforcement. Validation
+  // is display hygiene only — a deadline already past when set is
+  // rejected; one that lapses later renders as a past "Expires"
+  // date on a still-live card (accepted).
+  const now = new Date('2026-11-05T12:00:00.000Z');
+  const soon = new Date(now.getTime() + 6 * 60 * 60 * 1000).toISOString();
+  const farFuture = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  const past = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+  assert.equal(parseHelpDeadline(soon, now)?.toISOString(), soon);
+  assert.equal(parseHelpDeadline(farFuture, now)?.toISOString(), farFuture, "a far-future date is still a real expiration date");
+  assert.equal(parseHelpDeadline(past, now), null, "a past date is no deadline");
+  assert.equal(parseHelpDeadline('not a date', now), null, "garbage is no deadline");
+  assert.equal(parseHelpDeadline('  ', now), null, "a blank deadline is no deadline");
+  assert.equal(parseHelpDeadline(null, now), null);
+});
+
+test('static helps are marked at the producer; model-composed helps carry no marker', () => {
+  // The mirror composes the chat message for a marked help from
+  // its facts instead of relaying the literal verbatim; an
+  // unmarked help relays verbatim.
+  assert.equal(help('recovery', 'Literal', [], 'Try again', null, { staticText: true }).staticText, true);
+  assert.equal('staticText' in help('information', 'Model reason', [{ text: 'Model question?' }]), false);
+  const secret = informationHelp({ questions: ['What is your verification code?'] }, {});
+  assert.equal(secret.staticText, true, "the secret-question literal is static");
+  const noReason = informationHelp({ questions: [{ text: 'Where?' }] }, {});
+  assert.equal(noReason.staticText, true, "no model reason means the literal fallback message");
+  const modelled = informationHelp({ reason: 'Need your city', questions: [{ text: 'Which city?' }] }, {});
+  assert.equal('staticText' in modelled, false, "model reason + model question relays verbatim");
+  const noQuestion = informationHelp({ reason: 'Need a detail', questions: [] }, {});
+  assert.equal(noQuestion.staticText, true, "the literal fallback question marks the help static");
+});
+
+test('help() normalizes deadlines: valid future dates are stored, garbage/past are dropped and logged', () => {
+  const warnings: unknown[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+  try {
+    const soon = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+    const dated = help('approval', 'Publish?', [], 'Approve and continue', soon);
+    assert.equal(dated.deadline, new Date(soon).toISOString());
+    assert.equal(help('approval', 'Publish?').deadline, null);
+    assert.equal(help('approval', 'Publish?', [], 'Approve and continue', 'garbage').deadline, null);
+    assert.equal(help('approval', 'Publish?', [], 'Approve and continue', '2020-01-01T00:00:00.000Z').deadline, null);
+    assert.equal(warnings.length, 2, "each dropped deadline is logged");
+    assert.match(String(warnings[0]), /dropping invalid deadline/);
+  } finally {
+    console.warn = original;
+  }
+});
+
+test('decision-help message text relays the help verbatim, with no static framing', () => {
+  const task = { help: help('information', 'I need a detail to continue.', [{ text: 'Which dates are you free?' }]), mobile_task: { id: 't', title: 'Rover signup' } };
+  assert.equal(decisionHelpMessageText(task), 'I need a detail to continue.\n\nWhich dates are you free?');
+  assert.equal(decisionHelpMessageText({ help: help('verification', 'Finish the check') }), 'Finish the check');
+  assert.equal(decisionHelpMessageText({ help: null }), null, "no help, no message text");
+  assert.equal(decisionHelpMessageText({ help: { message: '   ' } }), null, "a blank help message relays nothing");
+  assert.ok(!decisionHelpMessageText(task)!.includes('Rover signup'), "the task title prefix is gone — the card carries the title");
+});
+
+test('an approval producer carries the model deadline onto the help', async () => {
+  const browser = new Browser(); const t: any = task();
+  const soon = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+  const decision = { action: 'click', target: 'Save', effect: 'public', reason: 'Publish profile', deadline: soon };
+  const result = await runMission({ task: t, browser, decider: { decide: async () => ({ ...decision }) } });
+  assert.equal(result.help.kind, 'approval');
+  assert.equal(result.help.deadline, new Date(soon).toISOString());
+  assert.equal(helpRoutesToChat(result.help), true);
+});
+
+test('an approval producer with a garbage deadline keeps the help but drops the deadline', async () => {
+  const browser = new Browser(); const t: any = task();
+  const decision = { action: 'click', target: 'Save', effect: 'public', reason: 'Publish profile', deadline: 'soon-ish' };
+  const warnings: unknown[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+  try {
+    const result = await runMission({ task: t, browser, decider: { decide: async () => ({ ...decision }) } });
+    assert.equal(result.help.kind, 'approval');
+    assert.equal(result.help.deadline, null);
+    assert.ok(warnings.some((w) => String(w).includes('dropping invalid deadline')));
+  } finally {
+    console.warn = original;
+  }
+});
 test('personal suggestions use known facts, never invented literals or secrets', () => {
   const result = informationHelp({ questions: [{ text: 'Where?', suggestedRefs: ['draft.location', 'draft.missing', 'draft.password'], suggestions: ['Paris'] }] }, { location: 'Austin', password: 'secret' });
   assert.deepEqual(result.questions[0].suggestions, ['Austin']);

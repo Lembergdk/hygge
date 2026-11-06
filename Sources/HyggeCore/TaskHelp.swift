@@ -9,6 +9,13 @@ public struct TaskHelp: Codable, Equatable, Sendable, Identifiable {
     public var message: String
     public var questions: [Question]
     public var actionLabel: String
+    /// Optional ISO-8601 expiry for a help, display only: the chat
+    /// card shows "Expires <date>" when it parses. It never drives
+    /// routing, escalation, or enforcement — every decision card
+    /// reaches chat anyway — and there is no window and no "short"
+    /// deadline concept. The agent sets it where an expiry applies;
+    /// cases with no expiry leave it unset.
+    public var deadline: String?
     public struct Question: Codable, Equatable, Sendable, Identifiable {
         public var id: String { text }
         public var text: String
@@ -18,9 +25,30 @@ public struct TaskHelp: Codable, Equatable, Sendable, Identifiable {
         }
     }
     public init(id: UUID = UUID(), kind: Kind, message: String,
-                questions: [Question] = [], actionLabel: String = "Continue") {
+                questions: [Question] = [], actionLabel: String = "Continue", deadline: String? = nil) {
         self.id = id; self.kind = kind; self.message = message
-        self.questions = questions; self.actionLabel = actionLabel
+        self.questions = questions; self.actionLabel = actionLabel; self.deadline = deadline
+    }
+
+    /// Whether the display-only expiry has passed. Derived lazily
+    /// from the deadline timestamp — there is no server expired flag
+    /// and no enforcement; this only drives the expired rendering.
+    /// A help with no deadline, or one that does not parse, never
+    /// expires. Whether the card is still pending is the caller's
+    /// job: every render site only shows this for pending cards.
+    public var isExpired: Bool {
+        guard let deadline, let date = Self.expiryDate(deadline) else { return false }
+        return date < Date()
+    }
+
+    /// A deadline is an ISO-8601 string; parse it leniently (with or
+    /// without fractional seconds) and return nil when it does not
+    /// parse — the deadline's validity is the server's job.
+    public static func expiryDate(_ deadline: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: deadline) { return date }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: deadline)
     }
 
     /// A stable id for a synthesized help request, derived from the help's

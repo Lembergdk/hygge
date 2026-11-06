@@ -6,31 +6,65 @@ else notifies. No marketing, no digests, no re-engagement, ever.
 
 Format (user's call, 2026-11-03, superseding the brief's
 title-only draft): messages from Hygge wear the sender's name
-(`Hygge`) with the actual message as the body; feed pushes name
-their content. Every tap opens the exact element that triggered
-it.
+(`Hygge`) with the actual message as the body; the new-work chat
+push names its listing. Every tap opens the chat message that
+triggered it; a listing or a filed mail is one further tap from
+that message's embedded card.
+
+Policy (Mikael, Nov 5, 2026 — the spec for this document): every
+decision card warrants a chat message linking to the card, and
+every chat message generates a push — no exceptions. A push only
+ever comes from a chat message; no feed card ever pushes on its
+own. No push notifications while the app is open/foregrounded
+(enforced app-side). Chat messages linking to cards are composed
+by the agent from context and chat history — no static texts,
+except the documented fallbacks in "How the message text is
+composed" below. The deadline a card carries is set by the agent
+itself when it surfaces something that has one; see "Deadlines"
+below.
 
 ## Triggers (the complete list)
 
 | # | Server event | Where it fires | Push |
 |---|---|---|---|
-| 1 | A task freshly enters `needsHuman` (approval checkpoint, human-only check, or information request) | `UserSandbox.runTask` → `shouldNotifyNeedsHuman` | `needs_you`, title `Hygge`, body = the chat card's own words, deep link to the task |
-| 2 | A scheduled-scan tick surfaces new feed items | `POST /scheduled-scan/tick` → `planTickNotifications(summary)` | `new_work`, title `New work on <site>`, body names the first listing (title · its own pay label · place) + count, deep link to that listing |
-| 2b | A scheduled-scan tick opens a needs-you episode (login failure / human check) | same tick hook | `needs_you`, title `<Site> needs you`, body = the episode card's title, deep link to the episode item |
-| 3 | Authenticated mail from a tracked (or work-ruled) sender mentions a client message | `UserSandbox.handleEmailInbound` → triage highlights | `message_waiting`, title `Hygge`, body `<Site> emailed: "<subject>"`, deep link to that filed mail; at most one per sender per day |
+| 1 | A task freshly enters `needsHuman` (or `failed` with a help) carrying a chat-routed help — any decision kind: information, approval, verification, credentials, recovery | `UserSandbox.saveTask` → `shouldNotifyDecisionHelp` + `helpRoutesToChat` | `needs_you`, title `Hygge`, body = the chat message's own words (the help card's text), deep link `task/<id>` opening the task's chat help card. A help-less `needsHuman` gets no message and no push — there is no content to compose a message about. The push fires only when the mirror message row actually exists (see "How the message text is composed") |
+| 1b | A task freshly enters `awaitingApproval` — a draft is ready for review ("Ready for your review") | `UserSandbox.saveTask` → `notifyDraftReady` | `needs_you`, title `Hygge`, body = the agent-composed draft message, deep link `chat/<message-id>` opening the message whose embedded card is the draft. Deterministic id `draft-chat-<taskId>`, idempotent |
+| 1c | A still-pending decision card reaches its expiry date | Scheduled tick → `UserSandbox.notifyExpiredCards` | `needs_you`, title `Hygge`, body = the agent-composed expiry notice, deep link `chat/<message-id>` opening the message whose embedded card is the expired card. Exactly once per card (server flag `expiryNotifiedFor`, set only after the message is written and its push scheduled); a failed composition is retried on later ticks (bounded: 5 attempts, at least 1h apart, growing). A lifecycle notice, not urgency — expiry never affects routing |
+| 2 | A scheduled-scan tick surfaces new listings | `POST /scheduled-scan/tick` → `planTickNotifications(summary)` | `new_work`, title `Hygge`, body = the agent-composed chat message text, deep link `chat/<message-id>` opening the conversation the message lives in |
+| 2b | A scheduled-scan tick opens a needs-you episode (login failure / human check) | same tick hook | none — the episode waits in the feed; it has no chat message, so it cannot push |
+| 3 | Authenticated mail from a tracked (or work-ruled) sender mentions a client message | `UserSandbox.handleEmailInbound` → triage highlights → backing chat message + embedded mail card | `message_waiting`, title `Hygge`, body = the backing chat message's composed words, deep link `chat/<message-id>`; at most one per sender per day. Skipped when the same mail already produced a chat question (trigger 3b) — one mail, one push |
+| 3b | Authenticated mail asks a question the agent cannot answer alone | `handleEmailInbound` → `composeAndWriteMailChat` | `needs_you`, title `Hygge`, body = the composed chat question, deep link `chat/<message-id>`; once per mail (deterministic id dedupes) |
+| 4 | The agent writes a reply in conversation | `chat-services.ts` `publishMessage` → `notifyChatMessage` | `needs_you`, title `Hygge`, body = the reply's own words, deep link `chat/<message-id>` |
 
-Rules that bound both:
+Rules that bound all of them:
 
-- **At most one push per scan tick.** If a tick both surfaces work
-  and opens a needs-you episode, only the needs-you push is sent;
-  the new work is waiting in the feed when the user opens the app.
-  A scan batch never produces one push per item.
+- **A push only ever comes from a chat message.** No feed card
+  ever generates a push on its own. If there is no chat
+  message, there is no push — that is why a help-less
+  `needsHuman` and a scan needs-you episode stay silent.
+- **Every chat message generates a push — no exceptions.** Any
+  server path that writes an agent chat message schedules its
+  push in the same step. There is no open-app exception
+  server-side; the app suppresses banners while foregrounded.
+- **At most one push per scan tick.** A tick sends at most the
+  one new-work chat message; a scan batch never produces one
+  push per item, and a needs-you episode never pushes at all.
 - **Scan missions never double-notify.** Trigger 1 excludes
-  scheduled-scan tasks; their episodes go through trigger 2b once
-  per tick.
+  scheduled-scan tasks; a tick's only push is trigger 2.
+- **One mail, one push.** A mail that both triggers a chat
+  question (trigger 3b) and mentions a client message (trigger 3)
+  pushes once — the question's push. The backing push is skipped
+  when the mail already produced a chat question.
+- **Expiry notices fire exactly once per card.** The server flag
+  (`expiryNotifiedFor` on the task) is set only after the message
+  is written and its push scheduled; a failed composition leaves
+  the card eligible and is retried on later ticks (bounded: 5
+  attempts, at least 1h apart, growing) — a later tick never
+  re-fires for the same deadline once notified; a re-asked help
+  with a new deadline gets its own notice.
 - **Fresh transitions only.** A task already sitting in
-  `needsHuman` does not re-notify. A resumed run that hits a
-  further check is a new entry and does notify.
+  `needsHuman` (or `failed`) does not re-notify. A resumed run
+  that hits a further check is a new entry and does notify.
 - **Paused users receive nothing.** Every send re-reads the
   Brief 01 server-side pause flag first.
 - **No token, no send.** Denied permission means no token was ever
@@ -43,16 +77,24 @@ Rules that bound both:
 
 ## Payload
 
-The only shape `buildPushPayload` (backend `src/push.ts`) can emit:
+The only shape `buildPushPayload` (backend `src/push.ts`) can emit
+— shown here for a new-work push, whose ref is the chat message
+id itself:
 
 ```json
 {
-  "aps": { "alert": { "title": "Hygge", "body": "Rover: I need a detail to continue. Which dates are you free?" }, "sound": "default" },
-  "hyggeKind": "needs_you",
-  "hyggeRef": "<task-or-feed-item-or-mail-id>",
-  "hyggeRoute": "task/<id>"
+  "aps": { "alert": { "title": "Hygge", "body": "I found weekend dog sitting on Rover for £25 a night — it's in your feed." }, "sound": "default" },
+  "hyggeKind": "new_work",
+  "hyggeRef": "<chat message id>",
+  "hyggeRoute": "chat/<chat message id>"
 }
 ```
+
+The body above is an example of what the composer produces from
+the listing's facts — never a template; every message is composed
+fresh from context (see "How the message text is composed").
+`needs_you` pushes carry the task id instead
+(`"hyggeRef": "<task id>"`, `"hyggeRoute": "task/<task id>"`).
 
 - Titles and bodies pass one formatting path (`pushSafeText`):
   whitespace collapsed, code-shaped digit runs redacted,
@@ -64,13 +106,106 @@ The only shape `buildPushPayload` (backend `src/push.ts`) can emit:
   the exact key set, the truncation, and the code redaction.
 - **No badge number is sent**: the server keeps no badge count,
   and an invented one would drift from the feed.
-- Routes: `task/<uuid>`, `feed/<uuid>`, `email/<uuid>`, `home`.
+- Routes: `task/<uuid>`, `chat/<uuid>`, `feed/<uuid>`, `email/<uuid>`, `home`.
+  `feed/<uuid>` and `email/<uuid>` are legacy/compat shapes no
+  current trigger emits — nothing in this codebase plans a feed or
+  email push anymore (policy Nov 5, 2026 — feed items never push).
   The app parses them in `PushDeepLink` (HyggeCore); anything
-  unknown lands on Home. Each route opens the exact element it
-  names, after a fresh pull: the task's chat help card, the
-  listing's (or episode's) own detail, that one filed mail. A
-  route naming something already handled lands on Home with one
-  plain line — never a substituted element.
+  unknown lands on Home. Each current route opens the chat message
+  that triggered the push, after a fresh pull: the task's chat help
+  card (`task/<id>`), or the message itself (`chat/<id>`) — for
+  mail, the tap opens the message, never the filed mail directly;
+  the filed mail is one further tap from the message's embedded
+  card. A route naming something already handled lands on Home
+  with one plain line — never a substituted element.
+
+## How the message text is composed
+
+No chat message linking to a card carries a static string as its
+text — each surface composes its text from context plus recent
+chat history via `chat-composer.ts`, using the drafting tier
+(wonder-1.0), naming only facts present in the context — never
+invented, never a code or password, never a greeting or sign-off.
+The feed card stays the interaction surface; the message is the
+notification, not the interaction. Composition runs under a
+30-second total budget (`CHAT_COMPOSER_TIMEOUT_MS`) so a stalled
+model cannot block the sandbox, and every composition failure is
+reported server-side (a structured error log plus a
+`chat-composer-failure` row in the object's `events` table) so a
+model outage silently killing notifications is detectable.
+
+Decision helps are the one surface with a split: a help whose
+text the mission model already composed from live page context
+relays verbatim (`decisionHelpMessageText` in `task-help.ts`) —
+the message and the card can never disagree. A help whose text is
+a hardcoded literal (marked `staticText` at its producer:
+recovery/verification/credentials fallbacks, checkpoint and
+takeover wording) is composed from its facts instead: the mirror
+first writes the literal relay so the message row exists, then
+`saveTask` upgrades the row's text to the composed version and
+pushes its words. The workspace projector's mirror has no
+composer and keeps the literal relay as its fallback path.
+
+Failure semantics: composition retries once, then fails closed —
+no message is written and no push is scheduled. The feed card
+remains the durable surface, and the next tick (or the next
+turn) can compose again. Two documented exceptions to
+"no static text anywhere":
+- A static-literal help whose composition fails keeps its literal
+  relay as the message text (logged, via the failure report
+  above) and its push goes out with that text — the literal is
+  the only content the card has.
+- A push-body fallback ("Something needs you.", "You may have a
+  new message", "New work is waiting in your feed.") fires only
+  when a push event is built with no message text at all. No
+  current caller does that: the decision-help push is gated on
+  the mirror row existing, and the offer/mail/draft/expiry pushes
+  require the composed text to plan anything. The fallbacks exist
+  so a malformed call still notifies rather than silently
+  dropping.
+
+Every message row also carries `previousResponseId` — the id of
+the message written immediately before it, resolved from the
+live transcript at write time (strict previous_response_id
+policy, Nov 5, 2026; null only for the first message). An
+in-place text upgrade (the static-help composition above) keeps
+the row's original value: an upgrade is not a new message.
+
+## Deadlines
+
+A card's deadline is an OPTIONAL EXPIRY TIME, FOR DISPLAY ONLY
+(policy Nov 5, 2026, simplified Nov 5, 22:08 CST): it never
+drives routing, escalation, or enforcement — every decision card
+goes to chat anyway, so an expiry cannot gate anything. There is
+no "short" concept and no window.
+
+- The agent itself sets a deadline when it surfaces something
+  that carries one (an offer expiry, an application closing
+  date, a code expiry): the mission loop's model decision carries
+  `deadline` through to `help()` (`agent.ts`, `task-help.ts`). A
+  draft inherits a deadline only from an explicit deadline on the
+  underlying opportunity/action — never invented.
+- Validation: a deadline must parse as a real ISO date in the
+  future. Garbage or past dates are dropped (and logged) and
+  treated as no deadline. A date that lapses after it was set
+  renders as a past "Expires" date on the still-live card —
+  accepted as a display detail.
+- Under the new policy the deadline no longer gates whether a
+  decision card gets a message — every decision card gets one.
+- Expiry lifecycle (Nov 5, 22:14 CST): when a still-pending
+  decision card reaches its expiry, the card is marked expired
+  but left in the feed — still viewable and dismissable, with
+  interactivity removed (the expired display is derived lazily
+  client-side from the expiry time) — and the agent is prompted
+  to send a message about it (trigger 1c above), exactly once per
+  card. The scheduled tick is the server-side trigger
+  (`UserSandbox.notifyExpiredCards`). Only still-pending cards
+  expire; a card the user already acted on is gone from the feed.
+- Some producers never set one: onboarding/profile questions,
+  credentials and recovery helps, checkpoint-budget verification,
+  human-takeover verification, and the workspace runner's
+  recovery help. Information helps carry one only when the agent
+  surfaces one.
 
 ## Token lifecycle
 

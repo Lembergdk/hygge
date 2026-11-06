@@ -6,6 +6,7 @@ import {
   MemoryStateDb,
   STATE_TABLES,
   StateStore,
+  lastChatMessageId,
   shouldApplyUpdate,
   stateSchemaSQL,
   stripSecrets,
@@ -145,4 +146,19 @@ test('cleared chat tombstones reject direct writes and stale snapshot resurrecti
  assert.throws(()=>s.upsert('messages','DELETED',{id:'DELETED',text:'old'}),/MESSAGE_DELETED/);
  s.importSnapshot({chatTranscript:[{id:'deleted',text:'old'},{id:'kept',text:'new'}]});
  assert.equal(s.get('messages','deleted'),null);assert.ok(s.get('messages','kept'));
+});
+
+test("transcript chain: lastChatMessageId is the latest createdAt, null when empty", () => {
+  assert.equal(lastChatMessageId([]), null, "an empty transcript has no predecessor");
+  const rows = [
+    { id: "a", data: { text: "first", createdAt: "2026-11-05T10:00:00.000Z" } },
+    { id: "b", data: { text: "second", createdAt: "2026-11-05T10:01:00.000Z" } },
+    { id: "c", data: { text: "third", createdAt: "2026-11-05T10:01:00.000Z" } },
+  ];
+  assert.equal(lastChatMessageId(rows), "c", "same-millisecond ties break by id, deterministically");
+  assert.equal(lastChatMessageId([rows[0]]), "a");
+  // List order is irrelevant: the max is computed, not taken from position.
+  assert.equal(lastChatMessageId([rows[2], rows[0], rows[1]]), "c");
+  // A row without createdAt never beats one with a date.
+  assert.equal(lastChatMessageId([{ id: "x", data: {} }, rows[0]]), "a");
 });

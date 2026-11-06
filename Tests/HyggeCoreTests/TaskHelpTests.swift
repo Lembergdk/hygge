@@ -49,6 +49,22 @@ final class TaskHelpTests: XCTestCase {
         XCTAssertNil(restored.browserSessionID)
         XCTAssertFalse(task.prepareReply(helpID: request.id))
     }
+    func testDeadlineDefaultsToNilAndRoundTrips() throws {
+        let undated = TaskHelp(kind: .approval, message: "Publish?")
+        XCTAssertNil(undated.deadline)
+        let dated = TaskHelp(kind: .approval, message: "Publish?", deadline: "2026-11-06T12:00:00.000Z")
+        XCTAssertEqual(try JSONDecoder().decode(TaskHelp.self, from: JSONEncoder().encode(dated)).deadline,
+                       "2026-11-06T12:00:00.000Z")
+        // Helps written before the deadline field existed still decode.
+        let legacy = #"{"id":"9E2A3B8C-0000-4000-8000-000000000001","kind":"approval","message":"Publish?","questions":[],"actionLabel":"Approve and continue"}"#
+        XCTAssertNil(try JSONDecoder().decode(TaskHelp.self, from: Data(legacy.utf8)).deadline)
+    }
+    func testExpiredDerivesLazilyFromDeadline() {
+        XCTAssertFalse(TaskHelp(kind: .approval, message: "Publish?").isExpired)
+        XCTAssertFalse(TaskHelp(kind: .approval, message: "Publish?", deadline: "2999-01-01T00:00:00.000Z").isExpired)
+        XCTAssertTrue(TaskHelp(kind: .approval, message: "Publish?", deadline: "2020-01-01T00:00:00.000Z").isExpired)
+        XCTAssertFalse(TaskHelp(kind: .approval, message: "Publish?", deadline: "not-a-date").isExpired)
+    }
     func testSynthesizedHelpIDIsStableAcrossPollsAndChangesWithTheSituation() {
         let taskID = UUID()
         let first = TaskHelp.stableSynthesizedID(taskID: taskID, status: "needsHuman", pendingEffectID: "fx_3", informationRequests: [])

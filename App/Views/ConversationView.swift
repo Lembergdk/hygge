@@ -51,10 +51,15 @@ struct ConversationView: View {
                             VStack(alignment: .leading, spacing: 13) {
                                 ForEach(store.chatTranscript) { entry in
                                     VStack(alignment: .leading, spacing: 8) {
-                                        if !entry.fromAgent, let context = entry.context {
-                                            HStack { Spacer(minLength: 44); chatContextCard(context) }
-                                        }
                                         bubble(entry)
+                                        // The card a message is about sits at
+                                        // the BOTTOM of its bubble, in both
+                                        // directions — so it is clear which
+                                        // message it belongs to, with no
+                                        // scrolling to the top to tap it.
+                                        if let context = entry.context {
+                                            contextCardRow(context, fromAgent: entry.fromAgent)
+                                        }
                                         if let taskID = entry.taskID,
                                            let task = store.tasks.first(where: { $0.id == taskID }),
                                            entry.helpID != nil {
@@ -106,10 +111,30 @@ struct ConversationView: View {
                         .onAppear {
                             store.markChatRead()
                             for task in store.chatHelpTasks { store.surfaceTaskHelp(taskID: task.id) }
-                            if let id = store.conversationTaskID,
+                            // A tapped push names one message: land on it.
+                            // A named message that never arrived leaves a
+                            // stale id behind: drop it so a later open
+                            // does not chase it again.
+                            if let id = store.pendingChatMessageID,
+                               store.chatTranscript.first(where: { $0.id == id }) == nil {
+                                store.pendingChatMessageID = nil
+                            }
+                            if let id = store.pendingChatMessageID,
+                               let entry = store.chatTranscript.first(where: { $0.id == id }) {
+                                store.pendingChatMessageID = nil
+                                proxy.scrollTo(entry.id, anchor: .top)
+                            } else if let id = store.conversationTaskID,
                                let entry = store.chatTranscript.last(where: { $0.taskID == id }) {
                                 proxy.scrollTo(entry.id, anchor: .top)
                             } else { proxy.scrollTo("bottom", anchor: .bottom) }
+                        }
+                        .onChange(of: store.pendingChatMessageID) { _, id in
+                            if let id, let entry = store.chatTranscript.first(where: { $0.id == id }) {
+                                store.pendingChatMessageID = nil
+                                proxy.scrollTo(entry.id, anchor: .top)
+                            } else if id != nil {
+                                store.pendingChatMessageID = nil
+                            }
                         }
                         .onChange(of: store.conversationTaskID) { _, id in
                             if let entry = store.chatTranscript.last(where: { $0.taskID == id }) {
@@ -176,8 +201,10 @@ struct ConversationView: View {
     }
 
     /// The mini-card a message is about — attached above the
-    /// composer before sending, stamped above its bubble after.
-    private func chatContextCard(_ context: ChatContextRef) -> some View {
+    /// composer before sending, stamped below its bubble after.
+    /// A card that opens its feed item carries a chevron so a
+    /// live card reads as tappable; the composer copy never does.
+    private func chatContextCard(_ context: ChatContextRef, showsOpenChevron: Bool = false) -> some View {
         HStack(spacing: 10) {
             if let domain = context.siteDomain {
                 SiteLogoTile(domain: domain, name: context.title, size: 34)
@@ -195,12 +222,133 @@ struct ConversationView: View {
                     Text(context.subtitle).font(.caption).foregroundStyle(HyggeTheme.secondary).lineLimit(2)
                 }
             }
+            if showsOpenChevron {
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                    .foregroundStyle(HyggeTheme.secondary).accessibilityHidden(true)
+            }
         }
         .padding(.horizontal, 12).padding(.vertical, 9)
         .background(bubbleBackground, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(HyggeTheme.hairline, lineWidth: 1))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("About: \(context.title)")
+    }
+
+    /// A message's card, below its bubble: trailing-aligned for the
+    /// user (as the bubble is), under the bubble text for Hygge.
+    /// A card whose feed element still exists is a button into the
+    /// feed; anything unresolvable renders untappable — and muted,
+    /// so a live card reads as live. The user row has no avatar
+    /// slot, so the card takes the avatar's 37pt (30pt avatar +
+    /// 7pt spacing) as trailing padding to line up with the
+    /// bubble's text.
+    @ViewBuilder
+    private func contextCardRow(_ context: ChatContextRef, fromAgent: Bool) -> some View {
+        if fromAgent {
+            HStack(spacing: 0) {
+                contextCard(context).padding(.leading, 33)
+                Spacer(minLength: 36)
+            }
+        } else {
+            HStack(spacing: 0) {
+                Spacer(minLength: 44)
+                contextCard(context).padding(.trailing, 37)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func contextCard(_ context: ChatContextRef) -> some View {
+        if isExpiredTaskContext(context) {
+            // Expired decision: still viewable and marked, but no
+            // longer actionable — no button into the feed.
+            expiredContextCard(context)
+        } else if isResolvableContext(context) {
+            Button { openContextInFeed(context) } label: { chatContextCard(context, showsOpenChevron: true) }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens in the feed")
+        } else {
+            chatContextCard(context).opacity(0.55)
+        }
+    }
+
+    /// A context about a task whose display-only expiry has passed:
+    /// the card stays visible but its action is gone.
+    private func isExpiredTaskContext(_ context: ChatContextRef) -> Bool {
+        guard context.kind == "task", let id = UUID(uuidString: context.id),
+              let task = store.tasks.first(where: { $0.id == id }) else { return false }
+        return task.help?.isExpired == true
+    }
+
+    private func expiredContextCard(_ context: ChatContextRef) -> some View {
+        var expired = context
+        expired.subtitle = "Expired" + (context.subtitle.isEmpty ? "" : " · \(context.subtitle)")
+        return chatContextCard(expired)
+            .accessibilityLabel("Expired: \(context.title)")
+    }
+
+    private func isResolvableContext(_ context: ChatContextRef) -> Bool {
+        // A site context carries a site id, not a UUID-typed row id:
+        // resolve it against the proposals by site, not by row.
+        if context.kind == "site" { return store.proposals.contains(where: { $0.siteID == context.id }) }
+        // The notifications primer has no row id either: its card
+        // opens the notifications surface (see openContextInFeed).
+        if context.kind == "notifications" { return true }
+        guard let id = UUID(uuidString: context.id) else { return false }
+        switch context.kind {
+        case "opportunity": return store.opportunities.contains(where: { $0.id == id })
+        case "task": return store.tasks.contains(where: { $0.id == id })
+        case "mail": return store.filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() })
+        case "event": return store.activityEvents.contains(where: { $0.id == id })
+        default: return false
+        }
+    }
+
+    /// Sets the feed-open flag and lets HomeFeedView close this chat
+    /// before opening the card — then dismisses this view too, so a
+    /// chat hosted by the filed-mail detail sheet does not strand
+    /// the focus behind two still-open sheets. `dismiss` closes
+    /// whichever sheet presented this ConversationView (the mail
+    /// detail's sheet, or the conversation sheet itself) and is a
+    /// no-op in the floating bubble, where Home's own dismissal
+    /// covers it; the flag is still what tells Home which card
+    /// to open once the sheet is gone.
+    private func openContextInFeed(_ context: ChatContextRef) {
+        switch context.kind {
+        case "opportunity":
+            guard let id = UUID(uuidString: context.id),
+                  store.opportunities.contains(where: { $0.id == id }) else { return missingContext() }
+            store.pendingOpportunityOpenID = id
+        case "task":
+            guard let id = UUID(uuidString: context.id),
+                  store.tasks.contains(where: { $0.id == id }) else { return missingContext() }
+            store.pendingTaskFocusOpenID = id
+        case "mail":
+            guard let id = UUID(uuidString: context.id),
+                  store.filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() }) else { return missingContext() }
+            store.pendingEmailOpenID = id
+        case "site":
+            guard let proposal = store.proposals.first(where: { $0.siteID == context.id }) else { return missingContext() }
+            store.pendingProposalOpenID = proposal.id
+        case "event":
+            guard let id = UUID(uuidString: context.id),
+                  store.activityEvents.contains(where: { $0.id == id }) else { return missingContext() }
+            store.pendingEventOpenID = id
+        case "notifications":
+            store.pendingNotificationsOpen = true
+        default: return
+        }
+        dismiss()
+    }
+
+    /// The card's feed item vanished between render and tap: close
+    /// the chat so Home can say so in one line. The note is a
+    /// routing fallback, so Home scrolls to the top and closes the
+    /// chat bubble first — in the bubble host dismiss() is a no-op
+    /// and the open bubble would otherwise cover the note.
+    private func missingContext() {
+        store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
+        dismiss()
     }
 
     private var composer: some View {
@@ -306,6 +454,10 @@ struct ConversationView: View {
         do {
             let state = try await store.backend.conversationState()
             agentState = state; agentError = nil
+            // A new generation means the thread was cleared (reset):
+            // note it before the pull, so the pull's synthesis does
+            // not regrow the decision entries cleared with it.
+            store.noteConversationGeneration(state.generation)
             _ = await store.pullFromServer(reconcilingConversation: state.activeTurn == nil && store.pendingConversationMessageID == nil)
             if let id = store.pendingConversationMessageID,
                let message = store.chatTranscript.first(where: { $0.id == id }) {
@@ -389,6 +541,13 @@ struct ConversationView: View {
     @ViewBuilder
     private func taskHelpCard(_ task: AgentTask, help: TaskHelp) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            // Display-only expiry: a lapsed deadline renders as
+            // "Expired" and the card's actions go dead — it stays
+            // visible, but nothing here acts on the task anymore.
+            if let deadline = help.deadline, let date = TaskHelp.expiryDate(deadline) {
+                Text(help.isExpired ? "Expired" : "Expires \(date.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption).foregroundStyle(HyggeTheme.secondary)
+            }
             if help.kind == .information, let question = help.questions.first {
                 ForEach(question.suggestions, id: \.self) { suggestion in
                     Button(suggestion) {
@@ -452,6 +611,7 @@ struct ConversationView: View {
                 Task { await store.declineTaskHelp(taskID: task.id, helpID: help.id, choiceLabel: label) }
             }.buttonStyle(SettingsActionStyle(filled: false))
         }
+        .disabled(help.isExpired)
         .foregroundStyle(HyggeTheme.ink)
         .padding(16).hyggeCard(radius: 20).padding(.leading, 33)
     }

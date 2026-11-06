@@ -40,7 +40,14 @@ const copy=<T>(v:T):T=>JSON.parse(JSON.stringify(v));
 function trustedMissionPatch(task:WorkspaceTask|null){return task?Object.fromEntries(['credential_id','session_id','email_code_available'].filter(k=>Object.hasOwn(task,k)).map(k=>[k,task[k]])):{};}
 function evidenceId(runId:string,kind:string,sequence:number){return `ev_${runId.replaceAll('-','')}_${kind}_${sequence}`;}
 interface ExecutionGuard { assertCurrent():void; verify():Promise<void>; lease():RuntimeLease }
-function recoveryHelp(message='I need to check the current site state before continuing.') {return {id:crypto.randomUUID(),kind:'recovery',message,questions:[],actionLabel:'Check and continue'};}
+/// Every recovery help here is a hardcoded literal (the runner
+/// has no model text to relay), so it carries the `staticText`
+/// marker: the saveTask mirror composes the chat message from its
+/// facts via chat-composer.ts instead of relaying the literal
+/// verbatim, falling back to the literal (logged) when composition
+/// fails. The workspace projector's own mirror has no composer and
+/// keeps the literal relay as its fallback path.
+function recoveryHelp(message='I need to check the current site state before continuing.') {return {id:crypto.randomUUID(),kind:'recovery',message,questions:[],actionLabel:'Check and continue',staticText:true};}
 /** One per owner DO. Serializes all task entrypoints; persistent admission prevents parallel replacement. */
 export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
   const {foundation:f,owner}=config,db=f.checkpoints.db;
