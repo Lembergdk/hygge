@@ -924,37 +924,16 @@ final class AppStore {
         Task { await replyToTask(taskID: taskID, helpID: help.id, answers: answers) }
     }
 
-    /// Surface a task's help request in the chat. A proactive call — the
-    /// polls and a run reporting its outcome — only pings the user when
-    /// the request is something they need or can act on; a backend break
-    /// is repaired silently and the help is still there when they open
-    /// the chat for the task. A user-initiated call (a tap on a feed
-    /// card) always surfaces it, spending the cleared-thread
-    /// suppression when one is set.
+    /// Surface a task's help request in the chat. Only a request the
+    /// server sent is surfaced — a task with no help has nothing to
+    /// ask, so nothing is invented for it: a silent pause (the agent
+    /// verifies the step itself and resumes on its own) and a failed
+    /// step with no request both stay out of chat, their outcome
+    /// visible on the task's feed card instead. A proactive call — the
+    /// polls and a run reporting its outcome — only surfaces the help
+    /// when it is something the user needs or can act on.
     func surfaceTaskHelp(taskID: UUID, userInitiated: Bool = false, proactive: Bool = false) {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].needsChatHelp else { return }
-        if tasks[index].help == nil {
-            let task = tasks[index]
-            // A stuck step is a review, whatever the status: the user is
-            // the only one who can say whether it happened on the site.
-            // Keying the review off the pending effect (not the help kind)
-            // is what makes the buttons render for a needsHuman task with
-            // no help. The id is derived from the help's content, so the
-            // 3s poll re-synthesizes the same help instead of minting a
-            // fresh id — and a duplicate chat entry — on every pull.
-            let reviewing = task.pendingEffectID != nil
-            tasks[index].help = TaskHelp(
-                id: TaskHelp.stableSynthesizedID(taskID: task.id, status: task.status.rawValue,
-                                                 pendingEffectID: task.pendingEffectID,
-                                                 informationRequests: task.informationRequests),
-                kind: reviewing || task.status == .failed ? .recovery : task.informationRequests.isEmpty ? .verification : .information,
-                message: reviewing ? "I couldn't confirm whether the last step went through. Did it happen on the site?"
-                    : task.status == .failed ? "I couldn't finish this step. Let's check where it stopped before continuing."
-                    : task.informationRequests.isEmpty ? "This site has a check I couldn't finish. Your progress is saved."
-                    : "I need a detail to continue.",
-                questions: task.informationRequests.map { .init(text: $0) },
-                actionLabel: reviewing || task.status == .failed ? "Check and continue" : "Complete check")
-        }
         if proactive, !userInitiated, !tasks[index].helpIsActionable { return }
         guard let help = tasks[index].help else { return }
         // A thread cleared by a reset stays cleared: the poll and
@@ -983,7 +962,7 @@ final class AppStore {
     /// Answer a chat help request. Whatever the user tapped or typed
     /// is consolidated into the thread as their own message — typed
     /// answers verbatim, approvals as a fixed line, and button-only
-    /// replies (retry, check-and-continue) as the button's label —
+    /// replies as the button's label —
     /// so the history never reads as Hygge talking to itself.
     func replyToTask(taskID: UUID, helpID: UUID, answers: [String: String] = [:], approved: Bool = false,
                      choiceLabel: String? = nil) async {
@@ -1012,39 +991,18 @@ final class AppStore {
         } else if let choiceLabel {
             appendChat(fromAgent: false, text: choiceLabel)
         }
-        await approveAndRun(taskID: taskID)
-    }
-
-    /// Review the outcome of a step whose browser session is gone: the
-    /// user says whether it happened on the site, and that review clears
-    /// the stuck step. The task comes back still waiting, with a new help
-    /// request — the next tap ("Check and continue") resumes it.
-    func reviewTask(taskID: UUID, helpID: UUID, effectID: String, confirmed: Bool) async {
-        guard let index = tasks.firstIndex(where: { $0.id == taskID }),
-              tasks[index].help?.id == helpID,
-              let backendID = tasks[index].backendTaskID else { return }
-        appendChat(fromAgent: false, text: confirmed ? "It worked." : "It didn't work.")
-        do {
-            _ = try await backend.reconcileTask(id: backendID, effectID: effectID,
-                                                status: confirmed ? "confirmed" : "not_applied")
-        } catch {
-            appendChat(fromAgent: true, text: "I couldn't save that. Please try again.")
-            return
+        // A finished step is confirmed by a proper message at the end
+        // of the thread — not a caption under the old request.
+        if await approveAndRun(taskID: taskID) == .succeeded {
+            appendChat(fromAgent: true, text: "Done — this step is finished.")
         }
-        if let remote = try? await backend.setupTasks(),
-           let current = remote.first(where: { $0.id == taskID }),
-           let currentIndex = tasks.firstIndex(where: { $0.id == taskID }) {
-            tasks[currentIndex] = current
-        }
-        surfaceTaskHelp(taskID: taskID)
-        save()
     }
 
     func declineTaskHelp(taskID: UUID, helpID: UUID, choiceLabel: String? = nil) async {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].help?.id == helpID else { return }
         if let id = tasks[index].backendTaskID {
             do { try await backend.rejectTask(id: id, helpID: helpID) }
-            catch { appendChat(fromAgent: true, text: "I couldn't save that choice. Please try again."); return }
+            catch { appendChat(fromAgent: true, text: "I couldn't record that stop. The step is still running — tap it again."); return }
         }
         guard let current = tasks.firstIndex(where: { $0.id == taskID }),
               tasks[current].stopHelp(helpID: helpID) else { return }
@@ -1513,7 +1471,7 @@ final class AppStore {
                 lastMessage = "Working on \(siteName(id: task.siteID))…"
             }
         } catch {
-            lastMessage = "Could not run that task: \(error)"
+            lastMessage = "Couldn't run that task."
         }
         save()
         // A run that ends needing the user is the other first-
@@ -1634,22 +1592,18 @@ final class AppStore {
     /// The server's conversation generation changed since the last
     /// refresh: the thread was cleared (reset), so the decision
     /// messages cleared with it stay cleared instead of being
-    /// re-synthesized by the next poll. Record the helps
+    /// re-surfaced by the next poll. Record the helps
     /// outstanding right now — a help whose situation later
-    /// changes mints a fresh id and synthesizes again, as it
+    /// changes arrives with a fresh id and surfaces again, as it
     /// should. The first generation seen only establishes the
     /// baseline; a reset is a change from a known generation.
     /// Call before the pull that follows the state fetch, so the
-    /// pull's synthesis already respects the suppression.
+    /// pull already respects the suppression.
     func noteConversationGeneration(_ generation: String) {
         let changed = lastConversationGeneration != generation
         if let last = lastConversationGeneration, last != generation {
             for task in chatHelpTasks {
                 if let help = task.help { clearedHelpIDs.insert(help.id) }
-                else {
-                    clearedHelpIDs.insert(TaskHelp.stableSynthesizedID(taskID: task.id, status: task.status.rawValue,
-                        pendingEffectID: task.pendingEffectID, informationRequests: task.informationRequests))
-                }
             }
         }
         lastConversationGeneration = generation

@@ -177,20 +177,10 @@ struct OnboardingView: View {
                         bottomTrailingRadius: 6, topTrailingRadius: 20))
             }
         case .thinking:
-            HStack(alignment: .center, spacing: 9) {
-                avatar
-                ThinkingDots()
-                    .padding(.horizontal, 15).padding(.vertical, 14)
-                    .background(GPTheme.card, in: UnevenRoundedRectangle(
-                        topLeadingRadius: 6, bottomLeadingRadius: 20,
-                        bottomTrailingRadius: 20, topTrailingRadius: 20))
-                    .overlay(UnevenRoundedRectangle(
-                        topLeadingRadius: 6, bottomLeadingRadius: 20,
-                        bottomTrailingRadius: 20, topTrailingRadius: 20)
-                        .stroke(GPTheme.hairline, lineWidth: 1))
-                Spacer()
-            }
-            .accessibilityLabel("Hygge is thinking")
+            // No live indicator in chat: the entry is a placeholder
+            // the reply replaces, so it renders nothing until the
+            // first streamed words arrive.
+            EmptyView()
         case .input:
             inputCard(step: entry.step ?? conversation.step)
                 .padding(.leading, 52)
@@ -649,8 +639,8 @@ struct OnboardingView: View {
     }
 
     /// The opener is predefined (OnboardingStep.firstMessage):
-    /// one second of thinking dots, then the message and its
-    /// input card. No model call, so no "picked for you" header
+    /// one second's pause, then the message and its input card.
+    /// No model call, so no "picked for you" header
     /// or skill chips before the user has said anything.
     private func firstTurn() async {
         let thinking = FeedEntry(kind: .thinking)
@@ -664,8 +654,9 @@ struct OnboardingView: View {
         }
     }
 
-    /// One generated agent turn, streamed. Thinking dots show until the first
-    /// token arrives; the input card appears only after the reply completes.
+    /// One generated agent turn, streamed. Nothing shows until the
+    /// first token arrives; the input card appears only after the
+    /// reply completes.
     private func agentTurn() async {
         guard conversation.step != .done else { return }
         // Arrived signed in (a log in with an unknown email or
@@ -752,28 +743,6 @@ struct OnboardingView: View {
         } else {
             serviceOnline = false
         }
-    }
-}
-
-/// Three-dot "agent is thinking" pulse; static when Reduce Motion is on.
-private struct ThinkingDots: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 0.1)) { context in
-            HStack(spacing: 6) {
-                ForEach(0..<3, id: \.self) { index in
-                    let phase = reduceMotion ? 0.5
-                        : 0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 3.2 - Double(index) * 0.55)
-                    Circle()
-                        .fill(GPTheme.teal.opacity(0.35 + 0.65 * phase))
-                        .frame(width: 8, height: 8)
-                        .scaleEffect(0.75 + 0.35 * phase)
-                        .offset(y: -3 * phase)
-                }
-            }
-        }
-        .frame(width: 44, height: 14)
     }
 }
 
