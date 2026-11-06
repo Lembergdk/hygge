@@ -924,7 +924,14 @@ final class AppStore {
         Task { await replyToTask(taskID: taskID, helpID: help.id, answers: answers) }
     }
 
-    func surfaceTaskHelp(taskID: UUID, userInitiated: Bool = false) {
+    /// Surface a task's help request in the chat. A proactive call — the
+    /// polls and a run reporting its outcome — only pings the user when
+    /// the request is something they need or can act on; a backend break
+    /// is repaired silently and the help is still there when they open
+    /// the chat for the task. A user-initiated call (a tap on a feed
+    /// card) always surfaces it, spending the cleared-thread
+    /// suppression when one is set.
+    func surfaceTaskHelp(taskID: UUID, userInitiated: Bool = false, proactive: Bool = false) {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].needsChatHelp else { return }
         if tasks[index].help == nil {
             let task = tasks[index]
@@ -948,6 +955,7 @@ final class AppStore {
                 questions: task.informationRequests.map { .init(text: $0) },
                 actionLabel: reviewing || task.status == .failed ? "Check and continue" : "Complete check")
         }
+        if proactive, !userInitiated, !tasks[index].helpIsActionable { return }
         guard let help = tasks[index].help else { return }
         // A thread cleared by a reset stays cleared: the poll and
         // the pull must not regrow its decision entries. A tap on
@@ -1082,7 +1090,7 @@ final class AppStore {
                         tasks[index].backendTaskID = task.backendTaskID
                     } else { tasks[index] = task }
                 }
-                for task in chatHelpTasks { surfaceTaskHelp(taskID: task.id) }
+                for task in chatHelpTasks { surfaceTaskHelp(taskID: task.id, proactive: true) }
             }
             do { try await Task.sleep(for: .seconds(3)) } catch { return }
         }
@@ -1490,13 +1498,20 @@ final class AppStore {
             }
             guard let current = tasks.firstIndex(where: { $0.id == taskID }) else { return nil }
             tasks[current] = task
-            surfaceTaskHelp(taskID: taskID)
+            surfaceTaskHelp(taskID: taskID, proactive: true)
             finalStatus = task.status
             if task.status == .needsHuman, task.kind == .signup {
                 accountStates[task.siteID] = .needsVerification
             }
-            lastMessage = task.needsChatHelp ? "\(siteName(id: task.siteID)) needs your help in chat."
-                : task.status == .succeeded ? "Finished: \(task.title)" : "Working on \(siteName(id: task.siteID))…"
+            if task.needsChatHelp {
+                // A backend break is repaired silently; only a help request
+                // the user can act on gets announced here.
+                if task.helpIsActionable { lastMessage = "\(siteName(id: task.siteID)) needs your help in chat." }
+            } else if task.status == .succeeded {
+                lastMessage = "Finished: \(task.title)"
+            } else {
+                lastMessage = "Working on \(siteName(id: task.siteID))…"
+            }
         } catch {
             lastMessage = "Could not run that task: \(error)"
         }
@@ -2283,7 +2298,7 @@ final class AppStore {
                 }
             }
         }
-        for task in chatHelpTasks { surfaceTaskHelp(taskID: task.id) }
+        for task in chatHelpTasks { surfaceTaskHelp(taskID: task.id, proactive: true) }
         await syncProfilePhoto()
         if let refs = try? await backend.listCredentialRefs() { credentialRefs = refs }
         if let memory = try? await backend.listSiteMemory(), !memory.memories.isEmpty {

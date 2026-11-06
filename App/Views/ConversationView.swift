@@ -110,7 +110,7 @@ struct ConversationView: View {
                         .scrollDismissesKeyboard(.interactively)
                         .onAppear {
                             store.markChatRead()
-                            for task in store.chatHelpTasks { store.surfaceTaskHelp(taskID: task.id) }
+                            for task in store.chatHelpTasks { store.surfaceTaskHelp(taskID: task.id, proactive: true) }
                             // A tapped push names one message: land on it.
                             // A named message that never arrived leaves a
                             // stale id behind: drop it so a later open

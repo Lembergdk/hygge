@@ -78,6 +78,16 @@ extension AgentTask {
     public var connectsExistingAccount: Bool { draftedPayload["setupMode"] == "connect" }
     public var needsChatHelp: Bool { status == .needsHuman || status == .failed }
 
+    /// Whether a help request is something the user needs or can act on.
+    /// A failed task whose only help is a recovery with nothing
+    /// to review is not: the backend repairs that silently, and the help
+    /// is still there when the user opens the chat for the task.
+    public var helpIsActionable: Bool {
+        let kind = help?.kind ?? (status == .failed ? .recovery : informationRequests.isEmpty ? .verification : .information)
+        if kind == .recovery, status == .failed, pendingEffectID == nil { return false }
+        return true
+    }
+
     /// Clear the outstanding request only after the server accepted this choice.
     @discardableResult
     public mutating func stopHelp(helpID: UUID) -> Bool {

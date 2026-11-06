@@ -705,10 +705,10 @@ struct HomeFeedView: View {
             .matchedGeometryEffect(id: taskKey(task), in: focusAnimation, isSource: focus?.id != taskKey(task))
             .opacity(focus?.id == taskKey(task) ? 0 : 1)
         } else {
-            card(id: taskKey(task), title: "\(store.siteName(id: task.siteID)) · Working", subtitle: task.title,
-                 icon: "sparkles",
-                 chatContext: taskChatContext(task),
-                 open: { openFocus(.task(task)) }, allowsDismissal: false)
+            // No session yet: nothing shows in the feed until a browser
+            // session actually starts. The row stays in the feed and flips
+            // to the live card automatically once the session exists.
+            EmptyView()
         }
     }
     private func taskCard(_ task: AgentTask) -> some View {

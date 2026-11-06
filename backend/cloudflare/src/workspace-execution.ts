@@ -10,6 +10,7 @@ import { createContainerWorkspace, type WorkspaceContainer } from './workspace-c
 import { WorkspaceCaptureService, r2WorkspaceObjects, sha256 } from './workspace-capture.ts';
 import { workspaceSecret } from './workspace-owner.ts';
 import { createWorkspaceTaskRunner, type WorkspaceSaveInput } from './workspace-task-runner.ts';
+import type { WorkspaceTask } from './workspace-task-projection.ts';
 import { createWorkspaceSkills } from './workspace-skills.ts';
 import { mobileTask } from './task-help.ts';
 import { assertWorkspaceActionConsent, reviewedCompletionRules, verifyObservedMission } from './workspace-postconditions.ts';
@@ -34,6 +35,43 @@ export interface WorkspaceExecutionOptions {
   projectTask(task:any):void;
   denyFetcher?:Fetcher;
   assertOwnerIdle?:()=>void;
+}
+
+function domainOf(url:string):string{
+  try{return new URL(url).hostname.replace(/^www\./,'');}catch{return url;}
+}
+
+/**
+ * An unresolved effect blocks only a mission against the same site: the
+ * guard is against acting twice on one site, not against other sites.
+ * A task that cannot be loaded blocks (fail closed).
+ */
+export function hasBlockingUnresolvedEffect(
+  task:WorkspaceTask,
+  effects:{value:{taskId:string;status:string}}[],
+  loadTask:(id:string)=>WorkspaceTask|null|undefined,
+):boolean{
+  const site=domainOf(task.target_url);
+  return effects.some(({value:effect})=>{
+    if(effect.taskId===task.id||!['prepared','dispatching','uncertain'].includes(effect.status))return false;
+    const other=loadTask(effect.taskId);
+    return !other||domainOf(other.target_url)===site;
+  });
+}
+
+/**
+ * Human control blocks only a mission on the same site as a session the
+ * user is driving. A container that predates the per-session list reports
+ * only the boolean, which still blocks everything (fail closed).
+ */
+export function hasBlockingHumanSession(
+  task:WorkspaceTask,
+  status:{humanControlled:boolean;humanControlledSessions?:{sessionID:string;url:string}[]},
+):boolean{
+  if(!status.humanControlled)return false;
+  if(!status.humanControlledSessions)return true;
+  const site=domainOf(task.target_url);
+  return status.humanControlledSessions.some(s=>domainOf(s.url)===site);
 }
 /** Installed once per verified owner DO. All tools stay behind this private broker. */
 export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
@@ -242,14 +280,14 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   });
   const runner=createWorkspaceTaskRunner({owner,storage,foundation,saveWorkspace:save,projectTask:(task)=>options.projectTask(task),
     assertWorkspaceReady:async task=>{
-      await ensure();const status=await bridge.status();if(status.frozen || status.humanControlled)throw new Error('WORKSPACE_CAPTURE_OR_HUMAN_PENDING');
-      // No effect gate: one task's unresolved effect never blocks
-      // another task. The duplicate risk that motivated the gate is
-      // handled where it belongs — the agent verifies the live page
-      // before retrying a mutation ("never duplicate a submission"),
-      // and a task pauses itself when its OWN action is uncertain
-      // (see the runner). A global block just let one stuck
-      // background step brick every mission.
+      await ensure();const status=await bridge.status();if(status.frozen||hasBlockingHumanSession(task,status))throw new Error('WORKSPACE_CAPTURE_OR_HUMAN_PENDING');
+      // Per-site effect gate (not the global gate #114 removed): an
+      // unresolved effect blocks only a mission against the same site.
+      // One stuck step on Fiverr must not brick a mission on Upwork;
+      // two missions on the same site still cannot act twice on it.
+      // A task's own effect never blocks its own resume (see
+      // hasBlockingUnresolvedEffect).
+      if(hasBlockingUnresolvedEffect(task,foundation.persistence.list<any>('effect'),id=>options.loadTask(id)))throw new Error('WORKSPACE_HAS_UNRESOLVED_ACTION');
       // Node also enforces global control/freeze for every agent mutation.
     },
     authorizeAction:async(task,input)=>{

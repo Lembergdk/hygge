@@ -24,7 +24,7 @@ export interface ContainerWorkspaceOptions {
  /** Real service-binding Fetcher that receives (and thus blocks) private-range outbound HTTP. */
  denyFetcher?:Fetcher;
 }
-interface Status extends ContainerIdentity {artifactProtocolVersion?:number;maxArtifactBytes?:number;initialized:boolean;recoveredCheckpointId:string|null;filesystemRevision:number;browserProfileRevision:number;nextFilesystemRevision:number;nextBrowserProfileRevision:number;humanControlled:boolean;frozen:boolean}
+interface Status extends ContainerIdentity {artifactProtocolVersion?:number;maxArtifactBytes?:number;initialized:boolean;recoveredCheckpointId:string|null;filesystemRevision:number;browserProfileRevision:number;nextFilesystemRevision:number;nextBrowserProfileRevision:number;humanControlled:boolean;humanControlledSessions?:{sessionID:string;url:string}[];frozen:boolean}
 interface Manifest extends TreeMetadata,WorkspaceIdentity {schemaVersion:number;imageDigest:string;incarnation:string;generation:number;sequence:number;filesystemRevision:number;browserProfileRevision:number}
 /** Owner-bound factory. Root must authenticate routes/capture and configure a private container binding. */
 export function createContainerWorkspace(options:ContainerWorkspaceOptions){
