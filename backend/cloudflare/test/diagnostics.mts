@@ -53,8 +53,12 @@ test('diagnostics reports unresolved effects and the gate verdict without a cont
   const internalRow = diag.tasks.find((t: any) => t.id === 'task-internal');
   assert.equal(internalRow.mobileTaskPresent, false);
   assert.equal(internalRow.targetHost, 'invalid.example');
-  assert.equal(diag.wouldBlockNewMission, true);
-  assert.match(diag.blockReasons.join(' '), /eff-stuck/);
+  // The unresolved effect is still reported for audit, but it no
+  // longer blocks a new mission — there is no effect gate. (The
+  // verdict here is null only because this fixture has no container;
+  // the repair test proves a mission starts with a live container.)
+  assert.doesNotMatch(diag.blockReasons.join(' '), /eff-stuck/);
+  assert.equal(diag.wouldBlockNewMission, null);
   // A clean workspace reports no blockers.
   const { storage: storage2 } = sqliteWorkspace();
   for (const sql of ["CREATE TABLE tasks(id TEXT PRIMARY KEY,task TEXT NOT NULL,created_at TEXT NOT NULL)", "CREATE TABLE session_profiles(domain TEXT PRIMARY KEY,has_profile INTEGER)", "CREATE TABLE credentials(id TEXT PRIMARY KEY,username TEXT)", "CREATE TABLE profile(id TEXT PRIMARY KEY,payload TEXT)"]) storage2.sql.exec(sql);
