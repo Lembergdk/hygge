@@ -42,7 +42,7 @@ struct FeedPreviewHost: View {
         let site = TargetSite(id: "upwork", name: "Upwork", startURLString: "https://upwork.com", category: .creative, goalTemplate: "")
         let contra = TargetSite(id: "contra", name: "Contra", startURLString: "https://contra.com", category: .creative, goalTemplate: "")
         store.sites = [site, contra]; store.tasks = []; store.applications = []; store.chatTranscript = []
-        store.archivedFeedIDs = []; store.accountStates = [:]; store.lastMessage = nil; store.lastSyncError = nil
+        store.archivedFeedIDs = []; store.accountStates = [:]; store.lastSyncError = nil
         store.notificationPrimerVisible = false; store.isPaused = false; store.hasOnboarded = true
         store.conversationTaskID = nil; store.pendingTaskOpenID = nil; store.visitMarker = .distantPast
         store.proposals = [ProposedSite(siteID: site.id, rationale: "A job site for your design and writing", payPattern: "Rates and fees vary by contract", dataShared: "Name, photo and work profile", verification: "Email and identity checks before payouts")]

@@ -212,7 +212,7 @@ struct ApprovedSiteDetailView: View {
             let succeeded = await operation()
             removing = false
             if !succeeded {
-                actionError = store.lastMessage ?? "We couldn’t update access. Please try again."
+                actionError = "We couldn’t update access. Please try again."
                 if let actionError { AccessibilityNotification.Announcement(actionError).post() }
             } else if store.accountStates[site.id] == .disconnected {
                 dismiss()

@@ -142,7 +142,6 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingTaskOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingTaskOpenID = nil
             guard let task = store.tasks.first(where: { $0.id == id }) else {
-                store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
                 return
             }
             // The conversation opens as a sheet: dismiss whatever is
@@ -163,7 +162,6 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingOpportunityOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingOpportunityOpenID = nil
             guard let opportunity = store.opportunities.first(where: { $0.id == id }) else {
-                store.setRoutingNote("Fresh work is waiting in your feed below.")
                 return
             }
             dismissPresented()
@@ -173,7 +171,6 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingEmailOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingEmailOpenID = nil
             guard let mail = store.filedEmailSummaries.first(where: { $0.id.lowercased() == id.uuidString.lowercased() }) else {
-                store.setRoutingNote("That mail is filed under Hygge email in your profile.")
                 return
             }
             dismissPresented()
@@ -182,7 +179,6 @@ struct HomeFeedView: View {
             // re-checking the mail is still there.
             Task { @MainActor in
                 guard store.filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() }) else {
-                    store.setRoutingNote("That mail is filed under Hygge email in your profile.")
                     return
                 }
                 emailOpenItem = mail
@@ -193,7 +189,6 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingTaskFocusOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingTaskFocusOpenID = nil
             guard let task = store.tasks.first(where: { $0.id == id }) else {
-                store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
                 return
             }
             dismissPresented()
@@ -205,7 +200,6 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingProposalOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingProposalOpenID = nil
             guard let proposal = store.proposals.first(where: { $0.id == id }) else {
-                store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
                 return
             }
             dismissPresented()
@@ -215,7 +209,6 @@ struct HomeFeedView: View {
         .onChange(of: store.pendingEventOpenID, initial: true) { _, id in
             guard let id else { return }; store.pendingEventOpenID = nil
             guard let event = store.activityEvents.first(where: { $0.id == id }) else {
-                store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
                 return
             }
             dismissPresented()
@@ -241,14 +234,6 @@ struct HomeFeedView: View {
             guard open else { return }; store.pendingNotificationsOpen = false
             dismissPresented()
             Task { @MainActor in showNotifications = true }
-        }
-        // A routing fallback says so in one line on Home: bring it
-        // into view — close the chat bubble first (it would cover
-        // the note), then scroll the feed to the top where the
-        // note lives.
-        .onChange(of: store.routingNoteRevision) { _, _ in
-            if showBubbleChat { closeBubble() }
-            scrollAnchor = "feed-top"
         }
         .onChange(of: store.conversationTaskID) { _, id in
             guard id != nil else { return }
@@ -341,15 +326,6 @@ struct HomeFeedView: View {
             }
             if let error = store.lastSyncError {
                 Label(error, systemImage: "wifi.slash").font(.caption).foregroundStyle(HyggeTheme.ember)
-            }
-            // Routing fallbacks land here in one line (see
-            // handlePushRoute and the card-tap paths): a tap
-            // dismisses the note.
-            if let message = store.lastMessage {
-                Text(message).font(.caption).foregroundStyle(HyggeTheme.secondary).lineLimit(2)
-                    .onTapGesture { store.lastMessage = nil }
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityHint("Dismiss this note")
             }
         }
     }
