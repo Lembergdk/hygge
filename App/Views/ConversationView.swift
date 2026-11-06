@@ -79,6 +79,13 @@ struct ConversationView: View {
                                         }
                                     }.id(entry.id)
                                 }
+                                if isThinking && streamingText == nil {
+                                    HStack(alignment: .bottom, spacing: 7) {
+                                        AnimatedFlame(animation: .laptop, size: 26)
+                                        ThinkingDotsShared()
+                                        Spacer()
+                                    }
+                                }
                                 if let streamingText {
                                     agentBubble(streamingText)
                                 }
@@ -634,4 +641,25 @@ struct ConversationView: View {
         .padding(15).hyggeCard(radius: 18)
     }
 
+}
+
+/// Shared thinking dots (also usable outside onboarding).
+struct ThinkingDotsShared: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.1)) { context in
+            HStack(spacing: 6) {
+                ForEach(0..<3, id: \.self) { index in
+                    let phase = reduceMotion ? 0.5
+                        : 0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 3.2 - Double(index) * 0.55)
+                    Circle().fill(HyggeTheme.butter.opacity(0.35 + 0.65 * phase))
+                        .frame(width: 8, height: 8)
+                        .scaleEffect(0.75 + 0.35 * phase)
+                        .offset(y: -3 * phase)
+                }
+            }
+        }
+        .frame(width: 44, height: 14)
+        .accessibilityLabel("Hygge is thinking")
+    }
 }
