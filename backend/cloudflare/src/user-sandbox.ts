@@ -1828,20 +1828,29 @@ export class UserSandbox extends DurableObject<Env> {
   }
 
   /// Auto-resume a silent pause (needsHuman, no help): the agent
-  /// continues on its own, within a per-effect budget, so an
-  /// interrupted mission never waits on a user tap. A help-bearing
-  /// pause is a real stop (an approval, or an input only the user
-  /// can give) and is never auto-resumed. The budget is keyed to
-  /// the pending effect: a new effect resets it, and a pause with
-  /// no pending effect shares the "none" key so the loop still
-  /// terminates. Returns true when a resume was scheduled.
+  /// continues on its own, within a per-effect budget AND a
+  /// per-task total budget, so an interrupted mission never waits
+  /// on a user tap. A help-bearing pause is a real stop (an
+  /// approval, or an input only the user can give) and is never
+  /// auto-resumed. The per-effect budget is keyed to the pending
+  /// effect: a new effect resets it, so it alone cannot bound a
+  /// persistently-failing task (run → pause on fx_1 → resume →
+  /// run → pause on fx_2 …). The per-task total caps the whole
+  /// loop at 9 resumes — three effects at the full per-effect
+  /// budget of 3, or any mix totalling 9. Once either budget is
+  /// spent the task stays paused and visible. A user tap on
+  /// /continue or /run always resumes — the budgets bound
+  /// autonomous retries only. Returns true when a resume was
+  /// scheduled.
   private maybeAutoResume(task: any): boolean {
     if (!task || task.status !== "needsHuman" || task.help) return false;
     const key = task.workspace_pending_effect_id ?? "none";
     if (task.auto_resume_effect_id !== key) { task.auto_resume_effect_id = key; task.auto_resume_count = 0; }
     if ((task.auto_resume_count ?? 0) >= 3) return false;
+    if ((task.auto_resume_total ?? 0) >= 9) return false;
     task.auto_resume_count = (task.auto_resume_count ?? 0) + 1;
-    (task.log ??= []).push(`Auto-resume ${task.auto_resume_count}/3 for effect ${key}.`);
+    task.auto_resume_total = (task.auto_resume_total ?? 0) + 1;
+    (task.log ??= []).push(`Auto-resume ${task.auto_resume_count}/3 for effect ${key} (${task.auto_resume_total}/9 total).`);
     this.saveTask(task);
     this.scheduleMission(task);
     return true;
@@ -3230,7 +3239,15 @@ export class UserSandbox extends DurableObject<Env> {
           // The agent resolves the effect from its own page observation; the caller supplies no
           // outcome and no review. A client-supplied status is accepted for compatibility but ignored.
           if(typeof body.effectId!=='string')return json({error:'effectId is required'},400);
-          return json(await this.workspace().reconcile(task.id,body.effectId));
+          const reconciled = await this.workspace().reconcile(task.id,body.effectId);
+          // Reconciling clears the pending effect, so no other path
+          // resumes the task afterward (GET /tasks only auto-resumes
+          // on a session end; the queue consumer only after a run).
+          // Trigger a resume here when the result is a silent
+          // pause. A help-bearing result is a real stop — the help
+          // is preserved by reconcile — and is left for the user.
+          this.maybeAutoResume(reconciled);
+          return json(reconciled);
         }
         if (parts[2] === "continue") {
           // A silent pause (needsHuman, no help) has no request to

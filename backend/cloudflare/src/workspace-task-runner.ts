@@ -410,7 +410,13 @@ export function createWorkspaceTaskRunner(config:TaskRunnerConfig) {
         const latest=state(input.taskId);const canonical=f.effects.require(input.effectId);
         if(canonical.status!==resolved)fail('UNVERIFIED_OUTCOME');
         if(latest.pendingEffectId!==input.effectId){if(latest.pendingEffectId===null)return copy(latest.task);return fail('ACTION_TICKET_MISMATCH');}
-        const task={...latest.task,status:'needsHuman',authorized_action:null,pending_action:null,help:null};
+        // Reconcile clears the pending effect, never a legitimate
+        // help: the app only calls this endpoint while a help is
+        // live, so forcing help:null would destroy the request the
+        // user is meant to answer. (The old review prompt no longer
+        // exists, so there is no help here that reconcile itself
+        // should clear.)
+        const task={...latest.task,status:'needsHuman',authorized_action:null,pending_action:null,help:latest.task.help??null};
         saveRecord({...latest,status:'needsHuman',task,pendingEffectId:null,sequence:latest.sequence+1},`selfverify_projection_${effect.effectId}`);
         return copy(task);
       });

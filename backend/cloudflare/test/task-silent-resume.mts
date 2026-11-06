@@ -91,7 +91,11 @@ function makeSandbox() {
     },
     reconcile: async (taskId: string, effectId: string) => {
       reconciles.push({ taskId, effectId });
-      return { id: taskId, status: "needsHuman", help: null, workspace_pending_effect_id: null };
+      // The real runner persists the reconciled task (including a
+      // preserved help and the auto-resume counters) and returns
+      // it; merge the stored row so the stub does the same.
+      const stored = taskRow(taskId) ?? { id: taskId };
+      return { ...stored, status: "needsHuman", help: stored.help ?? null, workspace_pending_effect_id: null };
     },
   };
   (sandbox as any).workspace = () => stubWorkspace;
@@ -288,4 +292,79 @@ test("POST /tasks/{id}/reconcile drops reviewed:true and ignores a client-suppli
   assert.equal(missing.status, 400);
   const unknown = await t.call("/tasks/55555555-5555-4555-8555-555555555555/reconcile", { method: "POST", body: { effectId: "fx_1" } });
   assert.equal(unknown.status, 404);
+});
+
+test("POST /tasks/{id}/reconcile resumes a silent pause instead of leaving it stuck", async () => {
+  // Round-2 finding 1: reconcile clears the pending effect, so no
+  // other path resumes the task afterward (GET /tasks only
+  // auto-resumes on a session end; the queue consumer only after a
+  // run). The endpoint must trigger the resume itself.
+  const t = makeSandbox();
+  t.seedTask({ ...SILENT_TASK });
+  const res = await t.call(`/tasks/${SILENT_TASK.id}/reconcile`, { method: "POST", body: { effectId: "fx_1" } });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.status, "needsHuman");
+  assert.equal(t.sent.length, 1, "reconcile schedules a resume — nothing else resumes the task");
+  assert.equal(t.sent[0].taskId, SILENT_TASK.id);
+  assert.equal(t.taskRow(SILENT_TASK.id).auto_resume_count, 1);
+  assert.equal(t.taskRow(SILENT_TASK.id).auto_resume_total, 1);
+  // Deliver the queued job: the mission runs as a resume and completes.
+  const delivered = await t.call("/internal/jobs/run", {
+    method: "POST", body: t.sent[0], headers: { "x-hygge-job-consumer": "1" },
+  });
+  assert.equal(delivered.status, 200);
+  assert.equal(t.runs.length, 1);
+  assert.equal(t.runs[0].resume, true, "the reconciled task resumes");
+  assert.equal(t.taskRow(SILENT_TASK.id).status, "succeeded");
+});
+
+test("POST /tasks/{id}/reconcile preserves a legitimate help and does not auto-resume", async () => {
+  // Round-2 finding 1 (second half): the app only calls this
+  // endpoint while a help is live, so the reachable case is a task
+  // with both a help and a pending effect. Reconcile must not
+  // destroy the request the user is meant to answer, and a
+  // help-bearing pause is a real stop — no auto-resume.
+  const t = makeSandbox();
+  const help = { id: "33333333-3333-4333-8333-333333333333", kind: "verification", message: "Finish the check.", questions: [], actionLabel: "Complete check", deadline: null };
+  const id = "66666666-6666-4666-8666-666666666666";
+  t.seedTask({ ...SILENT_TASK, id, help });
+  const res = await t.call(`/tasks/${id}/reconcile`, { method: "POST", body: { effectId: "fx_1" } });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.status, "needsHuman");
+  assert.equal(res.body.help?.id, help.id, "the help survives reconcile");
+  assert.equal(t.sent.length, 0, "a help-bearing pause is never auto-resumed");
+  const stored = t.taskRow(id);
+  assert.equal(stored.status, "needsHuman");
+  assert.equal(stored.help?.id, help.id);
+});
+
+test("the queue consumer auto-resumes across new effects, bounded to nine total", async () => {
+  // Round-2 finding 2: every mission run pauses silently on a NEW
+  // effect, so the per-effect budget resets each time and only the
+  // per-task total can stop the loop. A persistently-failing task
+  // must stop after nine auto-resumes and stay paused and visible.
+  const t = makeSandbox();
+  let effect = 0;
+  t.setRunImpl((task) => ({ ...task, status: "needsHuman", help: null, workspace_pending_effect_id: `fx_${++effect}` }));
+  t.seedTask({ ...SILENT_TASK });
+  const { job } = enqueueMissionJob(t.ctx.storage, SILENT_TASK.id, new Date().toISOString(), crypto.randomUUID());
+  const deliver = async (msg: any) => {
+    const res = await t.call("/internal/jobs/run", {
+      method: "POST", body: msg, headers: { "x-hygge-job-consumer": "1" },
+    });
+    assert.equal(res.status, 200);
+    return res;
+  };
+  await deliver({ v: 1, jobId: job.jobId, userId: "user-1", taskId: SILENT_TASK.id, enqueuedAt: new Date().toISOString() });
+  // Nine auto-resumes, one per new effect: deliver each queued message in turn.
+  for (let i = 0; i < 9; i++) {
+    await t.waitForSent(i + 1);
+    await deliver(t.sent[i]);
+  }
+  await t.settle();
+  assert.equal(t.sent.length, 9, "no tenth auto-resume once the total budget is spent");
+  assert.equal(t.taskRow(SILENT_TASK.id).auto_resume_total, 9);
+  assert.equal(t.taskRow(SILENT_TASK.id).auto_resume_count, 1, "the per-effect count resets on every new effect — it alone never stops the loop");
+  assert.equal(t.taskRow(SILENT_TASK.id).status, "needsHuman");
+  assert.equal(t.taskRow(SILENT_TASK.id).help, null);
 });

@@ -171,6 +171,24 @@ test('Reconcile does not require reviewed:true',async()=>{
  assert.equal(f.foundation.checkpoints.db.list<any>('runner_evidence').map((e:any)=>e.value).filter((p:any)=>p.reviewedBy).length,0);f.sqlite.close();
 });
 
+test('Reconcile preserves a legitimate help instead of clearing it',async()=>{
+ const f=await fixture();f.setUncertainVerdict({status:'uncertain',evidence:{}});
+ // The mission dispatches an action whose observation is lost, then
+ // pauses for a real stop (a verification check) alongside the
+ // uncertain effect. Reconcile resolves the effect from the agent's
+ // own observation; the help the user is meant to answer survives.
+ // (Round-2 finding 1: the app only calls /reconcile while a help
+ // is live, so the reachable case is a task with both a help and a
+ // pending effect — forcing help:null would destroy the request.)
+ const paused=await f.runner.run({task:f.task('review','apply'),mission:async hooks=>{await hooks.onActionBefore({decision:{action:'click',target:'Submit'},snapshot:null,sessionID:null});return{status:'needs_human',help:{id:'help',kind:'verification',message:'Please finish',questions:[]}};}});
+ assert.equal(paused.status,'needsHuman');assert.equal(paused.help?.id,'help');
+ const effect=f.foundation.checkpoints.db.list<any>('effect')[0].value;assert.equal(effect.status,'dispatching','the dispatched action was never observed');
+ assert.equal(f.foundation.checkpoints.db.get<any>('runner_task','review')!.value.pendingEffectId,effect.effectId);
+ f.setUncertainVerdict({status:'not_applied',evidence:{observed:'no'}});
+ const reconciled=await f.runner.reconcile({taskId:'review',effectId:effect.effectId});
+ assert.equal(reconciled.status,'needsHuman');assert.equal(reconciled.help?.id,'help','a legitimate help survives reconcile');assert.equal(f.foundation.checkpoints.db.get<any>('runner_task','review')!.value.pendingEffectId,null);f.sqlite.close();
+});
+
 test('No user-facing help string contains a bracketed internal code',async()=>{
  const f=await fixture();f.setUncertainVerdict({status:'uncertain',evidence:{}});
  // A mission interrupted mid-flight: the code stays in the log, help stays null.
