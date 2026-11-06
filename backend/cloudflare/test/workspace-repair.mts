@@ -196,7 +196,7 @@ test('keepalive warms a cold workspace and renews the lease while warm',async()=
   assert.ok(Date.parse(lease2.expiresAt)>=Date.parse(lease1.expiresAt));
 });
 
-test('a dead-session effect resolves through the task review, and the gate clears',async()=>{
+test('a dead-session effect resolves through the task review',async()=>{
   const {f,w,before}=await wedgedMain();
   const db=w.foundation.persistence;
   const task:any={id:'task-fiverr',kind:'discover',target_url:'https://fiverr.example',goal:'Scan',status:'needsHuman',drafted_payload:{},interaction_version:1,log:[],session_id:'fx_run1_0',help:{kind:'recovery'}};
@@ -206,7 +206,10 @@ test('a dead-session effect resolves through the task review, and the gate clear
   db.put('effect','fx_3',0,{...base,effectId:'fx_3',taskId:'task-fiverr',runId:'run-1',status:'uncertain',revision:1});
   db.put('effect','fx_done',0,{...base,effectId:'fx_done',taskId:'task-fiverr',runId:'run-1',status:'confirmed',revision:1});
   const diagBefore:any=await w.diagnostics();
-  assert.equal(diagBefore.wouldBlockNewMission,true);
+  // The effect is listed for audit, but it never blocked a mission —
+  // there is no effect gate — so the verdict is already false.
+  assert.deepEqual(diagBefore.effects.unresolved.map((e:any)=>e.effectId),['fx_3']);
+  assert.equal(diagBefore.wouldBlockNewMission,false);
   // The review itself rebinds (reconcile calls ensure) and then resolves
   // with dead-session evidence: the session is gone and the effect belongs
   // to the incarnation that no longer runs.
@@ -314,3 +317,31 @@ test('a rebind whose start failed transiently resumes its start and moves to the
   assert.equal(diag.container.recoveredCheckpointId,before.recoveryPoint!.checkpointId);
 });
 
+
+test('no unresolved effect blocks a new mission or an upgrade', async () => {
+  // The Nov 5 Apple state, generalized: a task left an uncertain
+  // effect when its container was reclaimed. There is no effect gate:
+  // a new mission must start, and diagnostics must say so, even with
+  // that effect still unresolved. The duplicate risk is handled where
+  // it belongs — the agent verifies the live page before retrying a
+  // mutation, and a task pauses itself when its OWN action is
+  // uncertain — not by refusing unrelated work.
+  const f = fixture();
+  const w = f.make();
+  await w.ensure();
+  const stuck: any = { id: 'stuck-task', kind: 'signup', target_url: 'https://www.fiverr.com', goal: 'Sign up', status: 'needsHuman', drafted_payload: {}, interaction_version: 1, log: [], session_id: null, help: { kind: 'recovery' } };
+  f.projectTask(stuck);
+  const db = w.foundation.persistence;
+  const base = { ...db.owner, intentHash: 'h', approvalId: null, approvalScopeHash: null, incarnation: '', generation: 0 };
+  db.put('effect', 'eff-stuck', 0, { ...base, effectId: 'eff-stuck', taskId: 'stuck-task', runId: 'run-stuck', status: 'uncertain', revision: 1 });
+  const mission = async () => ({ status: 'succeeded' });
+  const next = { id: 'next-task', kind: 'discover', status: 'approved', interaction_version: 1, target_url: 'https://www.rover.com', drafted_payload: {}, log: [], mobile_task: { id: 'next-task', title: 'Rover', siteID: 'rover' } };
+  const ran: any = await w.runner.run({ task: next, mission });
+  assert.ok(ran && typeof ran.status === 'string');
+  // Diagnostics agrees: the effect is still listed for audit, but it
+  // is not a block reason and the mission is not blocked.
+  const diag: any = await w.diagnostics();
+  assert.deepEqual(diag.effects.unresolved.map((e: any) => e.effectId), ['eff-stuck']);
+  assert.doesNotMatch(diag.blockReasons.join(' '), /eff-stuck/);
+  assert.equal(diag.wouldBlockNewMission, false);
+});
