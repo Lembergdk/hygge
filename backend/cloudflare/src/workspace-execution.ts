@@ -54,9 +54,10 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   // retry after a partial rebind replays the same registry operations
   // instead of starting a second fence/start. The rebind never resolves,
   // bypasses, or hides an unresolved effect: the effect stays recorded
-  // for audit and review. It simply no longer gates anything — there is
-  // no effect gate, so a stuck effect cannot refuse a mission or an
-  // upgrade.
+  // for audit and review. It simply no longer refuses a mission — there
+  // is no mission effect gate. (Image migration still refuses while an
+  // effect is unresolved: it destroys the container, so it keeps its
+  // own idle check.)
   async function receiptForCheckpoint(checkpointId:string){
     const prefix=`receipt/${ownerKey(owner)}/`;
     const rows=[...storage.sql.exec('SELECT value FROM workspace_registry WHERE key LIKE ?',prefix+'%')] as {value:unknown}[];
@@ -286,11 +287,7 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
     prepare:async()=>{await ensure();const status=await bridge.status();if(status.humanControlled||status.frozen)throw Error('WORKSPACE_CAPTURE_OR_HUMAN_PENDING');return foundation.registry.read(owner,owner);},
     structuredHash:()=>structuredWorkspaceHash(storage),verifyFiles:(source,target)=>verifyImageFiles(objects,owner,source,target),
     assertIdle(){options.assertOwnerIdle?.();if(lineagePins.size||foundation.persistence.get('runner_owner','active'))throw Error('WORKSPACE_ADMISSION_BUSY');
-      // No effect gate here either: a past mission's unresolved
-      // effect does not make the filesystem inconsistent, and the
-      // runner_owner check above already proves no mission is
-      // actively running. A stuck effect must not block an upgrade.
-    },
+      if(foundation.persistence.list<any>('effect').some(e=>['prepared','dispatching','uncertain'].includes(e.value.status)))throw Error('WORKSPACE_HAS_UNRESOLVED_ACTION');},
     async capture(record,target){
       const writeId=`${record.operationId}_${target?'target':'source'}`;
       const prior=await foundation.registry.saved(owner,owner,writeId);if(prior)return foundation.verifyDurability(prior.receipt.receiptId);
