@@ -177,10 +177,20 @@ struct OnboardingView: View {
                         bottomTrailingRadius: 6, topTrailingRadius: 20))
             }
         case .thinking:
-            // No live indicator in chat: the entry is a placeholder
-            // the reply replaces, so it renders nothing until the
-            // first streamed words arrive.
-            EmptyView()
+            HStack(alignment: .center, spacing: 9) {
+                avatar
+                ThinkingDots()
+                    .padding(.horizontal, 15).padding(.vertical, 14)
+                    .background(GPTheme.card, in: UnevenRoundedRectangle(
+                        topLeadingRadius: 6, bottomLeadingRadius: 20,
+                        bottomTrailingRadius: 20, topTrailingRadius: 20))
+                    .overlay(UnevenRoundedRectangle(
+                        topLeadingRadius: 6, bottomLeadingRadius: 20,
+                        bottomTrailingRadius: 20, topTrailingRadius: 20)
+                        .stroke(GPTheme.hairline, lineWidth: 1))
+                Spacer()
+            }
+            .accessibilityLabel("Hygge is thinking")
         case .input:
             inputCard(step: entry.step ?? conversation.step)
                 .padding(.leading, 52)
@@ -743,6 +753,28 @@ struct OnboardingView: View {
         } else {
             serviceOnline = false
         }
+    }
+}
+
+/// Three-dot "agent is thinking" pulse; static when Reduce Motion is on.
+private struct ThinkingDots: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.1)) { context in
+            HStack(spacing: 6) {
+                ForEach(0..<3, id: \.self) { index in
+                    let phase = reduceMotion ? 0.5
+                        : 0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 3.2 - Double(index) * 0.55)
+                    Circle()
+                        .fill(GPTheme.teal.opacity(0.35 + 0.65 * phase))
+                        .frame(width: 8, height: 8)
+                        .scaleEffect(0.75 + 0.35 * phase)
+                        .offset(y: -3 * phase)
+                }
+            }
+        }
+        .frame(width: 44, height: 14)
     }
 }
 
