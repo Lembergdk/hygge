@@ -232,7 +232,16 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
   const runner=createWorkspaceTaskRunner({owner,storage,foundation,saveWorkspace:save,projectTask:(task)=>options.projectTask(task),
     assertWorkspaceReady:async task=>{
       await ensure();const status=await bridge.status();if(status.frozen || status.humanControlled)throw new Error('WORKSPACE_CAPTURE_OR_HUMAN_PENDING');
-      if(foundation.persistence.list<any>('effect').some(e=>e.value.taskId!==task.id && ['prepared','dispatching','uncertain'].includes(e.value.status)))throw new Error('WORKSPACE_HAS_UNRESOLVED_ACTION');
+      // A web probe is a read-only accessibility check: it never
+      // submits, signs up, or applies, and probe tasks are invisible
+      // to the app by design, so a probe's uncertain effect has no
+      // review surface and no external consequence. It must not block
+      // user work. Only effects from real tasks gate a new mission.
+      // A task that cannot be loaded fails closed (blocks), as before.
+      if(foundation.persistence.list<any>('effect').some(e=>{
+        if(e.value.taskId===task.id || !['prepared','dispatching','uncertain'].includes(e.value.status)) return false;
+        return options.loadTask(e.value.taskId)?.web_probe !== true;
+      }))throw new Error('WORKSPACE_HAS_UNRESOLVED_ACTION');
       // Node also enforces global control/freeze for every agent mutation.
     },
     authorizeAction:async(task,input)=>{
@@ -467,7 +476,10 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       const counts: Record<string, number> = {};
       for (const e of effects) counts[e.value.status] = (counts[e.value.status] ?? 0) + 1;
       const unresolved = effects.filter(e => ['prepared', 'dispatching', 'uncertain'].includes(e.value.status))
-        .map(e => ({ effectId: e.value.effectId, taskId: e.value.taskId, runId: e.value.runId, status: e.value.status, revision: e.revision, incarnation: e.value.incarnation, generation: e.value.generation }));
+        .map(e => { const t = options.loadTask(e.value.taskId);
+          // Flagged so the report says which effects gate a mission:
+          // a probe's effect never does (see assertWorkspaceReady).
+          return { effectId: e.value.effectId, taskId: e.value.taskId, runId: e.value.runId, status: e.value.status, revision: e.revision, incarnation: e.value.incarnation, generation: e.value.generation, webProbe: t?.web_probe === true }; });
       out.effects = { counts, unresolved };
       try {
         const rows = [...storage.sql.exec('SELECT task FROM tasks ORDER BY created_at DESC LIMIT 20')] as { task: unknown }[];
@@ -489,7 +501,8 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       const reasons: string[] = [];
       if (out.container.ok === true && out.container.frozen) reasons.push('container frozen');
       if (out.container.ok === true && out.container.humanControlled) reasons.push('browser held by human');
-      if (unresolved.length) reasons.push(`${unresolved.length} unresolved effect(s): ${unresolved.map(e => e.effectId).join(',')}`);
+      const blocking = unresolved.filter(e => !e.webProbe);
+      if (blocking.length) reasons.push(`${blocking.length} unresolved effect(s): ${blocking.map(e => e.effectId).join(',')}`);
       out.wouldBlockNewMission = reasons.length > 0 ? true : (out.container.ok === true ? false : null);
       out.blockReasons = reasons;
       out.ms = Date.now() - startedAt;
