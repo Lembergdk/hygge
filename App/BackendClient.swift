@@ -1042,19 +1042,6 @@ struct BackendClient {
         _ = try? await URLSession.shared.data(for: request)
     }
 
-    /// Review the outcome of a step whose browser session is gone:
-    /// confirmed means it happened on the site, not_applied means it
-    /// didn't. The server clears the stuck step either way, so the
-    /// task can continue with a fresh approval. Returns the updated
-    /// task when the server projects one.
-    func reconcileTask(id: String, effectID: String, status: String) async throws -> AgentTask? {
-        struct Body: Encodable { var reviewed: Bool; var effectId: String; var status: String }
-        struct Response: Decodable { var mobile_task: AgentTask? }
-        let response: Response = try await post("tasks/\(id)/reconcile",
-                                               body: Body(reviewed: true, effectId: effectID, status: status))
-        return response.mobile_task
-    }
-
     private func post<Response: Decodable, Body: Encodable>(_ path: String, body: Body) async throws -> Response {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"

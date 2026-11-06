@@ -68,23 +68,16 @@ struct ConversationView: View {
                                                store.chatTranscript.last(where: { $0.taskID == task.id })?.id == entry.id {
                                                 BrowserLiveAttachment(task: task) { takeBrowserControl = false; browserTask = task }.padding(.leading, 33)
                                             }
+                                            // Live status lives in the feed, never in chat:
+                                            // a running task shows nothing here, and a
+                                            // finished one is confirmed by a proper
+                                            // message at the end of the thread, not a
+                                            // caption glued to this entry.
                                             if task.needsChatHelp, let help = task.help, help.id == entry.helpID {
                                                 taskHelpCard(task, help: help)
-                                            } else if task.status == .running || task.status == .approved {
-                                                ProgressView("I’m continuing…").padding(.leading, 33)
-                                            } else {
-                                                Text(task.status == .succeeded ? "Done — this step is finished." : task.status == .rejected ? "Not continued." : task.needsChatHelp ? "There’s an updated request below." : "Answered.")
-                                                    .font(.caption).foregroundStyle(HyggeTheme.secondary).padding(.leading, 33)
                                             }
                                         }
                                     }.id(entry.id)
-                                }
-                                if isThinking && streamingText == nil {
-                                    HStack(alignment: .bottom, spacing: 7) {
-                                        AnimatedFlame(animation: avatarAnimation, size: 26)
-                                        ThinkingDotsShared()
-                                        Spacer()
-                                    }
                                 }
                                 if let streamingText {
                                     agentBubble(streamingText)
@@ -95,7 +88,7 @@ struct ConversationView: View {
                                 // is the turn in flight, not a failure.
                                 if !isThinking {
                                     if let pending = agentState?.activeTurn {
-                                        Button("Continue saved turn") { Task { await retryTurn(id: pending.id) } }
+                                        Button("Resume reply") { Task { await retryTurn(id: pending.id) } }
                                     } else if let retryMessage {
                                         Button("Try again") { Task { await retryTurn(id: retryMessage.id.uuidString.lowercased(), text: retryMessage.text) } }
                                     }
@@ -470,7 +463,7 @@ struct ConversationView: View {
                 } else { retryMessage = message }
             }
         }
-        catch { agentError = "I couldn't load your saved conversation. Try again when you're connected." }
+        catch { agentError = "I couldn't load your saved conversation. I'll keep trying." }
     }
 
     private func applyConversation(_ state: PersistentConversationState) async {
@@ -488,7 +481,7 @@ struct ConversationView: View {
     private func retryTurn(id: String, text: String? = nil) async {
         guard !isThinking else { return }
         // Leave streamingText nil until the first delta arrives: the
-        // thinking dots own the pre-reply phase, not an empty bubble.
+        // pre-reply phase shows nothing, not an empty bubble.
         isThinking = true; agentError = nil
         defer { isThinking = false; streamingText = nil }
         do {
@@ -506,7 +499,7 @@ struct ConversationView: View {
             }
             await applyConversation(result)
         } catch {
-            agentError = "That turn was interrupted. Its progress is saved; use Try again or Continue saved turn to resume."
+            agentError = "That reply didn't come through. Your message is saved — the buttons below resume it."
             agentState = try? await store.backend.conversationState()
         }
     }
@@ -523,7 +516,7 @@ struct ConversationView: View {
                 await finishDeviceAction(device, generation: state.generation)
             }
         } catch {
-            agentError = "I couldn't finish that decision. Check its saved status before trying again."
+            agentError = "That decision didn't go through. The card below is still waiting."
             agentState = try? await store.backend.conversationState()
         }
     }
@@ -532,10 +525,10 @@ struct ConversationView: View {
         guard let payload = proposal.result?.payload else { return }
         await store.beginConversationRequest()
         do { try await store.backend.claimConversationDeviceAction(generation: generation, proposalID: proposal.id) }
-        catch { agentError = "This calendar action may be in progress on another device. Check its outcome before continuing."; return }
+        catch { agentError = "This calendar action may already be in progress on another device."; return }
         let success = await CalendarService.book(payload: payload, operationID: proposal.id)
         do { await applyConversation(try await store.backend.conversationDeviceResult(generation: generation, proposalID: proposal.id, success: success)) }
-        catch { agentError = "I couldn't report the calendar result. Retrying this saved action will check for an existing event first." }
+        catch { agentError = success ? "It's in your calendar. I couldn't confirm the result here." : "That booking didn't go through." }
     }
 
     @ViewBuilder
@@ -563,17 +556,11 @@ struct ConversationView: View {
                     replyTarget = TaskReplyTarget(taskID: task.id, helpID: help.id, question: question.text)
                     composerFocused = true
                 }.buttonStyle(SettingsActionStyle(filled: false))
-            } else if let effectID = task.pendingEffectID {
-                // A pending effect is a review, whatever the help kind:
-                // the step's browser session is gone, so the check is the
-                // user's own review: did the step happen on the site?
-                Button("It worked") {
-                    Task { await store.reviewTask(taskID: task.id, helpID: help.id, effectID: effectID, confirmed: true) }
-                }.buttonStyle(SettingsActionStyle())
-                Button("It didn't work") {
-                    Task { await store.reviewTask(taskID: task.id, helpID: help.id, effectID: effectID, confirmed: false) }
-                }.buttonStyle(SettingsActionStyle(filled: false))
             } else {
+                // A pending effect is not a review: the agent verifies
+                // the step itself and resumes on its own, so a task
+                // with a pending effect and a real request shows the
+                // request's own action here.
                 Button(help.actionLabel) {
                     switch help.kind {
                     case .credentials:
@@ -647,25 +634,4 @@ struct ConversationView: View {
         .padding(15).hyggeCard(radius: 18)
     }
 
-}
-
-/// Shared thinking dots (also usable outside onboarding).
-struct ThinkingDotsShared: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 0.1)) { context in
-            HStack(spacing: 6) {
-                ForEach(0..<3, id: \.self) { index in
-                    let phase = reduceMotion ? 0.5
-                        : 0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 3.2 - Double(index) * 0.55)
-                    Circle().fill(HyggeTheme.ember.opacity(0.35 + 0.65 * phase))
-                        .frame(width: 8, height: 8)
-                        .scaleEffect(0.75 + 0.35 * phase)
-                        .offset(y: -3 * phase)
-                }
-            }
-        }
-        .frame(width: 44, height: 14)
-        .accessibilityLabel("Hygge is thinking")
-    }
 }
