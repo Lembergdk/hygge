@@ -33,8 +33,8 @@ export function parseHelpDeadline(value: unknown, now: Date = new Date()): Date 
 ///   profile questions (never wanted), checkpoint-budget
 ///   verification (askAfterTrying — no expiry is knowable),
 ///   human-takeover verification (user-sandbox.ts), and the
-///   workspace runner's recoveryHelp (no page content to read one
-///   from). A help built without a deadline has deadline null, and
+///   workspace runner's silent pauses (no help, so no deadline
+///   to set). A help built without a deadline has deadline null, and
 ///   the card shows no expiration date for it.
 
 export function help(kind: string, message: string, questions: any[] = [], actionLabel = "Continue",
@@ -293,8 +293,13 @@ export function canResumeWithInboxCode(task: any): boolean {
     && task.checkpoint === "two-factor check" && task.email_code_available === true && task.scheduled_scan !== true;
 }
 
-/** Expiration invalidates page-bound consent and replaces the dead checkpoint once. */
-export function reconcileEndedSession(task: any, sessionAvailable: boolean, active: boolean): boolean {
+/** Expiration invalidates page-bound consent and replaces the dead checkpoint once.
+ * A retained-v2 session end is a silent pause (silent=true): no recovery
+ * prompt is set — the task resumes on its own through the server-side
+ * auto-resume, and no chat message or push is composed for it (saveTask
+ * only mirrors a non-null help). Legacy callers keep the recovery prompt
+ * (silent=false, the default) so the user can still tap "Open new session". */
+export function reconcileEndedSession(task: any, sessionAvailable: boolean, active: boolean, silent = false): boolean {
   if (active || sessionAvailable || !task.session_id || task.interaction_version !== 1
       || !["needsHuman", "failed", "running"].includes(task.status)) return false;
   task.session_id = null;
@@ -304,7 +309,11 @@ export function reconcileEndedSession(task: any, sessionAvailable: boolean, acti
   task.checkpoint = null;
   task.information_requests = [];
   task.failure = { code: "session_ended" };
-  task.help = help("recovery", "This browser session ended before we finished. I can open a new session and check where we left off, or you can stop here.", [], "Open new session", null, { staticText: true });
+  if (!silent) {
+    task.help = help("recovery", "This browser session ended before we finished. I can open a new session and check where we left off, or you can stop here.", [], "Open new session", null, { staticText: true });
+  } else {
+    task.help = null;
+  }
   return true;
 }
 

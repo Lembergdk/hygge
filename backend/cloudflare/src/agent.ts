@@ -633,7 +633,7 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
       return { status: "needs_human", trace, extractedItems, log, sessionID: snap.sessionID, help: help("verification", userMessage ?? "This site has a check I couldn't finish. Open the browser to complete it, or stop here.", [], "Complete check", typeof decision.deadline === "string" ? decision.deadline : null, userMessage ? {} : { staticText: true }), sessionProbe, resumedSession, ...routing() };
     }
 
-    if ((task.workspace_requires_fresh_approval || needsActionApproval(task, decision)) && decision.consentGranted !== true) {
+    if (needsActionApproval(task, decision) && decision.consentGranted !== true) {
       await recordToolApproval("requested");
       // Preview/reason are the model's own words and relay verbatim;
       // only the literal fallback (neither supplied) is static-marked.
@@ -648,7 +648,6 @@ async function runMissionInner({ browser, task, hints = [], hasCredential = fals
     // The wrapper owns the whole operation, including private credential/code
     // fills and uploads; nested browser calls must not consume consent twice.
     const ticket = await workspaceHooks?.onActionBefore({ decision, snapshot, sessionID: snap.sessionID, approvedActionProof });
-    if (ticket && approvedActionProof) task.workspace_requires_fresh_approval = false;
     try {
       result = await withSpan(`execute_tool ${decision.action}`, {
         ...traceIdentity,

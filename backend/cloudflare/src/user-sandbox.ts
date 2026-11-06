@@ -1784,7 +1784,11 @@ export class UserSandbox extends DurableObject<Env> {
   /// itself runs on queue delivery. Inline fallback awaits the run.
   private async enqueueOrRunMission(task: any): Promise<any> {
     const queue = this.env.MISSION_QUEUE;
-    if (!queue || !this.userId) return this.runInteractiveTask(task, this.browser());
+    if (!queue || !this.userId) {
+      const result = await this.runInteractiveTask(task, this.browser());
+      this.maybeAutoResume(result);
+      return result;
+    }
     const enqueuedAt = new Date().toISOString();
     const { job } = enqueueMissionJob(this.ctx.storage, String(task.id), enqueuedAt, crypto.randomUUID());
     if (job.state === "running" && this.activeMissions.has(task.id)) {
@@ -1804,7 +1808,9 @@ export class UserSandbox extends DurableObject<Env> {
         `queue send failed: ${String((e as Error)?.message ?? e)}`);
       task.log?.push("Background queue unavailable; running now instead.");
       this.saveTask(task);
-      return this.runInteractiveTask(task, this.browser());
+      const inline = await this.runInteractiveTask(task, this.browser());
+      this.maybeAutoResume(inline);
+      return inline;
     }
     return task;
   }
@@ -1819,6 +1825,35 @@ export class UserSandbox extends DurableObject<Env> {
       return;
     }
     void this.enqueueOrRunMission(task).catch(() => {});
+  }
+
+  /// Auto-resume a silent pause (needsHuman, no help): the agent
+  /// continues on its own, within a per-effect budget AND a
+  /// per-task total budget, so an interrupted mission never waits
+  /// on a user tap. A help-bearing pause is a real stop (an
+  /// approval, or an input only the user can give) and is never
+  /// auto-resumed. The per-effect budget is keyed to the pending
+  /// effect: a new effect resets it, so it alone cannot bound a
+  /// persistently-failing task (run → pause on fx_1 → resume →
+  /// run → pause on fx_2 …). The per-task total caps the whole
+  /// loop at 9 resumes — three effects at the full per-effect
+  /// budget of 3, or any mix totalling 9. Once either budget is
+  /// spent the task stays paused and visible. A user tap on
+  /// /continue or /run always resumes — the budgets bound
+  /// autonomous retries only. Returns true when a resume was
+  /// scheduled.
+  private maybeAutoResume(task: any): boolean {
+    if (!task || task.status !== "needsHuman" || task.help) return false;
+    const key = task.workspace_pending_effect_id ?? "none";
+    if (task.auto_resume_effect_id !== key) { task.auto_resume_effect_id = key; task.auto_resume_count = 0; }
+    if ((task.auto_resume_count ?? 0) >= 3) return false;
+    if ((task.auto_resume_total ?? 0) >= 9) return false;
+    task.auto_resume_count = (task.auto_resume_count ?? 0) + 1;
+    task.auto_resume_total = (task.auto_resume_total ?? 0) + 1;
+    (task.log ??= []).push(`Auto-resume ${task.auto_resume_count}/3 for effect ${key} (${task.auto_resume_total}/9 total).`);
+    this.saveTask(task);
+    this.scheduleMission(task);
+    return true;
   }
 
   /// Consumer delivery: run one claimed job to its resting state.
@@ -1860,6 +1895,11 @@ export class UserSandbox extends DurableObject<Env> {
       return json({ error: message }, 500);
     }
     finishMissionJob(this.ctx.storage, jobId, "done", new Date().toISOString());
+    // The job is finished, so a re-enqueue here mints a fresh job
+    // (enqueueMissionJob returns the still-running job while this
+    // one is open). A silent pause resumes on its own, within the
+    // per-effect budget; any other resting state stays put.
+    this.maybeAutoResume(result);
     return json({ ok: true, jobState: "done", taskStatus: result?.status ?? task.status });
   }
 
@@ -1957,7 +1997,11 @@ export class UserSandbox extends DurableObject<Env> {
 
   private async runTask(task: any, browser: UserBrowser) {
     if (workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2') {
-      return this.workspace().run(task,(hooks,_runId,scopedTask)=>this.runTaskLegacy(scopedTask,browser,hooks),task.status==='running' || task.status==='approved');
+      // A silent pause (needsHuman, no help) resumes exactly like a
+      // running/approved task: the runner re-observes the pending
+      // effect and continues. Without this the runner refuses the
+      // resume and the task can never leave needsHuman.
+      return this.workspace().run(task,(hooks,_runId,scopedTask)=>this.runTaskLegacy(scopedTask,browser,hooks),task.status==='running' || task.status==='approved' || (task.status==='needsHuman' && !task.help));
     }
     return this.runTaskLegacy(task,browser);
   }
@@ -3168,7 +3212,14 @@ export class UserSandbox extends DurableObject<Env> {
           const runnerActive = runnerPhase === 'waiting_for_workspace' || runnerPhase === 'browser_starting' || runnerPhase === 'running';
           if ((workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='legacy' || retainedV2)
               && reconcileEndedSession(t, Boolean(t.session_id && browser.hasSession(t.session_id)),
-              this.activeMissions.has(t.id) || this.browserResumes.has(t.id) || runnerActive)) this.saveTask(t);
+              this.activeMissions.has(t.id) || this.browserResumes.has(t.id) || runnerActive, retainedV2)) {
+            this.saveTask(t);
+            // A retained-v2 session end is now a silent pause (no
+            // recovery prompt): resume it on its own. Legacy keeps
+            // the recovery prompt, so there is nothing to resume
+            // automatically there.
+            this.maybeAutoResume(t);
+          }
           return { ...this.executionView(t), mobile_task: mobileTask(t) };
         }) });
       }
@@ -3185,13 +3236,29 @@ export class UserSandbox extends DurableObject<Env> {
         const task = this.loadTask(parts[1]);
         if (!task) return json({ error: "unknown task" }, 404);
         if(parts[2]==='reconcile' && workspaceMode(this.env.HYGGE_WORKSPACE_MODE)==='retained-v2') {
-          if(body.reviewed !== true || typeof body.effectId!=='string' || !['confirmed','not_applied'].includes(body.status))return json({error:'Explicit review of the current site outcome is required'},400);
-          return json(await this.workspace().reconcile(task.id,body.effectId,body.status));
+          // The agent resolves the effect from its own page observation; the caller supplies no
+          // outcome and no review. A client-supplied status is accepted for compatibility but ignored.
+          if(typeof body.effectId!=='string')return json({error:'effectId is required'},400);
+          const reconciled = await this.workspace().reconcile(task.id,body.effectId);
+          // Reconciling clears the pending effect, so no other path
+          // resumes the task afterward (GET /tasks only auto-resumes
+          // on a session end; the queue consumer only after a run).
+          // Trigger a resume here when the result is a silent
+          // pause. A help-bearing result is a real stop — the help
+          // is preserved by reconcile — and is left for the user.
+          this.maybeAutoResume(reconciled);
+          return json(reconciled);
         }
         if (parts[2] === "continue") {
-          const error = applyHelpReply(task, body);
-          if (error) return json({ error }, 409);
-          if (task.help) { this.saveTask(task); return json(task); }
+          // A silent pause (needsHuman, no help) has no request to
+          // reply to: resume it directly. A help-bearing pause still
+          // goes through the reply (approval / answers) first, and a
+          // help left standing after the reply returns as-is.
+          if (!(task.status === "needsHuman" && !task.help)) {
+            const error = applyHelpReply(task, body);
+            if (error) return json({ error }, 409);
+            if (task.help) { this.saveTask(task); return json(task); }
+          }
           const refs = [...this.ctx.storage.sql.exec("SELECT id FROM credentials WHERE domain = ? LIMIT 1", domainOf(task.target_url))] as Row[];
           if (refs.length) task.credential_id = refs[0].id;
           task.status = "running";
@@ -3222,10 +3289,14 @@ export class UserSandbox extends DurableObject<Env> {
           if (!["awaiting_approval", "needsHuman", "approved", "running"].includes(task.status)) {
             return json({ error: `task is ${task.status}, not awaiting_approval` }, 409);
           }
-          if (task.interaction_version === 1 && task.status === "needsHuman") return json({ error: "Reply to the current request in chat." }, 409);
+          // A needsHuman task with a live request must be replied to
+          // in chat. A silent pause (no help) has no request: it
+          // resumes below like an approved/running task.
+          if (task.interaction_version === 1 && task.status === "needsHuman" && task.help) return json({ error: "Reply to the current request in chat." }, 409);
           const resuming = task.status === "needsHuman" || task.status === "approved" || task.status === "running";
+          const silentPause = task.status === "needsHuman" && !task.help;
           task.status = task.interaction_version === 1 ? "running" : "approved";
-          task.log.push(resuming ? "Resumed by user after completing the check" : "Approved by user");
+          task.log.push(silentPause ? "Resumed by user" : resuming ? "Resumed by user after completing the check" : "Approved by user");
           this.saveTask(task);
           return json(await this.enqueueOrRunMission(task));
         }
