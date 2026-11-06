@@ -11,6 +11,7 @@ import { WorkspaceCaptureService, r2WorkspaceObjects, sha256 } from './workspace
 import { workspaceSecret } from './workspace-owner.ts';
 import { createWorkspaceTaskRunner, type WorkspaceSaveInput } from './workspace-task-runner.ts';
 import { createWorkspaceSkills } from './workspace-skills.ts';
+import { mobileTask } from './task-help.ts';
 import { assertWorkspaceActionConsent, reviewedCompletionRules, verifyObservedMission } from './workspace-postconditions.ts';
 import { outcomeForTaskKind } from './skills.ts';
 import { digest } from './workspace-persistence.ts';
@@ -470,7 +471,20 @@ export function createWorkspaceExecution(options:WorkspaceExecutionOptions) {
       out.effects = { counts, unresolved };
       try {
         const rows = [...storage.sql.exec('SELECT task FROM tasks ORDER BY created_at DESC LIMIT 20')] as { task: unknown }[];
-        out.tasks = rows.map(r => { const t: any = JSON.parse(String(r.task)); return { id: t.id, kind: t.kind, status: t.status, sessionId: t.session_id ?? null, helpKind: t.help?.kind ?? null }; });
+        out.tasks = rows.map(r => { const t: any = JSON.parse(String(r.task));
+          // Whether GET /tasks would return a mobile projection for this
+          // task — the app only sees tasks with one. A stuck task with
+          // no projection is invisible (no feed card, no conversation,
+          // no review), so this is the first thing to check when a task
+          // the server lists never reaches the app. pendingEffectID and
+          // targetHost are the synthesis gate's inputs, so a false
+          // mobileTaskPresent names the blocker by inspection.
+          const projected = mobileTask(t);
+          let targetHost: string | null = null;
+          try { targetHost = new URL(String(t.target_url)).hostname.replace(/^www\./, ""); } catch { targetHost = null; }
+          return { id: t.id, kind: t.kind, status: t.status, sessionId: t.session_id ?? null, helpKind: t.help?.kind ?? null,
+            pendingEffectID: t.workspace_pending_effect_id ?? null, targetHost, webProbe: t.web_probe === true,
+            mobileTaskPresent: projected !== null, mobileTaskPendingEffectID: projected?.pendingEffectID ?? null }; });
       } catch (error) { out.tasks = { ok: false, error: errorOf(error) }; }
       const reasons: string[] = [];
       if (out.container.ok === true && out.container.frozen) reasons.push('container frozen');

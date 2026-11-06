@@ -13,6 +13,10 @@ test('diagnostics reports unresolved effects and the gate verdict without a cont
   const projectTask = (value: any) => storage.sql.exec('INSERT INTO tasks(id,task,created_at) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET task=excluded.task', value.id, JSON.stringify(value), new Date().toISOString());
   const task: any = { id: 'task-1', kind: 'signup', target_url: 'https://example.invalid/signup', goal: 'Sign up', status: 'needsHuman', drafted_payload: {}, interaction_version: 1, log: [], session_id: 'sess-1', help: { kind: 'recovery' } };
   projectTask(task);
+  // Internal work stays invisible: a running fixture task has no help
+  // and no pending effect, and its target is not a real site.
+  const internal: any = { id: 'task-internal', kind: 'discover', target_url: 'https://invalid.example', goal: 'g', status: 'running', drafted_payload: {}, interaction_version: 1, log: [], session_id: null, help: null };
+  projectTask(internal);
   const container: any = { inspect: async () => null, start() { throw new Error('NO_CONTAINER'); }, monitor: async () => {}, setInactivityTimeout: async () => {}, interceptOutboundHttp: async () => {}, interceptOutboundHttps: async () => {}, destroy: async () => {}, getTcpPort: () => { throw new Error('NO_TCP'); } };
   const blobs = new Map<string, Uint8Array>();
   const bucket: any = { put: async (k: string, v: Uint8Array) => { blobs.set(k, Uint8Array.from(v)); }, get: async (k: string) => { const v = blobs.get(k); return v ? { arrayBuffer: async () => Uint8Array.from(v).buffer } : null; } };
@@ -32,8 +36,23 @@ test('diagnostics reports unresolved effects and the gate verdict without a cont
   assert.equal(diag.effects.counts.confirmed, 1);
   assert.deepEqual(diag.effects.unresolved.map((e: any) => e.effectId), ['eff-stuck']);
   assert.equal(diag.effects.unresolved[0].taskId, 'task-1');
-  assert.equal(diag.tasks[0].id, 'task-1');
-  assert.equal(diag.tasks[0].status, 'needsHuman');
+  // Look both tasks up by id: they share a created_at timestamp, so
+  // their order in the created_at DESC list is not stable.
+  const taskRow = diag.tasks.find((t: any) => t.id === 'task-1');
+  assert.equal(taskRow.status, 'needsHuman');
+  // The task has no stored mobile projection, but it is stuck waiting
+  // on the user with a help, so GET /tasks synthesizes one — and the
+  // diagnostics says so. A task the server lists but the app never
+  // sees is diagnosed here first: mobileTaskPresent false names the
+  // server side, true points at the app's pull/decode.
+  assert.equal(taskRow.mobileTaskPresent, true);
+  assert.equal(taskRow.mobileTaskPendingEffectID, null);
+  assert.equal(taskRow.pendingEffectID, null);
+  assert.equal(taskRow.targetHost, 'example.invalid');
+  assert.equal(taskRow.webProbe, false);
+  const internalRow = diag.tasks.find((t: any) => t.id === 'task-internal');
+  assert.equal(internalRow.mobileTaskPresent, false);
+  assert.equal(internalRow.targetHost, 'invalid.example');
   assert.equal(diag.wouldBlockNewMission, true);
   assert.match(diag.blockReasons.join(' '), /eff-stuck/);
   // A clean workspace reports no blockers.
