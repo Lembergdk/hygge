@@ -129,6 +129,43 @@ test('a stuck live task with a pending effect but no help is still reviewable', 
   assert.equal(mobileTask(t).pendingEffectID, 'fx_9');
 });
 
+test('a synthesized projection never carries a field the app cannot decode', () => {
+  // The raw record is model-shaped: the trace can hold an action the
+  // app's BrowserActionKind does not know, the payload can hold a
+  // non-string value, the log can hold a non-string entry, and the
+  // stored date can be unparseable. One such field would fail the
+  // whole tasks response to decode (the app decodes the list as one
+  // document), so the synthesis must drop it, not pass it through.
+  // This is the Apple Fiverr shape: the #108 synthesis was live and
+  // the gate passed, yet the task still did not appear after a cold
+  // restart — the projection itself must have been undecodable.
+  const dirty: any = { id: 'task-fiverr', kind: 'discover', target_url: 'https://www.fiverr.com/search', goal: 'Find work', title: 'Scheduled look at Fiverr', status: 'needsHuman', help: help('recovery', 'm'), workspace_pending_effect_id: 'fx_1',
+    drafted_payload: { searchTerms: 'design', hourlyRate: 50 },
+    browser_trace: [
+      { action: 'scrollDown', target: '', urlString: 'https://www.fiverr.com/', summary: 'scrolled', succeeded: true },
+      { action: 'click', target: 'Sign in', urlString: 'https://www.fiverr.com/', summary: 'clicked', succeeded: true, modelTier: 'spark', model: 'muse-spark-1.3' },
+      { action: 'click', target: '', urlString: 'https://www.fiverr.com/', summary: 'no success flag' },
+    ],
+    information_requests: ['phone', { text: 'dob' }],
+    log: ['looked', { event: 'x' }],
+    createdAt: 'not a date' };
+  const projected = mobileTask(dirty);
+  assert.ok(projected);
+  assert.deepEqual(projected.draftedPayload, { searchTerms: 'design' });
+  assert.deepEqual(projected.browserTrace, [{ action: 'click', target: 'Sign in', urlString: 'https://www.fiverr.com/', summary: 'clicked', succeeded: true }]);
+  assert.deepEqual(projected.informationRequests, ['phone']);
+  assert.deepEqual(projected.log, ['looked']);
+  assert.ok(Number.isFinite(projected.createdAt));
+  // The projection round-trips through JSON with every required
+  // AgentTask field present and typed as the app decodes it.
+  const roundTripped = JSON.parse(JSON.stringify(projected));
+  assert.equal(typeof roundTripped.createdAt, 'number');
+  assert.ok(Object.values(roundTripped.draftedPayload).every((v: any) => typeof v === 'string'));
+  assert.ok(roundTripped.browserTrace.every((e: any) => ['navigate', 'click', 'type', 'select', 'extract', 'screenshot', 'waitForHuman', 'askUser', 'done', 'needsHuman'].includes(e.action) && typeof e.target === 'string' && typeof e.urlString === 'string' && typeof e.summary === 'string' && typeof e.succeeded === 'boolean'));
+  assert.ok(roundTripped.informationRequests.every((v: any) => typeof v === 'string'));
+  assert.ok(roundTripped.log.every((v: any) => typeof v === 'string'));
+});
+
 test('internal and unreviewable tasks without a mobile projection stay hidden', () => {
   const base: any = { id: 't', kind: 'discover', target_url: 'https://fiverr.com/', goal: 'g', title: 't', status: 'needsHuman', help: help('recovery', 'm'), createdAt: '2026-11-04T12:00:00Z' };
   assert.equal(mobileTask({ ...base, target_url: 'https://invalid.example' }), null); // fixture/document work
