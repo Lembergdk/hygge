@@ -149,7 +149,6 @@ final class AppStore {
     var lastVisitAt: Date?
     /// Captured at launch: journal grouping is 'since' this moment.
     var visitMarker: Date = .distantPast
-    var lastMessage: String?
 
     // Brief 01: the local snapshot below is a cache. Once the one-time
     // migration verifies, `isBackendFirst` flips and pulls/pushes keep
@@ -232,10 +231,6 @@ final class AppStore {
     /// Last conversation generation seen from the server. A new one
     /// means the thread was cleared (reset).
     private(set) var lastConversationGeneration: String?
-    /// Bumped whenever a routing fallback writes lastMessage, so
-    /// Home can bring the note into view (scroll to top, close the
-    /// chat bubble first). Session-only.
-    var routingNoteRevision = 0
     /// A chat card about the notifications primer: open the
     /// notifications surface once Home has closed what is open.
     var pendingNotificationsOpen = false
@@ -614,15 +609,6 @@ final class AppStore {
         await refreshNotificationPrimer()
     }
 
-    /// A routing fallback has something to say on Home: set the
-    /// one-line note and bump the revision HomeFeedView watches to
-    /// bring it into view — the feed scrolls to the top and an open
-    /// chat bubble closes first, so the note is never left
-    /// off-screen or hidden behind the bubble.
-    func setRoutingNote(_ message: String) {
-        lastMessage = message
-        routingNoteRevision += 1
-    }
 
     /// A tapped notification lands on fresh state, then opens the
     /// exact element it named: the task's chat card, the listing's
@@ -640,23 +626,21 @@ final class AppStore {
             try? await Task.sleep(for: .milliseconds(100))
             waits += 1
         }
-        // The pull's result matters: a failed pull leaves the last
-        // known transcript in place, so a missing message after a
-        // failed pull is "unconfirmed", not "gone".
-        let pulled = await pullFromServer()
+        // The pull matters: a failed pull leaves the last known
+        // transcript in place, so a missing message after a failed
+        // pull is "unconfirmed", not "gone".
+        _ = await pullFromServer()
         switch PushDeepLink.parse(route: route) {
         case .task(let id):
             if tasks.contains(where: { $0.id == id }) {
                 pendingTaskOpenID = id
-            } else {
-                setRoutingNote("That one is already sorted. Everything waiting for you is below.")
             }
         case .chat(let id):
             // The message itself is the landing: open the
             // conversation it lives in (HomeFeedView observes this)
             // and scroll to it — but only when it is actually in
-            // the transcript after the pull. Otherwise say so in
-            // one line instead of opening a bare conversation.
+            // the transcript after the pull. Otherwise leave the
+            // conversation closed.
             if chatTranscript.contains(where: { $0.id == id }) {
                 pendingChatMessageID = id
                 pendingChatOpenID = id
@@ -664,9 +648,6 @@ final class AppStore {
                 // No message to scroll to: drop any stale id so a
                 // later open does not chase it again.
                 pendingChatMessageID = nil
-                setRoutingNote(pulled
-                    ? "That message isn't here anymore. Everything waiting for you is below."
-                    : "I couldn't reach your conversation just now. Everything waiting for you is below.")
             }
         case .feedItem(let id):
             if opportunities.contains(where: { $0.id == id }) {
@@ -674,14 +655,11 @@ final class AppStore {
                 pendingOpportunityOpenID = id
             } else {
                 highlightedOpportunityID = nil
-                setRoutingNote("Fresh work is waiting in your feed below.")
             }
         case .email(let id):
             await refreshHyggeEmail()
             if filedEmailSummaries.contains(where: { $0.id.lowercased() == id.uuidString.lowercased() }) {
                 pendingEmailOpenID = id
-            } else {
-                setRoutingNote("That mail is filed under Hygge email in your profile.")
             }
         case .home:
             break
@@ -740,7 +718,6 @@ final class AppStore {
         resetLocalState()
         if let url = storeURL { try? FileManager.default.removeItem(at: url) }
         writeCache()
-        lastMessage = "Signed out. Your Hygge account is still there whenever you sign back in."
     }
 
     /// Deletes the account server-side, then runs the same local wipe as
@@ -763,7 +740,6 @@ final class AppStore {
         for proposal in proposals where accountStates[proposal.siteID] == nil {
             accountStates[proposal.siteID] = .proposed
         }
-        lastMessage = "I've found \(proposals.count) job sites that fit you — starting with the one below. Say yes and I'll handle the signup from there."
         save()
     }
 
@@ -771,15 +747,12 @@ final class AppStore {
     /// state is always persisted and explained the same way.
     func setPaused(_ paused: Bool) {
         isPaused = paused
-        lastMessage = paused
-            ? "Paused. I won't search, send, or book until you resume."
-            : "Back on. I'll tell you in the morning — sooner if something needs you."
         save()
     }
 
     func approveProposal(proposalID: UUID, alreadyHasAccount: Bool) {
-        if plan.rested { lastMessage = planRestMessage; return }
-        if !canJoinAnotherSite { lastMessage = planSiteCapMessage; return }
+        if plan.rested { return }
+        if !canJoinAnotherSite { return }
         guard let index = proposals.firstIndex(where: { $0.id == proposalID }),
               let site = site(id: proposals[index].siteID),
               proposals[index].status == .proposed else { return }
@@ -812,13 +785,11 @@ final class AppStore {
             save()
             return
         }
-        lastMessage = "Joining \(site.name) — I'll work it out on the live site and let you know if I need you."
         save()
         // Consent was the approval: the joining mission starts now, with no
         // second generic approval. Unknowns/bot checks still come back.
         // While paused the mission is drafted but never started.
         if isPaused {
-            lastMessage = "Saved for later — Hygge is paused, so joining \(site.name) will wait until you resume."
             return
         }
         let taskID = task.id
@@ -836,7 +807,6 @@ final class AppStore {
         appendChat(fromAgent: false, text: "I've added my \(request.siteName) login.")
         save()
         if isPaused {
-            lastMessage = "Saved for later — Hygge is paused, so joining \(request.siteName) will wait until you resume."
             return
         }
         if let request = tasks[index].help {
@@ -867,12 +837,11 @@ final class AppStore {
     }
 
     func findMoreProposals() {
-        guard !isPaused else { lastMessage = "Hygge is paused — resume and I'll look for more job sites."; return }
+        guard !isPaused else { return }
         let blocked = Set(accountStates.filter { $0.value.blocksSuggestions }.keys)
         let known = Set(proposals.map(\.siteID)).union(blocked)
         let extra = SiteProposals.generate(profile: profile, sites: sites.filter { !known.contains($0.id) })
         proposals.append(contentsOf: extra)
-        lastMessage = extra.isEmpty ? "No more sites to suggest right now — add any site by URL below." : "Added \(extra.count) more suggestion(s)."
         save()
     }
 
@@ -892,7 +861,6 @@ final class AppStore {
                 isRemote: false, requiredSkills: [], urlString: task.targetURLString,
                 isDemo: false), at: 0)
         }
-        lastMessage = "Your agent found live listings on \(siteName(id: task.siteID)) — they're at the top of your feed."
         save()
     }
 
@@ -1069,15 +1037,15 @@ final class AppStore {
 
     // MARK: - Sites & credentials
 
-    func addSite(name: String, urlOrDomain: String, category: OpportunityCategory) {
+    @discardableResult
+    func addSite(name: String, urlOrDomain: String, category: OpportunityCategory) -> String {
         guard let site = TargetSite.userAdded(name: name, urlOrDomain: urlOrDomain, category: category) else {
-            lastMessage = "That doesn't look like a valid site domain or URL."
-            return
+            return "That doesn't look like a valid site domain or URL."
         }
         sites.removeAll { $0.id == site.id }
         sites.append(site)
-        lastMessage = "Added \(site.name). Draft a browser task or open it in the cloud browser — the agent will learn this site as it goes."
         save()
+        return "Added \(site.name). Draft a browser task or open it in the cloud browser — the agent will learn this site as it goes."
     }
 
     /// The secret is sent once to the server vault; only the reference is kept.
@@ -1095,11 +1063,9 @@ final class AppStore {
             }
             credentialRefs.removeAll { $0.domain == cleanDomain }
             credentialRefs.append(ref)
-            lastMessage = "Login for \(cleanDomain) saved safely. This phone keeps no copy of the password."
             save()
             return true
         } catch {
-            lastMessage = "We couldn’t confirm that your login was saved. Enter your password again to retry."
             save()
             return false
         }
@@ -1111,13 +1077,9 @@ final class AppStore {
     func deleteCredential(id: UUID) async -> Bool {
         guard let ref = credentialRefs.first(where: { $0.id == id }) else { return true }
         guard await backend.deleteCredential(id: ref.id) else {
-            lastMessage = "We couldn’t confirm removal of your saved login. Please try again."
             return false
         }
         credentialRefs.removeAll { $0.id == ref.id }
-        lastMessage = sessionProfile(forDomain: ref.domain)?.hasProfile == true
-            ? "Saved login removed. The remembered sign-in for \(ref.domain) remains."
-            : "Saved login for \(ref.domain) removed."
         save()
         return true
     }
@@ -1209,7 +1171,6 @@ final class AppStore {
     func chooseHyggeEmailAddress() async {
         if let address = try? await backend.allocateHyggeEmailAddress() {
             hyggeEmailAddress = address
-            lastMessage = "Your Hygge email address is ready. Hygge can now handle signup mail for you."
             save()
         }
     }
@@ -1234,13 +1195,9 @@ final class AppStore {
     @discardableResult
     func deleteSessionProfile(domain: String) async -> Bool {
         guard await backend.deleteSessionProfile(domain: domain) else {
-            lastMessage = "We couldn’t confirm removal of the remembered sign-in. Please try again."
             return false
         }
         sessionProfileRefs.removeAll { $0.domain == domain }
-        lastMessage = credential(forDomain: domain) != nil
-            ? "Remembered sign-in for \(domain) forgotten. Your saved login remains."
-            : "Remembered sign-in for \(domain) forgotten."
         save()
         return true
     }
@@ -1254,7 +1211,7 @@ final class AppStore {
     }
 
     func draftApplication(for opportunity: Opportunity) {
-        if plan.rested { lastMessage = planRestMessage; return }
+        if plan.rested { return }
         var task = AgentTaskFactory.applyTask(profile: profile, opportunity: opportunity)
         attachCredential(&task)
         attachSkill(&task)
@@ -1263,7 +1220,6 @@ final class AppStore {
             applications.append(ApplicationRecord(opportunityID: opportunity.id,
                                                   siteID: opportunity.siteID, title: opportunity.title))
         }
-        lastMessage = "Browser task drafted with your cover letter. Approve it in Approvals to run it in the cloud browser."
         save()
     }
 
@@ -1275,18 +1231,17 @@ final class AppStore {
     func draftBrowserTask(site: TargetSite, goal: String, kind: AgentTaskKind = .discover) {
         // New searches rest at the free limit; work already under
         // way (other kinds) is untouched.
-        if kind == .discover, plan.rested { lastMessage = planRestMessage; return }
+        if kind == .discover, plan.rested { return }
         var task = AgentTaskFactory.customTask(site: site, goal: goal, kind: kind)
         attachCredential(&task)
         attachSkill(&task)
         tasks.append(task)
-        lastMessage = "Task drafted for \(site.name). The agent will explore it live from your goal; any memory hints are advisory."
         save()
     }
 
     func draftSignup(site: TargetSite) {
-        if plan.rested { lastMessage = planRestMessage; return }
-        if !canJoinAnotherSite { lastMessage = planSiteCapMessage; return }
+        if plan.rested { return }
+        if !canJoinAnotherSite { return }
         var task = hyggeEmailAddress.map {
             AgentTaskFactory.signupTask(profile: profile, site: site,
                                         emailChoice: .hygge, signupEmail: $0.address)
@@ -1360,7 +1315,7 @@ final class AppStore {
 
     @discardableResult
     func approveAndRun(taskID: UUID) async -> AgentTaskStatus? {
-        guard !isPaused else { lastMessage = "Hygge is paused. Resume from your profile when you're ready."; return nil }
+        guard !isPaused else { return nil }
         guard let index = tasks.firstIndex(where: { $0.id == taskID }), !runningTaskIDs.contains(taskID) else { return nil }
         let runAccountToken = backend.apiToken
         runningTaskIDs.insert(taskID)
@@ -1461,17 +1416,7 @@ final class AppStore {
             if task.status == .needsHuman, task.kind == .signup {
                 accountStates[task.siteID] = .needsVerification
             }
-            if task.needsChatHelp {
-                // A backend break is repaired silently; only a help request
-                // the user can act on gets announced here.
-                if task.helpIsActionable { lastMessage = "\(siteName(id: task.siteID)) needs your help in chat." }
-            } else if task.status == .succeeded {
-                lastMessage = "Finished: \(task.title)"
-            } else {
-                lastMessage = "Working on \(siteName(id: task.siteID))…"
-            }
         } catch {
-            lastMessage = "Couldn't run that task."
         }
         save()
         // A run that ends needing the user is the other first-
@@ -1483,7 +1428,7 @@ final class AppStore {
     /// Approve a batch of identical drafts. Runs in order and STOPS at the
     /// first one that does not complete, reporting exactly where and why.
     func approveBatch(taskIDs: [UUID]) async {
-        guard !isPaused else { lastMessage = "Hygge is paused. Resume from your profile when you're ready."; return }
+        guard !isPaused else { return }
         var sent = 0
         for taskID in taskIDs {
             guard let task = tasks.first(where: { $0.id == taskID }) else { continue }
@@ -1492,12 +1437,10 @@ final class AppStore {
                 sent += 1
             } else {
                 let why = status == .needsHuman ? "it needs your help" : "it didn't go through"
-                lastMessage = "Sent \(sent) of \(taskIDs.count). Stopped at “\(task.title)” — \(why). The rest are still waiting for your yes."
                 save()
                 return
             }
         }
-        lastMessage = sent == taskIDs.count ? "All \(sent) sent." : "Sent \(sent) of \(taskIDs.count)."
         save()
     }
 
@@ -1710,7 +1653,6 @@ final class AppStore {
 
     func stopWatching(siteID: String) {
         accountStates[siteID] = .stopped
-        lastMessage = "Stopped watching \(siteName(id: siteID)). I won't suggest or search it again unless you ask."
         save()
     }
 
@@ -1891,9 +1833,9 @@ final class AppStore {
         }
         let label = domain.split(separator: ".").first.map(String.init) ?? domain
         let name = label.prefix(1).uppercased() + label.dropFirst()
-        addSite(name: name, urlOrDomain: domain, category: profile.interests.first ?? .localGig)
+        let note = addSite(name: name, urlOrDomain: domain, category: profile.interests.first ?? .localGig)
         guard let site = sites.first(where: { $0.domain == domain }) else {
-            return lastMessage ?? "That doesn't look like a site address I can use."
+            return note
         }
         return joinSiteFromChat(site)
     }
@@ -2105,7 +2047,6 @@ final class AppStore {
         // Keep confirmed partial cleanup, but do not claim disconnection
         // until the remembered sign-in has also been removed.
         guard await deleteSessionProfile(domain: site.domain) else {
-            lastMessage = "We couldn’t finish disconnecting \(site.name). Some saved access may already be removed. Please try again."
             return false
         }
         proposals.removeAll { $0.siteID == siteID }
@@ -2115,7 +2056,6 @@ final class AppStore {
             try? tasks[index].reject()
         }
         accountStates[siteID] = .disconnected
-        lastMessage = "Disconnected \(site.name). Saved login deleted, drafts cleared, and I won't suggest it again."
         save()
         return true
     }
@@ -2333,7 +2273,6 @@ final class AppStore {
             let outcome = OfflineWritePolicy.outcome(reachable: false, requireCloud: BackendClient.requireCloud)
             if outcome == .failedUnreachable {
                 lastSyncError = "Couldn't reach Hygge just now, so that last change is only on this phone for now. It hasn't been saved anywhere else yet."
-                lastMessage = lastSyncError
             } else {
                 lastSyncError = "You're offline, so that last change is only on this phone for now."
             }

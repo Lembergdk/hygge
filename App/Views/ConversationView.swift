@@ -342,12 +342,8 @@ struct ConversationView: View {
     }
 
     /// The card's feed item vanished between render and tap: close
-    /// the chat so Home can say so in one line. The note is a
-    /// routing fallback, so Home scrolls to the top and closes the
-    /// chat bubble first — in the bubble host dismiss() is a no-op
-    /// and the open bubble would otherwise cover the note.
+    /// the chat.
     private func missingContext() {
-        store.setRoutingNote("That one is already sorted. Everything waiting for you is below.")
         dismiss()
     }
 
